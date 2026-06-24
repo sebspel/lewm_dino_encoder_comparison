@@ -216,3 +216,20 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Secrets
+.env
+
+# Experiment tracking and wandb outputs
+wandb/
+outputs/
+multirun/
+.hydra/
+
+# Model artifacts (large, device-specific)
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.plan
