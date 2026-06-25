@@ -28,8 +28,9 @@ cannot be read yet — Phase 1 installs it and reads it before any wiring (CLAUD
 platform config, never guessed.
 
 **Execution model (confirmed).** The **L40S is the only execution target**; local
-WSL is for editing only. Every run command is `docker compose run app …` on the
-L40S. All five SPEC requirement bundles are covered below as phases; near-term
+WSL is for editing only. Every run command is `uv run …` on the L40S RunPod pod
+(provisioned by `setup.sh`; RunPod can't build images in-pod). All five SPEC
+requirement bundles are covered below as phases; near-term
 phases are detailed, GPU- and owner-gated steps are marked.
 
 **Legend.** 🟢 CLAUDE-CODE owns (fails loud). 🔴 OWNER-ONLY — STOP and ask before
@@ -40,24 +41,27 @@ Boundaries"). 🖥️ runs on the L40S GPU. ⏱️ hard-capped effort with a sta
 
 ## Phase 0 — Scaffolding & pinned dependencies  🟢
 
-Stand up the container and dependency layer so everything else runs reproducibly on
-the L40S. No model code.
+Stand up the dependency layer so everything else runs reproducibly on the L40S RunPod
+pod. No model code. RunPod pods cannot build Docker images in-pod (no Docker daemon),
+so dev provisions the environment with a **pod-bootstrap setup script** instead of a
+locally-built image; a Docker image is composed once at the very end, for reproducibility.
 
 - [ ] `pyproject.toml` + `uv.lock` pinning: `stable-worldmodel`, `stable-pretraining`,
-  `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`,
-  `timm`, `peft`, `bitsandbytes`. **Torch AND TensorRT come from the base image** —
-  configure uv not to reinstall either (mark as provided / constraint). Do **not** pin
-  `tensorrt` in uv: the NGC image's bundled, CUDA-matched TRT must win, or pip's TRT
-  pulls conflicting `libnvinfer`/CUDA libs. Pin versions (APIs shift between minors).
-- [ ] `Dockerfile` on the **NGC PyTorch image** (`nvcr.io/nvidia/pytorch:<tag>`, which
-  bundles a matched TensorRT) whose CUDA ≤ the L40S driver (`nvidia-smi` on host).
-- [ ] `docker-compose.yml`: single `app` service handling all roles by entrypoint
-  command; mounts `data/ checkpoints/ exports/` as volumes (never baked in); passes
-  `WANDB_API_KEY` / `HF_TOKEN` from runtime env. `.dockerignore`.
+  `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`, `timm`,
+  `peft`, `bitsandbytes`, and **torch (cu124 wheel index)** — all uv-managed. **TensorRT
+  is NOT in uv** (installed by the setup script); pinning it in uv would pull a
+  conflicting `libnvinfer`/CUDA stack. Pin versions (APIs shift between minors).
+- [ ] `setup.sh` — pod bootstrap, idempotent, run on each pod load: installs **uv**,
+  runs `uv sync` (torch cu124 + the rest from the lock), then installs **TensorRT
+  (cu12, CUDA-12.4-compatible)** outside the lock — matching CUDA 12.4 to RunPod is how
+  the bundled-vs-pinned conflict the NGC image used to avoid is avoided here. Secrets
+  (`WANDB_API_KEY` / `HF_TOKEN`) come from the pod's runtime env.
 - [ ] Skeleton dirs: `conf/` (Hydra), `tests/` (pytest).
+- [ ] **Deferred to project end:** `Dockerfile` + `docker-compose.yml` (reproducibility
+  image only, built off-pod) — not part of the dev loop.
 
-**Verify:** `docker build` succeeds; `docker compose run app uv sync`;
-`docker compose run app python -c "import stable_worldmodel, stable_pretraining, tensorrt, peft"`.
+**Verify (on the pod):** `bash setup.sh` succeeds; `uv run python -c "import
+stable_worldmodel, stable_pretraining, tensorrt, peft, torch"`; `uv run pytest -v`.
 
 ---
 
@@ -98,9 +102,9 @@ rebuild it.
   predictor — SPEC §Boundaries / CLAUDE.md §8).
 - [ ] 🔴 `conf/` **DINOv3 encoder config** for `prejepa.py` (DINOv2→DINOv3 model
   string; dims **read from config**, not guessed). Owner confirms it slots in cleanly.
-- [ ] 🖥️ Train LeWM: `docker compose run app python -m scripts.train.lewm`
+- [ ] 🖥️ Train LeWM: `uv run python -m scripts.train.lewm`
   → `checkpoints/lewm/`.
-- [ ] 🖥️ Train DINOv3-WM: `docker compose run app python -m scripts.train.prejepa backbone=dinov3`
+- [ ] 🖥️ Train DINOv3-WM: `uv run python -m scripts.train.prejepa backbone=dinov3`
   → `checkpoints/dino/`.
 - [ ] ⏱️ **Hard cap on scratch-LeWM training**; fallback = reference LeWM
   hyperparameters. Surface on approaching the cap; don't iterate silently.
@@ -149,8 +153,8 @@ dummy/random weights. Keep it strict.
   jaxtyping + beartype assertions at **every owned boundary**.
 - [ ] `tests/` covering the adapter shapes and the typed boundaries.
 
-**Verify:** `docker compose run app python -m src.smoke` passes;
-`docker compose run app pytest -v` green; a shape/precision violation actually raises.
+**Verify:** `uv run python -m src.smoke` passes;
+`uv run pytest -v` green; a shape/precision violation actually raises.
 
 ---
 
@@ -173,7 +177,7 @@ so no speed figure stands without its task-quality counterpart. (Matches SPEC §
 and `src/interfaces.py`.)
 
 - [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, **FP32→FP16→INT8**, per model:
-  `docker compose run app python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`.
+  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`.
   ONNX/TRT export debugging, INT8 **calibration set + procedure**, and FP32/FP16/INT8
   **precision matching** are OWNER-ONLY — STOP and ask.
 - [ ] 🖥️ **Per-component profiling** — profile **encoder, predictor, and planner (CEM)
@@ -214,7 +218,7 @@ Reported **against the frozen baseline**, never from the outset.
 - [ ] 🔴 **OWNER specifies QLoRA targeting:** which DINOv3 modules, rank, what stays
   frozen. Claude owns only the training-loop wiring.
 - [ ] 🖥️ QLoRA fine-tune the DINOv3 backbone on Push-T (`peft` + `bitsandbytes`):
-  `docker compose run app python -m src.qlora`. The **predictor is unfrozen and
+  `uv run python -m src.qlora`. The **predictor is unfrozen and
   co-trained** (not held fixed) so it tracks the shifting backbone latents — avoids the
   representation-drift mismatch a frozen predictor would suffer. Confirm adapters target
   **real** modules (introspect, don't assume).
@@ -235,7 +239,8 @@ to W&B; adapter target modules confirmed real.
   `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
 - `conf/` — Hydra configs incl. the DINOv3 encoder config (COMMITTED).
 - `scripts/train/lewm.py`, `scripts/train/prejepa.py` — platform entrypoints, as used.
-- `pyproject.toml`, `uv.lock`, `Dockerfile`, `docker-compose.yml`, `.dockerignore`.
+- `pyproject.toml`, `uv.lock`, `setup.sh` (pod bootstrap). `Dockerfile` +
+  `docker-compose.yml` are composed at project end (reproducibility image, off-pod).
 - `tests/` — pytest for the owned boundaries.
 
 ## Cross-cutting rules (from CLAUDE.md / SPEC)
@@ -250,7 +255,7 @@ to W&B; adapter target modules confirmed real.
 
 ## End-to-end verification
 
-1. `docker build` + `docker compose run app uv sync` + import check (Phase 0).
+1. `bash setup.sh` (uv + deps + TensorRT) + import check (Phase 0).
 2. Platform API introspection in-container; DINOv3 `config.hidden_size`/
    `last_hidden_state` confirmed (Phase 1).
 3. Two checkpoints + W&B runs (Phase 2); both-track success-rate + latency under

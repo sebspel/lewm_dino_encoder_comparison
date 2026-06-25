@@ -4,11 +4,12 @@ version = "0.0.0"
 description = "Inference-optimization (PyTorch->ONNX->TensorRT) & QLoRA study over stable-worldmodel's LeWM vs DINOv3-WM"
 requires-python = ">=3.10"
 
-# The owned dependency layer only. Torch AND TensorRT are intentionally ABSENT:
-# they are provided by the NGC PyTorch base image (a CUDA-matched, tuned build).
-# Listing `tensorrt` here would let pip pull a conflicting libnvinfer/CUDA stack;
-# listing `torch` would let uv shadow the NGC build. See the Dockerfile.
+# The owned dependency layer, uv-managed. torch is pinned to the CUDA 12.4 (cu124)
+# wheel index to match the RunPod pod's CUDA 12.4. TensorRT is intentionally ABSENT:
+# it is installed by setup.sh (cu12, CUDA-12.4-compatible) on pod start and kept out
+# of the lock so it can't pull a conflicting libnvinfer/CUDA stack.
 dependencies = [
+    "torch",
     "stable-worldmodel",
     "stable-pretraining",
     "hydra-core",
@@ -27,10 +28,19 @@ dev = [
     "pytest",
 ]
 
+[tool.uv]
+# Not an installable package; run modules via `uv run python -m src.<...>`.
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+# torch from the CUDA 12.4 wheel index (matches RunPod's CUDA 12.4).
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
 [tool.pytest.ini_options]
 # Run modules/tests from the repo root (`python -m src.*`, `from src import ...`).
 pythonpath = ["."]
-
-# Exact pins live in uv.lock, which is generated IN-CONTAINER (`uv lock`) against
-# the NGC environment so torch/TensorRT resolve to the bundled builds. It is not
-# generated on the editing host, where those builds are absent.

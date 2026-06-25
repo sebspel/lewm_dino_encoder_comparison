@@ -53,16 +53,19 @@ contribution is the optimization + QLoRA layer above.
 - Python 3.10+ (stable-worldmodel / jaxtyping requirement)
 - **`stable-worldmodel`** (`pip install stable-worldmodel`) + `stable-pretraining` —
   training, env, CEM, eval. Pin the version (`uv.lock`); APIs change between minor versions.
-- Base image: the **NGC PyTorch image** (`nvcr.io/nvidia/pytorch:<tag>`, bundles a
-  CUDA-matched TensorRT) whose CUDA is <= the L40S driver (check `nvidia-smi`).
-- **uv** for dependency management — `pyproject.toml` + `uv.lock` committed.
-  Torch **and TensorRT** are provided by the NGC base image; configure uv not to
-  reinstall them (do not pin `tensorrt` in uv — the bundled TRT must win).
+- Runtime: a **RunPod L40S pod** on a **CUDA 12.4** base. RunPod pods cannot build
+  Docker images in-pod (no Docker daemon), so dependencies install at pod start via
+  `setup.sh`, not from a locally-built image.
+- **uv** for dependency management — `pyproject.toml` + `uv.lock` committed. **torch**
+  is uv-managed from the **cu124** wheel index (matches the pod's CUDA 12.4). **TensorRT**
+  is installed by `setup.sh` (cu12, CUDA-12.4-matched) and kept OUT of uv (do not pin
+  `tensorrt` in uv) so it can't pull a conflicting `libnvinfer`/CUDA stack.
 - Hydra (config — the platform uses it), Weights & Biases (logging)
 - jaxtyping + beartype (contracts for the owned export/QLoRA boundaries, runtime-checked)
-- onnx (export stage); TensorRT from the base image (the export/benchmark stage)
+- onnx (export stage); TensorRT installed by `setup.sh` (the export/benchmark stage)
 - transformers / timm (DINOv3 + ViT-Tiny backbones), peft / bitsandbytes (QLoRA)
-- Docker + docker-compose
+- Docker + docker-compose — **reproducibility image composed at project end, off-pod;
+  not part of the dev loop**
 
 ---
 
@@ -73,8 +76,9 @@ contribution is the optimization + QLoRA layer above.
   hardware doesn't affect results; one image, one host.
 - **TensorRT engines built locally on the L40S** — engines are architecture-specific
   and disposable; regenerate from the export script (gitignored).
-- **Build the image locally** (`docker build`); no registry required. `data/`,
-  `checkpoints/`, `exports/` live on local mounted volumes — never baked in.
+- **No in-pod image build** (RunPod has no Docker daemon): dev runs directly on the pod
+  via `setup.sh` + `uv run`; a reproducibility image is composed at the end, off-pod.
+  `data/`, `checkpoints/`, `exports/` live on the pod's persistent volume — never committed.
 - **Datasets:** the official Push-T data is loaded via the platform; it can stream
   from HF object storage (no local download needed) or cache to the data volume.
 - **Secrets** (`WANDB_API_KEY`, `HF_TOKEN` if needed) passed at runtime via env.
@@ -84,16 +88,16 @@ contribution is the optimization + QLoRA layer above.
 ## Commands
 
 Training/eval use the platform's entrypoints; the owned layer adds export/benchmark.
-Run via compose; a single service (`app`) handles all roles by entrypoint command.
+Run on the pod via `uv run`; `setup.sh` provisions the environment (uv + deps + TensorRT).
 
-- Train LeWM:        `docker compose run app python -m scripts.train.lewm`
-- Train DINOv3-WM:   `docker compose run app python -m scripts.train.prejepa backbone=dinov3`
+- Train LeWM:        `uv run python -m scripts.train.lewm`
+- Train DINOv3-WM:   `uv run python -m scripts.train.prejepa backbone=dinov3`
 - Evaluate (MPC):    via the platform's `World.evaluate` (CEM solver)
-- Export/benchmark:  `docker compose run app python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
-- QLoRA tune:        `docker compose run app python -m src.qlora`
-- Smoke (tracer bullet): `docker compose run app python -m src.smoke`
+- Export/benchmark:  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
+- QLoRA tune:        `uv run python -m src.qlora`
+- Smoke (tracer bullet): `uv run python -m src.smoke`
 
-Inside the container: `uv sync`, `pytest -v`.
+On the pod: `bash setup.sh`, then `uv run pytest -v`.
 
 ---
 
@@ -106,6 +110,7 @@ Inside the container: `uv sync`, `pytest -v`.
 - `data/`         — Push-T dataset cache (GITIGNORED, mounted volume or HF stream)
 - `checkpoints/`  — trained weights, `lewm/` vs `dino/` (GITIGNORED, mounted volume)
 - `exports/`      — ONNX / TensorRT artifacts (GITIGNORED, built on L40S)
+- `setup.sh`     — pod bootstrap: uv + deps + TensorRT, run on each pod load (COMMITTED)
 - `pyproject.toml`, `uv.lock` — dependency pins (COMMITTED)
 - `PLAN.md`       — generated from this spec; carries progress + artifact links
 
