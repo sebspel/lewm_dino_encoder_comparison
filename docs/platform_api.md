@@ -120,9 +120,11 @@ minimum:
 - `patch_size=16` (DINOv3 ViT-S/16, **not** the dinov2 default of 14) — otherwise
   `num_patches=(224//14)²=256`, silently wrong.
 
-⚠️ The PLAN's literal command `prejepa backbone=dinov3` does **not** map to anything —
-there is no `backbone=` config group; it is `backbone.name`/`backbone.type` overrides
-(or a new `conf/` group we add in Phase 2).
+⚠️ **RESOLVED in PLAN/SPEC (2026-06-26):** the original literal command
+`prejepa backbone=dinov3` does **not** map to anything — there is no `backbone=` config
+group. Corrected to `backbone.name=dinov3_small backbone.type=dinov3_small patch_size=16`
+(or a new `conf/` group we add in Phase 2). The register slice is applied via a `PreJEPA`
+subclass in `src/` (§6), not by editing the wheel.
 
 ---
 

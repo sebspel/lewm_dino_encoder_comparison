@@ -1,0 +1,11 @@
+# @package _global_
+# LeWM track overlay (Phase 2). The vendored scripts/train/config/lewm.yaml runs the
+# reference scratch ViT-Tiny + SIGReg config unchanged; this overlay only enables W&B:
+#   uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm
+#
+# entity: null uses the logged-in account's default entity (or $WANDB_ENTITY).
+wandb:
+  enabled: true
+  config:
+    entity: null
+    project: lewm-dino-encoder-comparison

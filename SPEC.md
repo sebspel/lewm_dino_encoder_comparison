@@ -37,7 +37,11 @@ contribution is the optimization + QLoRA layer above.
   and closed-loop MPC evaluation come from the package. Do not reimplement them.
 - **DINOv3-WM = `prejepa.py` with a DINOv3 encoder.** The backbone is config-injected
   and frozen (`encoder.eval(); requires_grad_(False)`), so the DINOv3 track is a
-  config change (DINOv2->DINOv3 model string), not new model code. **Always DINOv3,
+  config override (DINOv2->DINOv3 model string + `patch_size=16`) plus **one
+  owner-approved encode-path override**: a `PreJEPA` subclass that drops CLS + the 4
+  register tokens (`last_hidden_state[:, 5:, :]`) to expose the true 196-patch grid
+  (Phase-1 §6). No predictor/SIGReg changes, and the platform wheel is not edited — the
+  override lives in `src/` and is imported by the vendored train + eval entrypoints. **Always DINOv3,
   never DINOv2:** the DINO-WM paper and the platform's `prejepa.py` both default to
   DINOv2 — this project overrides the encoder to DINOv3 wherever DINO-WM is referenced;
   the wiring is otherwise identical (dims differ and are read from config). Verify
@@ -98,8 +102,8 @@ contribution is the optimization + QLoRA layer above.
 Training/eval use the platform's entrypoints; the owned layer adds export/benchmark.
 Run on the pod via `uv run`; `setup.sh` provisions the environment (uv + deps + TensorRT).
 
-- Train LeWM:        `uv run python -m scripts.train.lewm`
-- Train DINOv3-WM:   `uv run python -m scripts.train.prejepa backbone=dinov3`
+- Train LeWM:        `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm`
+- Train DINOv3-WM:   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3`
 - Evaluate (MPC):    via the platform's `World.evaluate` (CEM solver)
 - Export/benchmark:  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
 - QLoRA tune:        `uv run python -m src.qlora`

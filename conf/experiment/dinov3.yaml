@@ -1,0 +1,25 @@
+# @package _global_
+# DINOv3-WM track overlay (Phase 2). Composed on top of the vendored
+# scripts/train/config/prejepa.yaml (which defaults to DINOv2) via:
+#   uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3
+#
+# Three deltas vs the platform/paper DINOv2 default (docs/platform_api.md §4, §6):
+#   1. backbone -> dinov3_small (ViT-S/16, the only v3 alias at swm 0.1.1).
+#   2. patch_size 14 -> 16: DINOv3 is /16, so this also drives the config-derived
+#      num_patches = (224//16)**2 = 196. Leaving it at 14 yields 256 — silently wrong.
+#   3. model._target_ -> the register-aware encode subclass (drops CLS + 4 registers
+#      so the grid is the true 196 patches the predictor is sized for).
+backbone:
+  name: dinov3_small
+  type: dinov3_small
+patch_size: 16
+model:
+  _target_: src.dino_patch.DINOv3PreJEPA
+# Enable W&B (the vendored launcher/local.yaml defaults it off). entity: null uses the
+# logged-in account's default entity (or $WANDB_ENTITY) — not hard-coded here. Only
+# these keys are overridden; name/id/resume/log_model merge from launcher/local.yaml.
+wandb:
+  enabled: true
+  config:
+    entity: null
+    project: lewm-dino-encoder-comparison

@@ -113,20 +113,38 @@ dims written to `docs/platform_api.md` and owner-confirmed.
 Produce the two reference checkpoints. Training is the platform's — wire to it, don't
 rebuild it.
 
-- [ ] Vendor `scripts/train/lewm.py` and `scripts/train/prejepa.py` as used; wire
-  Hydra + W&B around them (no changes to SIGReg, the scratch encoder, or the
-  predictor — SPEC §Boundaries / CLAUDE.md §8).
-- [ ] 🔴 `conf/` **DINOv3 encoder config** for `prejepa.py` — override the model string
-  from the **DINOv2** default to **DINOv3** (the only change vs the platform/paper
-  config; dims **read from config**, not guessed). Owner confirms it slots in cleanly.
-- [ ] 🖥️ Train LeWM: `uv run python -m scripts.train.lewm`
+- [ ] Vendor `scripts/train/lewm.py` and `scripts/train/prejepa.py` (GitHub tag
+  `0.1.1`, not shipped in the wheel — record provenance) as used; wire Hydra + W&B
+  around them. **SIGReg, the scratch encoder, and the predictor stay untouched** —
+  the *only* core-path change is the owner-approved DINOv3 register slice, applied via
+  subclass (next item), not by editing the platform wheel (SPEC §Boundaries / CLAUDE.md §8).
+- [ ] 🔴 **DINOv3 encoder config + register-slice subclass** for `prejepa.py`
+  (owner-approved, Phase-1 §6) — *wiring done; on-pod slot-in confirmation pending*:
+  - `conf/experiment/dinov3.yaml` overlay (composed via `--config-dir conf +experiment=dinov3`):
+    `backbone.name/type=dinov3_small`, **`patch_size=16`** (DINOv2 default 14 → silently
+    wrong `num_patches=256`). Dims **read from config**; `num_patches=(224//16)²=196`.
+  - `src/dino_patch.py::DINOv3PreJEPA` — `PreJEPA` subclass overriding `_encode_image`'s
+    `last_hidden_state[:, 1:, :]` (CLS-only) → `[:, 1+num_reg:, :]` (drop CLS + 4
+    registers → true 196-patch grid), injected via `model._target_`. Platform wheel +
+    vendored entrypoints stay pristine; a shape mismatch now throws (loud) instead of
+    misaligning the mask (silent). Same subclass to be reused by Phase-3 eval.
+    Owner confirms it slots in cleanly **on the pod** (import + one forward).
+- [ ] **Pre-flight before any GPU run:** Push-T dataset resolves and one batch streams
+  via HF (`HF_TOKEN` from pod env) — catch an auth/stream failure before committing L40S hours.
+- [ ] 🖥️ Train LeWM:
+  `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm`
   → `checkpoints/lewm/`.
-- [ ] 🖥️ Train DINOv3-WM: `uv run python -m scripts.train.prejepa backbone=dinov3`
+- [ ] 🖥️ Train DINOv3-WM:
+  `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3`
   → `checkpoints/dino/`.
-- [ ] ⏱️ **Hard cap on scratch-LeWM training**; fallback = reference LeWM
-  hyperparameters. Surface on approaching the cap; don't iterate silently.
+- [ ] ⏱️ **Hard cap on scratch-LeWM training** (DINOv3's backbone is frozen — cap applies
+  to LeWM only). Cap budget **deferred — decide at train time**: surface live when
+  training approaches a sensible wall-clock budget rather than pre-committing a number;
+  on overrun, **accept the last logged checkpoint** (Phase-3 SR judges quality). Don't
+  iterate silently.
 
-**Verify:** two checkpoints exist; both W&B runs logged (URLs recorded here).
+**Verify:** two checkpoints exist; both W&B runs logged (URLs recorded here); a quick
+encode sanity confirms the Phase-1 latent dims (LeWM `(B, 192)`, DINO-WM `(B, 196, 384)`).
 **Log-before-delete:** never overwrite a checkpoint/run without confirming it's in
 W&B or committed (CLAUDE.md §7).
 
