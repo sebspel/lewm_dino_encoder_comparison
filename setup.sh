@@ -66,3 +66,27 @@ if [ -z "${WANDB_API_KEY:-}" ]; then
 else
   echo "WANDB_API_KEY is set."
 fi
+
+# 7) persistent storage: STABLEWM_HOME is the platform's cache root — datasets land in
+#    $STABLEWM_HOME/datasets and checkpoints in $STABLEWM_HOME/checkpoints/<run_name>/
+#    (stable_worldmodel.wm.utils.save_pretrained). It defaults to ~/.stable_worldmodel,
+#    which on RunPod is the EPHEMERAL container fs — a multi-hour run's checkpoints are
+#    lost on pod restart. Point it at the persistent network volume (RunPod mounts it at
+#    /workspace). Set it in the pod's runtime env so every shell inherits it; this step
+#    validates + creates the dirs, mirroring the secret checks above (warns, never aborts).
+if [ -z "${STABLEWM_HOME:-}" ]; then
+  echo "WARNING: STABLEWM_HOME is not set. Datasets + checkpoints default to" >&2
+  echo "         ~/.stable_worldmodel on the ephemeral container fs and are LOST on pod" >&2
+  echo "         restart. Point it at the network volume, e.g.:" >&2
+  echo "             export STABLEWM_HOME=/workspace/.stablewm" >&2
+  echo "         (set as a RunPod env var so training/eval shells inherit it.)" >&2
+else
+  case "$STABLEWM_HOME" in
+    "$HOME" | "$HOME"/*)
+      echo "WARNING: STABLEWM_HOME=$STABLEWM_HOME is under \$HOME (ephemeral on RunPod)." >&2
+      echo "         Point it at the network volume, e.g. /workspace/.stablewm." >&2
+      ;;
+  esac
+  mkdir -p "$STABLEWM_HOME/datasets" "$STABLEWM_HOME/checkpoints"
+  echo "STABLEWM_HOME=$STABLEWM_HOME (datasets + checkpoints persist here)."
+fi

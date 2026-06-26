@@ -15,6 +15,10 @@ backbone:
 patch_size: 16
 model:
   _target_: src.dino_patch.DINOv3PreJEPA
+# Checkpoints land in $STABLEWM_HOME/checkpoints/<output_model_name>/. Override the
+# vendored default (pusht_dinov3_small_psmall) to a clean `dino` so it matches the PLAN
+# path; this also names the W&B run.
+output_model_name: dino
 # Enable W&B (the vendored launcher/local.yaml defaults it off). entity: null uses the
 # logged-in account's default entity (or $WANDB_ENTITY) — not hard-coded here. Only
 # these keys are overridden; name/id/resume/log_model merge from launcher/local.yaml.
@@ -23,7 +27,11 @@ wandb:
   config:
     entity: null
     project: lewm-dino-encoder-comparison
-# Pinned to match the LeWM track (already the vendored prejepa.yaml default of 10);
-# stated explicitly so the 10-epoch parity between tracks is self-documenting.
+# DINO-WM paper training hyperparameters, emulated despite the DINOv2->DINOv3 encoder
+# swap (a slight, accepted mismatch — we use the DINO-WM training recipe anyway):
+# 100 epochs, batch size 32. (Vendored prejepa.yaml defaults are max_epochs=10 /
+# batch_size=32, so in effect only the epoch count changes.) batch_size is a top-level
+# key in prejepa.yaml.
 trainer:
-  max_epochs: 10
+  max_epochs: 100
+batch_size: 32

@@ -96,3 +96,9 @@ stable-worldmodel / stable-pretraining are young, fast-moving libraries — your
 training-data knowledge of them may be stale. Read their real API from the installed
 source (.venv/...) and scripts/train/*.py before wiring to it. When unsure, read the
 source or ask — never call a platform method from memory.
+
+## 11. Plan vs Spec Separation
+`PLAN.md` carries execution steps only — ordered checkboxes, commands, file paths, owner
+gates, and verify criteria. Rationale, justification, and design reasoning belong in
+`SPEC.md` (and `docs/`), never in `PLAN.md`. Keep PLAN steps terse; if a "why" is worth
+recording, put it in `SPEC.md` and reference it from PLAN if needed.

@@ -1,6 +1,8 @@
 # @package _global_
-# LeWM track overlay (Phase 2). The vendored scripts/train/config/lewm.yaml runs the
-# reference scratch ViT-Tiny + SIGReg config unchanged; this overlay only enables W&B:
+# LeWM track overlay (Phase 2). Enables W&B and pins the training hyperparameters to the
+# LeWM paper values. This is an inference/optimisation study, so we emulate the original
+# papers' training setup as closely as we can; these override the vendored platform
+# defaults where they differ.
 #   uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm
 #
 # entity: null uses the logged-in account's default entity (or $WANDB_ENTITY).
@@ -9,7 +11,10 @@ wandb:
   config:
     entity: null
     project: lewm-dino-encoder-comparison
-# Match the DINOv3 track's epoch budget (10) for a like-for-like comparison; the
-# vendored lewm.yaml default is 100. Overridden here, not in the vendored config.
+# LeWM paper training hyperparameters: 10 epochs, batch size 128. (Vendored lewm.yaml
+# default is max_epochs=100; batch_size is already 128 — pinned here so the setup is
+# explicit.) Keys: trainer.max_epochs, loader.batch_size.
 trainer:
   max_epochs: 10
+loader:
+  batch_size: 128

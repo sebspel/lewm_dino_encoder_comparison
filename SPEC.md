@@ -90,10 +90,16 @@ contribution is the optimization + QLoRA layer above.
   and disposable; regenerate from the export script (gitignored).
 - **No in-pod image build** (RunPod has no Docker daemon): dev runs directly on the pod
   via `setup.sh` + `uv run`; a reproducibility image is composed at the end, off-pod.
-  `data/`, `checkpoints/`, `exports/` live on the pod's persistent volume — never committed.
+  Datasets, checkpoints, and exports live on the pod's **persistent network volume**
+  (RunPod mounts it at `/workspace`) — never committed.
+- **Persistent root (`STABLEWM_HOME`):** the platform caches everything under this root —
+  datasets in `$STABLEWM_HOME/datasets`, checkpoints in `$STABLEWM_HOME/checkpoints/<run_name>/`
+  (`save_pretrained`). It defaults to `~/.stable_worldmodel` on the **ephemeral** container
+  fs, so it MUST be set to the network volume (e.g. `STABLEWM_HOME=/workspace/.stablewm`)
+  or a multi-hour run's checkpoints are lost on pod restart. `setup.sh` validates it.
 - **Datasets:** the official Push-T data is loaded via the platform; it can stream
-  from HF object storage (no local download needed) or cache to the data volume.
-- **Secrets** (`WANDB_API_KEY`, `HF_TOKEN` if needed) passed at runtime via env.
+  from HF object storage (no local download needed) or cache under `$STABLEWM_HOME/datasets`.
+- **Secrets / runtime env** (`WANDB_API_KEY`, `HF_TOKEN` if needed, `STABLEWM_HOME`) passed at runtime via env.
 
 ---
 
@@ -166,9 +172,12 @@ dims are read from its config, not re-guessed.
   enforced by the platform's eval; confirm they are not varied between tracks.
 - **Matched export/benchmark conditions:** both models exported and benchmarked at
   the **same precision** on the **same L40S** under the **same fixed wall-clock time
-  budget**, same env/goal. Within that budget we compare per-step inference latency
-  (**p50 and p95**) and the **number of CEM rollouts completed** — rollout count is the
-  intended degree of freedom; the only other difference is the model itself. **Every
+  budget**, same env/goal, and the **same shared inference batch size**. Within that
+  budget we compare per-step inference latency (**p50 and p95**) and the **number of CEM
+  rollouts completed** — rollout count is the intended degree of freedom; the only other
+  difference is the model itself. **Training batch size is deliberately per-paper-
+  asymmetric (LeWM 128, DINO-WM 32) and does not carry into inference** — that asymmetry
+  belongs to the emulated training recipes, not the benchmark. **Every
   speed figure is reported with its SR**, and per-model FP16/INT8 results quote the
   **SR and latency degradation relative to FP32** (a precision that is faster but
   degrades task quality must be visible, not hidden behind throughput).
@@ -236,10 +245,10 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
 
 ## Execution Rules
 
-- **Hard caps.** The two highest-risk efforts — the TensorRT/INT8 export
-  (unsupported-op failures, fiddly calibration) and, if it overruns, scratch-LeWM
-  training — are time-capped with explicit fallbacks (FP16-only; reference LeWM
-  hyperparameters). Surface when approaching a cap rather than iterating silently.
+- **Hard caps.** The TensorRT/INT8 export (unsupported-op failures, fiddly calibration)
+  is time-capped with an explicit fallback (FP16-only); surface when approaching the cap
+  rather than iterating silently. Training is bounded by a fixed **epoch budget** (LeWM 10,
+  DINO-WM 100), not a wall-clock cap.
 - **Lean on the platform; don't reimplement it.** If a need looks like training,
   env, CEM, or eval, it's the platform's — wire to it, don't rebuild it.
 - **Tracer bullet is the sole pre-optimization integration check.** Keep it strict —
