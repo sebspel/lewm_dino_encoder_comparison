@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "torch",
     "stable-worldmodel",
+    "imageio",
     "stable-pretraining",
     "hydra-core",
     "wandb",
