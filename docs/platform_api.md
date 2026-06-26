@@ -57,20 +57,24 @@ if hasattr(pixels_embed, 'last_hidden_state'):
 
 ---
 
-## 2. Dims (⟨runtime-confirm⟩ on the pod; 🔴 OWNER to sign off)
+## 2. Dims — runtime-confirmed on the L40S pod (2026-06-26) ✓
 
 DINOv3 alias available at 0.1.1 (`wm/prejepa/module.py :: BACKBONE_ALIASES`):
 `dinov3_small -> facebook/dinov3-vits16-pretrain-lvd1689m` (**ViT-S/16, the only v3 alias**).
 
-| Quantity | Value | Source / note |
+All values below verified by instantiating the real encoders + PushT env on the pod
+(`create_backbone("dinov3_small")`, `vit_hf(size="tiny", ...)`, `gym.make("swm/PushT-v1")`).
+
+| Quantity | Value | Source / confirmation |
 |---|---|---|
-| `ACTION_DIM` (env) | **2** | PushT xy. ⟨confirm `swm/PushT-v1` `action_space == Box(2,)`⟩ |
-| LeWM `LATENT_DIM` | **192** | `embed_dim` config = ViT-Tiny hidden. ⟨confirm `vit_hf(tiny)` hidden==192⟩ |
-| DINOv3 `D` (hidden_size) | **384** | ViT-S. ⟨confirm `encoder.config.hidden_size`⟩ |
-| DINOv3 true patches | **196** | (224/16)² at the real patch size 16 |
-| DINOv3 register tokens | **4 ⟨confirm⟩** | DINOv3 prepends registers; ViT-S/16 ckpt is 4 |
-| `last_hidden_state` length | **201** | 1 CLS + 4 reg + 196 patch ⟨confirm⟩ |
-| **Resolved `N_patches`** | **196** | OWNER: slice CLS **and** registers (see §6); true patch grid |
+| `ACTION_DIM` (env) | **2** | `swm/PushT-v1` `action_space == Box(-1.0, 1.0, (2,), float32)` ✓ |
+| LeWM `LATENT_DIM` | **192** | `vit_hf(tiny).config.hidden_size == 192`; CLS token `(1, 192)` ✓ |
+| DINOv3 `D` (hidden_size) | **384** | `encoder.config.hidden_size == 384` ✓ |
+| DINOv3 patch size | **16** | `encoder.config.patch_size == 16` ✓ |
+| DINOv3 true patches | **196** | (224/16)² ✓ |
+| DINOv3 register tokens | **4** | `encoder.config.num_register_tokens == 4` ✓ |
+| `last_hidden_state` length | **201** | `(1, 201, 384)` = 1 CLS + 4 reg + 196 patch ✓ |
+| **Resolved `N_patches`** | **196** | OWNER: slice CLS **and** registers (§6) → true 196-patch grid ✓ |
 | predictor token dim | **404** | `hidden(384) + proprio(10) + action(10)`; extras from `wm.encoding` |
 
 `scripts/train/prejepa.py` sizes the predictor **from config, not from the encoder
@@ -157,7 +161,7 @@ accordingly (SPEC §Parity). Export boundary is confirmed: `eval_wm.py` `torch.c
    `_encode_image`'s `last_hidden_state[:, 1:, :]` → `[:, 1+num_reg:, :]`, and set the
    config `num_patches=196`, `patch_size=16`. Must apply to **both** training and eval
    so the predictor is trained on the same 196-token grid it plans over.
-   ⟨runtime-confirm `num_reg` on the pod before committing the slice.⟩
+   `num_reg == 4` confirmed on the pod → slice is `[:, 5:, :]` (1 CLS + 4 reg).
 2. **Dims to hard-code in Phase 4** (after one-shot pod confirmation of `hidden_size`,
    `num_reg`, `vit_hf(tiny)` dim, PushT action space): `LATENT_DIM=192` (LeWM),
    DINO-WM patch grid `(N_patches, D) = (196, 384)`, `ACTION_DIM=2`.

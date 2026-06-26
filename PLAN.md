@@ -71,36 +71,40 @@ stable_worldmodel, stable_pretraining, tensorrt, peft, torch"`; `uv run pytest -
 Gate before any wiring (CLAUDE.md §10). The platform is young/fast-moving; do not
 call it from memory.
 
-> **Status (off-pod):** static read of the pinned source done → findings in
-> `docs/platform_api.md` (provenance: swm 0.1.1 / sp 0.1.7 sdists + GitHub tag 0.1.1).
-> **Pending:** (1) one-shot in-pod runtime introspection to confirm `hidden_size`,
-> DINOv3 register count, `vit_hf(tiny)` dim, PushT action space; (2) 🔴 OWNER gate —
-> the **register-token slicing** decision and dim sign-off (see doc §6). Boxes below
-> stay open until both clear.
+> **Status: COMPLETE (2026-06-26).** Findings in `docs/platform_api.md` (provenance:
+> swm 0.1.1 / sp 0.1.7 sdists + GitHub tag 0.1.1). In-pod introspection ran clean and
+> confirms all dims: DINOv3 `hidden_size=384`, `patch_size=16`, `num_register_tokens=4`,
+> `last_hidden_state=(1,201,384)` → **N_patches=196** after CLS+register slice; LeWM
+> `hidden_size=192`, CLS `(1,192)`; PushT `action_space=Box(-1,1,(2,))` → `ACTION_DIM=2`.
+> 🔴 OWNER gate resolved: **slice CLS+registers** (true 196-patch grid), stay on
+> `dinov3_small` (doc §6). Dims hard-code in Phase 4: `LATENT_DIM=192`,
+> DINO-WM `(N_patches,D)=(196,384)`, `ACTION_DIM=2`.
 
-- [ ] In-container, read the **installed source** (`.venv/.../stable_worldmodel`,
+- [x] In-container, read the **installed source** (`.venv/.../stable_worldmodel`,
   `.../stable_pretraining`) and the training entrypoints `scripts/train/lewm.py`,
   `scripts/train/prejepa.py` (obtain "as used" from the platform's examples; record
   provenance). Capture the true signatures for: the `World` object + `World.evaluate`
   (CEM/MPC), the CEM solver config, the Push-T env id (`swm/PushT-v1`), the
   latent extraction path (LeWM single token vs DINO-WM full patch-token grid), and how
   the backbone is config-injected and frozen (`encoder.eval(); requires_grad_(False)`).
-- [ ] Confirm the encoder is **DINOv3, not DINOv2** (the `prejepa.py` default), and that
+- [x] Confirm the encoder is **DINOv3, not DINOv2** (the `prejepa.py` default), and that
   it exposes **`config.hidden_size` + `last_hidden_state`** so the **full patch-token
   grid** feeds the predictor/planner as in DINO-WM; verify the `last_hidden_state` token
   layout and slice off **CLS + any register tokens** (DINOv3 prepends registers) before
   taking the patch grid; record `N_patches` and `D`. Confirm LeWM is a single-token
   latent `(B, D)` (SPEC §Scope).
-- [ ] Record findings (a short `docs/platform_api.md` or module docstring): exact call
+- [x] Record findings (a short `docs/platform_api.md` or module docstring): exact call
   shapes feeding the adapter and the dims, **and where one CEM planning cycle decomposes
   into encoder / predictor / planner calls** (needed for the Phase-5 per-component profile).
 
-**🔴 OWNER gate:** confirm `LATENT_DIM` (LeWM single-token latent), the DINO-WM
-patch-grid latent shape `(N_patches, D)`, and `ACTION_DIM = 2` against the real config
-**before** they are hard-coded once in `src/interfaces.py` / the adapter.
+**🔴 OWNER gate — CLEARED:** `LATENT_DIM=192` (LeWM single-token), DINO-WM patch-grid
+`(N_patches, D)=(196, 384)` (register-slice decision), `ACTION_DIM=2` — confirmed
+against the real config + runtime. Hard-coded once in `src/interfaces.py` / the adapter
+in Phase 4.
 
-**Verify:** introspection commands run clean in-container; DINOv3 attribute check
-passes; dims written down and owner-confirmed.
+**Verify — PASSED:** introspection ran clean in-container; DINOv3 attribute check
+passed (`hidden_size=384`, `num_register_tokens=4`, `last_hidden_state=(1,201,384)`);
+dims written to `docs/platform_api.md` and owner-confirmed.
 
 ---
 

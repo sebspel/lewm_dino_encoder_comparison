@@ -42,3 +42,14 @@ print("torch", torch.__version__, "| torch.cuda", torch.version.cuda)
 print("tensorrt", tensorrt.__version__)
 assert torch.version.cuda and torch.version.cuda.startswith("12."), torch.version.cuda
 PY
+
+# 5) secrets: HF_TOKEN must be in the runtime env for gated DINOv3 downloads
+#    (facebook/dinov3-*). Provisioning still succeeds without it (LeWM uses a
+#    scratch ViT), so this warns loudly rather than aborting.
+if [ -z "${HF_TOKEN:-}" ]; then
+  echo "WARNING: HF_TOKEN is not set. Gated DINOv3 downloads will 401." >&2
+  echo "         export HF_TOKEN=hf_... (and accept the model license on HF)" >&2
+  echo "         before running prejepa/introspection." >&2
+else
+  echo "HF_TOKEN is set."
+fi

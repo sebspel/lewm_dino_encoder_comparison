@@ -22,6 +22,11 @@ dependencies = [
     "timm",
     "peft",
     "bitsandbytes",
+    # Push-T env runtime deps (swm/PushT-v1) — pulled by stable-worldmodel's `env`
+    # extra, declared explicitly here so `uv sync` always installs them.
+    "pygame",
+    "pymunk",
+    "shapely",
 ]
 
 [dependency-groups]
