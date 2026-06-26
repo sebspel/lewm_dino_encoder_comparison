@@ -53,3 +53,16 @@ if [ -z "${HF_TOKEN:-}" ]; then
 else
   echo "HF_TOKEN is set."
 fi
+
+# 6) secrets: WANDB_API_KEY must be in the runtime env for training. The Phase-2
+#    +experiment overlays set wandb.enabled=true, so the trainer inits WandbLogger at
+#    startup and will stall on an interactive prompt (or fail) without it. Provisioning
+#    still succeeds without it (smoke with wandb.enabled=false), so this warns rather
+#    than aborting.
+if [ -z "${WANDB_API_KEY:-}" ]; then
+  echo "WARNING: WANDB_API_KEY is not set. Training (+experiment overlays enable W&B)" >&2
+  echo "         will stall on a login prompt. export WANDB_API_KEY=... before" >&2
+  echo "         training, or pass wandb.enabled=false for a no-logging smoke." >&2
+else
+  echo "WANDB_API_KEY is set."
+fi

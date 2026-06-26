@@ -23,3 +23,7 @@ wandb:
   config:
     entity: null
     project: lewm-dino-encoder-comparison
+# Pinned to match the LeWM track (already the vendored prejepa.yaml default of 10);
+# stated explicitly so the 10-epoch parity between tracks is self-documenting.
+trainer:
+  max_epochs: 10

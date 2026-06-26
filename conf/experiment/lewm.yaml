@@ -9,3 +9,7 @@ wandb:
   config:
     entity: null
     project: lewm-dino-encoder-comparison
+# Match the DINOv3 track's epoch budget (10) for a like-for-like comparison; the
+# vendored lewm.yaml default is 100. Overridden here, not in the vendored config.
+trainer:
+  max_epochs: 10
