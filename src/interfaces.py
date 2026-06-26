@@ -11,11 +11,18 @@ Precision = Literal["fp32", "fp16", "int8"]
 
 
 class WMStepAdapter(Protocol):
+    # Shared behavioural contract the export/benchmark/profile plumbing binds to, so
+    # it treats both tracks identically and never branches per-model. The latent
+    # *shape* is model-specific; the two concrete implementations (adapter.py) carry
+    # the precise annotations:
+    #   LeWMAdapter   -> Float[Tensor, "batch latent_dim"]              (single token)
+    #   DINOWMAdapter -> Float[Tensor, "batch num_patches latent_dim"]  (full patch grid)
+    # The variadic `*latent` below admits both without the plumbing knowing which.
     def __call__(
         self,
         obs: Float[Tensor, "batch hist channel height width"],
         action: Float[Tensor, "batch hist action_dim"],
-    ) -> Float[Tensor, "batch latent_dim"]: ...
+    ) -> Float[Tensor, "batch *latent"]: ...
 
 
 class Export(Protocol):

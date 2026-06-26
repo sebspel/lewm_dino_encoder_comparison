@@ -37,10 +37,18 @@ contribution is the optimization + QLoRA layer above.
   and closed-loop MPC evaluation come from the package. Do not reimplement them.
 - **DINOv3-WM = `prejepa.py` with a DINOv3 encoder.** The backbone is config-injected
   and frozen (`encoder.eval(); requires_grad_(False)`), so the DINOv3 track is a
-  config change (DINOv2->DINOv3 model string), not new model code. Verify DINOv3
-  exposes `config.hidden_size` + `last_hidden_state` so the **CLS-token** extraction
-  path (`last_hidden_state[:, 0]`) applies — both tracks expose a single CLS-token
-  latent, not a pooled or patch-token-sequence representation.
+  config change (DINOv2->DINOv3 model string), not new model code. **Always DINOv3,
+  never DINOv2:** the DINO-WM paper and the platform's `prejepa.py` both default to
+  DINOv2 — this project overrides the encoder to DINOv3 wherever DINO-WM is referenced;
+  the wiring is otherwise identical (dims differ and are read from config). Verify
+  DINOv3 exposes `config.hidden_size` + `last_hidden_state` so the **full patch-token
+  grid** (patch tokens only — slice off **CLS + any register tokens**; DINOv3 prepends
+  register tokens, so verify the token layout before slicing) feeds the
+  predictor/planner unchanged, matching DINO-WM (`prejepa.py`). **The two tracks have different latent
+  ranks:** LeWM exposes a single-token latent `(B, D)`; DINO-WM exposes the full patch
+  grid `(B, N_patches, D)`. Pooling DINO to one token would both diverge from the paper
+  and erase part of the encoder-compute asymmetry the study measures, so the patch dim
+  is preserved.
 - **LeWM = `lewm.py` unchanged.** SIGReg and the scratch encoder are the platform's;
   I do not reimplement or retune them beyond what training requires.
 - **The contribution lives downstream of a trained checkpoint:** export, quantize,
@@ -133,12 +141,15 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
 - `plan_latency(model, obs, goal) -> seconds` — one CEM planning cycle, timed
 - A thin adapter exposing each platform model behind a common
   `encode / predict` signature so export and benchmark treat both tracks identically.
+  **One shared Protocol, two concrete implementations** (`LeWMAdapter`,
+  `DINOWMAdapter`): identical call signature so the plumbing never branches, but the
+  latent shape differs by model (LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`).
   **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in Python
   around it** — the planner is never compiled into the engine.
 
-Constants (`LATENT_DIM` for LeWM's CLS token, DINOv3 CLS-token dim, `ACTION_DIM = 2`)
-are defined ONCE here; the platform's own dims are read from its config, not
-re-guessed.
+Constants (`LATENT_DIM` for LeWM's single-token latent, the DINO-WM patch-grid latent
+shape `(N_patches, D)`, `ACTION_DIM = 2`) are defined ONCE here; the platform's own
+dims are read from its config, not re-guessed.
 
 ---
 
@@ -158,11 +169,12 @@ re-guessed.
   **SR and latency degradation relative to FP32** (a precision that is faster but
   degrades task quality must be visible, not hidden behind throughput).
 - **The speedup is mechanistic, not configuration:** the LeWM-vs-DINOv3 gap comes
-  from the encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny vs DINOv3's large
-  backbone, which attends over hundreds of patch tokens *internally* even though both
-  tracks expose a single CLS-token latent — surfaced as how many more rollouts LeWM
-  fits in the budget. Do not let a batch or precision mismatch confound it. The
-  encoder/predictor/planner profile attributes the gap to the right component.
+  from the encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny exposing a single
+  latent token vs DINOv3's large backbone exposing the full patch-token grid, so the
+  predictor and CEM planner also operate over `N_patches` tokens for DINO vs one for
+  LeWM — surfaced as how many more rollouts LeWM fits in the budget. Do not let a batch
+  or precision mismatch confound it. The encoder/predictor/planner profile attributes
+  the gap to the right component.
 - **QLoRA comes after the frozen baseline**, never from the outset — the delta is
   reported against frozen DINOv3-WM.
 
@@ -177,7 +189,7 @@ and ask before touching:
 - QLoRA targeting (which DINOv3 modules, rank, what stays frozen — note the predictor
   is unfrozen and co-trained, so only backbone targeting is open)
 - the benchmark fairness conditions (matched precision, fixed time budget, env/goal)
-- the model adapter dims (`LATENT_DIM`, DINOv3 pooled dim, `ACTION_DIM`)
+- the model adapter dims (`LATENT_DIM`, DINO-WM patch-grid latent shape `(N_patches, D)`, `ACTION_DIM`)
 - any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity
 
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:

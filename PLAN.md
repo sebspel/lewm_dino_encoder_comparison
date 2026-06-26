@@ -15,7 +15,8 @@ is the **engineering layer the platform does not provide**: (1) a PyTorch→ONNX
 TensorRT inference-optimization study (FP32→FP16→INT8) on an L40S that quantifies
 the **LeWM-vs-DINOv3 speedup ratio** (the encoder-compute asymmetry: LeWM's tiny
 scratch ViT-Tiny vs DINOv3's large backbone, which attends over hundreds of patch
-tokens *internally* even though both tracks expose a single **CLS-token** latent)
+tokens *internally* and exposes the **full patch-token grid** as its latent while
+LeWM exposes a single token)
 and the **per-model precision delta**; and (2) a **QLoRA delta** on the DINOv3
 backbone vs its frozen baseline.
 
@@ -46,18 +47,18 @@ pod. No model code. RunPod pods cannot build Docker images in-pod (no Docker dae
 so dev provisions the environment with a **pod-bootstrap setup script** instead of a
 locally-built image; a Docker image is composed once at the very end, for reproducibility.
 
-- [ ] `pyproject.toml` + `uv.lock` pinning: `stable-worldmodel`, `stable-pretraining`,
+- [x] `pyproject.toml` + `uv.lock` pinning: `stable-worldmodel`, `stable-pretraining`,
   `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`, `timm`,
   `peft`, `bitsandbytes`, and **torch (cu124 wheel index)** — all uv-managed. **TensorRT
   is NOT in uv** (installed by the setup script); pinning it in uv would pull a
   conflicting `libnvinfer`/CUDA stack. Pin versions (APIs shift between minors).
-- [ ] `setup.sh` — pod bootstrap, idempotent, run on each pod load: installs **uv**,
+- [x] `setup.sh` — pod bootstrap, idempotent, run on each pod load: installs **uv**,
   runs `uv sync` (torch cu124 + the rest from the lock), then installs **TensorRT
   (cu12, CUDA-12.4-compatible)** outside the lock — matching CUDA 12.4 to RunPod is how
   the bundled-vs-pinned conflict the NGC image used to avoid is avoided here. Secrets
   (`WANDB_API_KEY` / `HF_TOKEN`) come from the pod's runtime env.
-- [ ] Skeleton dirs: `conf/` (Hydra), `tests/` (pytest).
-- [ ] **Deferred to project end:** `Dockerfile` + `docker-compose.yml` (reproducibility
+- [x] Skeleton dirs: `conf/` (Hydra), `tests/` (pytest).
+- [x] **Deferred to project end:** `Dockerfile` + `docker-compose.yml` (reproducibility
   image only, built off-pod) — not part of the dev loop.
 
 **Verify (on the pod):** `bash setup.sh` succeeds; `uv run python -c "import
@@ -75,17 +76,21 @@ call it from memory.
   `scripts/train/prejepa.py` (obtain "as used" from the platform's examples; record
   provenance). Capture the true signatures for: the `World` object + `World.evaluate`
   (CEM/MPC), the CEM solver config, the Push-T env id (`swm/PushT-v1`), the
-  CLS-token extraction path, and how the backbone is config-injected and frozen
-  (`encoder.eval(); requires_grad_(False)`).
-- [ ] Confirm **DINOv3 exposes `config.hidden_size` + `last_hidden_state`** so the
-  **CLS-token** path (`last_hidden_state[:, 0]`) applies unchanged (SPEC §Scope).
+  latent extraction path (LeWM single token vs DINO-WM full patch-token grid), and how
+  the backbone is config-injected and frozen (`encoder.eval(); requires_grad_(False)`).
+- [ ] Confirm the encoder is **DINOv3, not DINOv2** (the `prejepa.py` default), and that
+  it exposes **`config.hidden_size` + `last_hidden_state`** so the **full patch-token
+  grid** feeds the predictor/planner as in DINO-WM; verify the `last_hidden_state` token
+  layout and slice off **CLS + any register tokens** (DINOv3 prepends registers) before
+  taking the patch grid; record `N_patches` and `D`. Confirm LeWM is a single-token
+  latent `(B, D)` (SPEC §Scope).
 - [ ] Record findings (a short `docs/platform_api.md` or module docstring): exact call
   shapes feeding the adapter and the dims, **and where one CEM planning cycle decomposes
   into encoder / predictor / planner calls** (needed for the Phase-5 per-component profile).
 
-**🔴 OWNER gate:** confirm `LATENT_DIM` (LeWM CLS token), DINOv3 CLS-token dim, and
-`ACTION_DIM = 2` against the real config **before** they are hard-coded once in
-`src/interfaces.py` / the adapter.
+**🔴 OWNER gate:** confirm `LATENT_DIM` (LeWM single-token latent), the DINO-WM
+patch-grid latent shape `(N_patches, D)`, and `ACTION_DIM = 2` against the real config
+**before** they are hard-coded once in `src/interfaces.py` / the adapter.
 
 **Verify:** introspection commands run clean in-container; DINOv3 attribute check
 passes; dims written down and owner-confirmed.
@@ -100,8 +105,9 @@ rebuild it.
 - [ ] Vendor `scripts/train/lewm.py` and `scripts/train/prejepa.py` as used; wire
   Hydra + W&B around them (no changes to SIGReg, the scratch encoder, or the
   predictor — SPEC §Boundaries / CLAUDE.md §8).
-- [ ] 🔴 `conf/` **DINOv3 encoder config** for `prejepa.py` (DINOv2→DINOv3 model
-  string; dims **read from config**, not guessed). Owner confirms it slots in cleanly.
+- [ ] 🔴 `conf/` **DINOv3 encoder config** for `prejepa.py` — override the model string
+  from the **DINOv2** default to **DINOv3** (the only change vs the platform/paper
+  config; dims **read from config**, not guessed). Owner confirms it slots in cleanly.
 - [ ] 🖥️ Train LeWM: `uv run python -m scripts.train.lewm`
   → `checkpoints/lewm/`.
 - [ ] 🖥️ Train DINOv3-WM: `uv run python -m scripts.train.prejepa backbone=dinov3`
@@ -139,14 +145,15 @@ recorded as identical.
 Wire the owned `src/` layer to `interfaces.py` and prove the path end-to-end on
 dummy/random weights. Keep it strict.
 
-- [ ] Implement the **`WMStepAdapter`** for both tracks behind a common
+- [ ] Implement the **`WMStepAdapter`** as two concrete classes (`LeWMAdapter`
+  single-token latent, `DINOWMAdapter` full patch-grid latent) behind a common
   `encode`/`predict` signature (so export & benchmark treat both identically), typed
   per `src/interfaces.py`. **The adapter is the only thing TensorRT optimizes** — it
   wraps the model (encoder + predictor) so the CEM planner / rollout loop stays in
   Python, *outside* TRT, and calls the optimized model through this boundary.
-- [ ] Constants (`LATENT_DIM`, DINOv3 CLS-token dim, `ACTION_DIM`) defined **once** in
-  `interfaces.py`, from the Phase-1 owner-confirmed values; platform dims read from
-  config.
+- [ ] Constants (`LATENT_DIM`, DINO-WM patch-grid latent shape `(N_patches, D)`,
+  `ACTION_DIM`) defined **once** in `interfaces.py`, from the Phase-1 owner-confirmed
+  values; platform dims read from config.
 - [ ] Implement `export()` and `benchmark()` **stubs** conforming to the `Export` /
   `Benchmark` Protocols + `ExportConfig` (real TRT comes in Phase 5).
 - [ ] `src/smoke.py`: dummy checkpoint → adapter → export-stub → benchmark-stub, with
