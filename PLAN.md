@@ -71,6 +71,13 @@ stable_worldmodel, stable_pretraining, tensorrt, peft, torch"`; `uv run pytest -
 Gate before any wiring (CLAUDE.md §10). The platform is young/fast-moving; do not
 call it from memory.
 
+> **Status (off-pod):** static read of the pinned source done → findings in
+> `docs/platform_api.md` (provenance: swm 0.1.1 / sp 0.1.7 sdists + GitHub tag 0.1.1).
+> **Pending:** (1) one-shot in-pod runtime introspection to confirm `hidden_size`,
+> DINOv3 register count, `vit_hf(tiny)` dim, PushT action space; (2) 🔴 OWNER gate —
+> the **register-token slicing** decision and dim sign-off (see doc §6). Boxes below
+> stay open until both clear.
+
 - [ ] In-container, read the **installed source** (`.venv/.../stable_worldmodel`,
   `.../stable_pretraining`) and the training entrypoints `scripts/train/lewm.py`,
   `scripts/train/prejepa.py` (obtain "as used" from the platform's examples; record
