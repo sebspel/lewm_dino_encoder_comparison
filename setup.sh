@@ -89,4 +89,19 @@ else
   esac
   mkdir -p "$STABLEWM_HOME/datasets" "$STABLEWM_HOME/checkpoints"
   echo "STABLEWM_HOME=$STABLEWM_HOME (datasets + checkpoints persist here)."
+
+  # 8) Push-T expert dataset: the train configs request 'pusht_expert_train.lance' by
+  #    bare name, which the resolver does NOT auto-fetch from HF — it must exist under
+  #    $STABLEWM_HOME/datasets. Pull it once (idempotent: skipped if already present;
+  #    re-run resumes a partial download). Public dataset, no HF_TOKEN required.
+  ds="$STABLEWM_HOME/datasets/pusht_expert_train.lance"
+  if [ -d "$ds" ]; then
+    echo "Push-T dataset present: $ds (skipping download)."
+  else
+    echo "Fetching Push-T expert dataset (~14GB) into $STABLEWM_HOME/datasets ..."
+    uv run hf download galilai-group/lewm-pusht \
+      --repo-type dataset \
+      --include "pusht_expert_train.lance/*" \
+      --local-dir "$STABLEWM_HOME/datasets"
+  fi
 fi

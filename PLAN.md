@@ -78,7 +78,10 @@ Produce the two reference checkpoints.
     slice `[:, 1:, :]` → `[:, 1+num_reg:, :]`, injected via `model._target_`; reused by
     Phase-3 eval. Owner confirms slot-in on the pod (import + one forward).
 - [ ] **Pre-flight before any GPU run:** `STABLEWM_HOME` points at the persistent network
-  volume (not `~`); Push-T dataset resolves and one batch streams via HF.
+  volume (not `~`); Push-T expert dataset pre-downloaded to `$STABLEWM_HOME/datasets/`
+  (`hf download galilai-group/lewm-pusht --repo-type dataset --include
+  "pusht_expert_train.lance/*"`, wired into `setup.sh` §8) — the bare `.lance` name does
+  not auto-stream from HF; resolves and one batch loads.
 - [ ] 🖥️ Train LeWM:
   `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm` → `$STABLEWM_HOME/checkpoints/lewm/`.
 - [ ] 🖥️ Train DINOv3-WM:
