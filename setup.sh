@@ -73,39 +73,34 @@ fi
 
 # 7) persistent storage: STABLEWM_HOME is the platform's cache root — datasets land in
 #    $STABLEWM_HOME/datasets and checkpoints in $STABLEWM_HOME/checkpoints/<run_name>/
-#    (stable_worldmodel.wm.utils.save_pretrained). It defaults to ~/.stable_worldmodel,
-#    which on RunPod is the EPHEMERAL container fs — a multi-hour run's checkpoints are
-#    lost on pod restart. Point it at the persistent network volume (RunPod mounts it at
-#    /workspace). Set it in the pod's runtime env so every shell inherits it; this step
-#    validates + creates the dirs, mirroring the secret checks above (warns, never aborts).
-if [ -z "${STABLEWM_HOME:-}" ]; then
-  echo "WARNING: STABLEWM_HOME is not set. Datasets + checkpoints default to" >&2
-  echo "         ~/.stable_worldmodel on the ephemeral container fs and are LOST on pod" >&2
-  echo "         restart. Point it at the network volume, e.g.:" >&2
-  echo "             export STABLEWM_HOME=/workspace/.stablewm" >&2
-  echo "         (set as a RunPod env var so training/eval shells inherit it.)" >&2
-else
-  case "$STABLEWM_HOME" in
-    "$HOME" | "$HOME"/*)
-      echo "WARNING: STABLEWM_HOME=$STABLEWM_HOME is under \$HOME (ephemeral on RunPod)." >&2
-      echo "         Point it at the network volume, e.g. /workspace/.stablewm." >&2
-      ;;
-  esac
-  mkdir -p "$STABLEWM_HOME/datasets" "$STABLEWM_HOME/checkpoints"
-  echo "STABLEWM_HOME=$STABLEWM_HOME (datasets + checkpoints persist here)."
+#    (stable_worldmodel.wm.utils.save_pretrained). Its own default (~/.stable_worldmodel)
+#    is the EPHEMERAL container fs on RunPod — a multi-hour run's checkpoints are lost on
+#    pod restart. Default it to the persistent network volume (RunPod mounts it at
+#    /workspace) unless already set in the env, and export so this script's own steps
+#    (mkdir + dataset download below) target it.
+#    NOTE: this export only reaches this script's subprocesses, not your other shells —
+#    set STABLEWM_HOME as a RunPod env var too so training/eval terminals inherit it.
+export STABLEWM_HOME="${STABLEWM_HOME:-/workspace/.stablewm}"
+case "$STABLEWM_HOME" in
+  "$HOME" | "$HOME"/*)
+    echo "WARNING: STABLEWM_HOME=$STABLEWM_HOME is under \$HOME (ephemeral on RunPod)." >&2
+    echo "         Point it at the network volume, e.g. /workspace/.stablewm." >&2
+    ;;
+esac
+mkdir -p "$STABLEWM_HOME/datasets" "$STABLEWM_HOME/checkpoints"
+echo "STABLEWM_HOME=$STABLEWM_HOME (datasets + checkpoints persist here)."
 
-  # 8) Push-T expert dataset: the train configs request 'pusht_expert_train.lance' by
-  #    bare name, which the resolver does NOT auto-fetch from HF — it must exist under
-  #    $STABLEWM_HOME/datasets. Pull it once (idempotent: skipped if already present;
-  #    re-run resumes a partial download). Public dataset, no HF_TOKEN required.
-  ds="$STABLEWM_HOME/datasets/pusht_expert_train.lance"
-  if [ -d "$ds" ]; then
-    echo "Push-T dataset present: $ds (skipping download)."
-  else
-    echo "Fetching Push-T expert dataset (~14GB) into $STABLEWM_HOME/datasets ..."
-    uv run hf download galilai-group/lewm-pusht \
-      --repo-type dataset \
-      --include "pusht_expert_train.lance/*" \
-      --local-dir "$STABLEWM_HOME/datasets"
-  fi
+# 8) Push-T expert dataset: the train configs request 'pusht_expert_train.lance' by
+#    bare name, which the resolver does NOT auto-fetch from HF — it must exist under
+#    $STABLEWM_HOME/datasets. Pull it once (idempotent: skipped if already present;
+#    re-run resumes a partial download). Public dataset, no HF_TOKEN required.
+ds="$STABLEWM_HOME/datasets/pusht_expert_train.lance"
+if [ -d "$ds" ]; then
+  echo "Push-T dataset present: $ds (skipping download)."
+else
+  echo "Fetching Push-T expert dataset (~14GB) into $STABLEWM_HOME/datasets ..."
+  uv run hf download galilai-group/lewm-pusht \
+    --repo-type dataset \
+    --include "pusht_expert_train.lance/*" \
+    --local-dir "$STABLEWM_HOME/datasets"
 fi
