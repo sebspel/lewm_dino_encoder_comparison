@@ -27,17 +27,15 @@ wandb:
   config:
     entity: null
     project: lewm-dino-encoder-comparison
-# DINO-WM paper training hyperparameters, emulated despite the DINOv2->DINOv3 encoder
-# swap (a slight, accepted mismatch — we use the DINO-WM training recipe anyway):
-# 100 epochs, batch size 32. (Vendored prejepa.yaml defaults are max_epochs=10 /
-# batch_size=32, so in effect only the epoch count changes.) batch_size is a top-level
-# key in prejepa.yaml.
+# Training hyperparameters: 10 epochs (reduced from DINO-WM paper's 100 for speed),
+# batch_size 128 (matches LeWM; note this removes the paper's per-track asymmetry).
+# batch_size is a top-level key in prejepa.yaml.
 trainer:
-  max_epochs: 100
-batch_size: 32
+  max_epochs: 10
+batch_size: 128
 dataset_name: pusht_expert_train.lance
-# Lower the vendored prejepa default (num_workers=16) to 4: under DDP each rank spawns
+# Lower the vendored prejepa default (num_workers=16) to 6: under DDP each rank spawns
 # its own worker set, and each worker fans out OpenBLAS threads — 16 exhausts the pod's
 # process/thread cap (pthread_create EAGAIN), surfacing as a spurious KeyboardInterrupt
 # during dataloader worker spawn.
-num_workers: 4
+num_workers: 6
