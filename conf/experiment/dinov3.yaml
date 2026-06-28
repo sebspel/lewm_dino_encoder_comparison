@@ -35,3 +35,4 @@ wandb:
 trainer:
   max_epochs: 100
 batch_size: 32
+dataset_name: pusht_expert_train.lance
