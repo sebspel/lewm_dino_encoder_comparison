@@ -23,7 +23,7 @@ TENSORRT_VERSION="${TENSORRT_VERSION:-10.7.0}"
 
 # 0) uv cache — force to ephemeral /tmp so the 15GB archive-v0 never lands on the
 #    network volume (/workspace). Safe to lose on restart (just cached wheels).
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
+export UV_CACHE_DIR=/tmp/uv-cache
 
 # 1) uv (idempotent)
 if ! command -v uv >/dev/null 2>&1; then
