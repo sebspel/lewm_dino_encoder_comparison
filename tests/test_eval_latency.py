@@ -1,61 +1,74 @@
-"""Phase 3: the observation-only planning-latency hook.
+"""Phase 3: the observation-only CEM-solve-latency callback.
 
-Core invariant under test — the hook must be *observation-only*: the value returned by
-``solve`` is byte-identical with the hook attached, and the original ``solve`` is
-restored on detach. ``sync_cuda=False`` keeps the unit test hermetic (no torch/CUDA).
+Core invariants under test:
+  * one latency is recorded per CEM solve (``reset → end_solve``), median over solves;
+  * the per-step ``__call__`` hook is a strict no-op — it records nothing and never
+    raises (a regression guard: the base ``Callback.__call__`` would call ``compute`` and
+    raise ``NotImplementedError``, so the override is load-bearing);
+  * the module registry lets the driver reach a config-instantiated recorder.
+
+``sync_cuda=False`` keeps the unit test hermetic (no CUDA barrier).
 """
 
-from src.eval_latency import LatencyHook, timed_solver
+import pytest
+
+from src import eval_latency
+from src.eval_latency import SolveLatencyRecorder
 
 
-class FakeSolver:
-    """Mimics CEMSolver's call surface: ``__call__`` forwards to ``solve``, and
-    ``solve(info_dict, init_action=None)`` returns a deterministic plan dict."""
-
-    def __init__(self):
-        self.calls = 0
-
-    def __call__(self, *args, **kwargs):
-        return self.solve(*args, **kwargs)
-
-    def solve(self, info_dict, init_action=None):
-        self.calls += 1
-        return {"actions": [self.calls, info_dict["x"]], "init": init_action}
+def _simulate_solve(cb, n_batches=1, n_steps=3):
+    """Drive the callback through one solve exactly as ``CEMSolver.solve`` does:
+    one ``reset``, then per batch a ``start_batch`` + ``n_steps`` per-step calls, then
+    one ``end_solve``."""
+    cb.reset()
+    for _ in range(n_batches):
+        cb.start_batch()
+        for step in range(n_steps):
+            cb(step=step, costs=None, candidates=None, mean=None, var=None)
+    cb.end_solve()
 
 
-def test_plan_unchanged_and_recorded():
-    solver = FakeSolver()
-    baseline = solver({"x": 7}, init_action=3)
+def test_one_latency_recorded_per_solve():
+    cb = SolveLatencyRecorder(sync_cuda=False)
+    _simulate_solve(cb)
+    assert cb.summary()["n_solves"] == 1
+    assert cb.summary()["median_ms"] >= 0.0
 
-    solver = FakeSolver()  # fresh, so call counter matches the baseline
-    hook = LatencyHook(sync_cuda=False).attach(solver)
-    hooked = solver({"x": 7}, init_action=3)  # via __call__ -> solve
-    hook.detach()
-
-    assert hooked == baseline  # observation-only: plan byte-identical
-    assert hook.summary()["n_calls"] == 1
-    assert hook.summary()["median_ms"] >= 0.0
+    _simulate_solve(cb, n_batches=3, n_steps=5)
+    assert cb.summary()["n_solves"] == 2  # median now over two solves
 
 
-def test_detach_restores_original_solve():
-    solver = FakeSolver()
-    original = solver.solve
-    with timed_solver(solver, sync_cuda=False) as hook:
-        solver({"x": 1})
-        assert solver.solve is not original  # shadowed while attached
-    assert solver.solve == original  # class method re-exposed after detach
-    assert hook.summary()["n_calls"] == 1
-
-
-def test_double_attach_guarded():
-    solver = FakeSolver()
-    hook = LatencyHook(sync_cuda=False).attach(solver)
-    try:
-        with __import__("pytest").raises(RuntimeError):
-            hook.attach(solver)
-    finally:
-        hook.detach()
+def test_per_step_call_is_noop_and_records_nothing():
+    cb = SolveLatencyRecorder(sync_cuda=False)
+    cb.reset()
+    cb.start_batch()
+    # Arbitrary per-step state must not raise (base would hit compute -> NotImplementedError)
+    assert cb(step=0, costs="anything", extra=object()) is None
+    cb.end_solve()
+    # Exactly one record from the reset->end_solve bracket; the per-step call added none.
+    assert cb.summary()["n_solves"] == 1
 
 
 def test_empty_summary_is_none():
-    assert LatencyHook(sync_cuda=False).summary() == {"n_calls": 0, "median_ms": None}
+    assert SolveLatencyRecorder(sync_cuda=False).summary() == {
+        "n_solves": 0,
+        "median_ms": None,
+    }
+
+
+def test_registry_pop_returns_summary_and_clears():
+    eval_latency.reset_registry()
+    cb = SolveLatencyRecorder(sync_cuda=False)  # self-registers on construction
+    _simulate_solve(cb)
+
+    summary = eval_latency.pop_records()
+    assert summary["n_solves"] == 1
+    # Registry is now empty: a second pop fails loud.
+    with pytest.raises(RuntimeError):
+        eval_latency.pop_records()
+
+
+def test_pop_records_raises_when_never_injected():
+    eval_latency.reset_registry()
+    with pytest.raises(RuntimeError):
+        eval_latency.pop_records()

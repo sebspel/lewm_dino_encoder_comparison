@@ -1,0 +1,33 @@
+# @package _global_
+# DINOv3-WM eval overlay (Phase 3). Composed on top of the vendored
+# scripts/plan/config/pusht.yaml (which defaults to policy=random) via the owned driver:
+#   uv run python -m src.eval --config-dir conf +experiment=eval_dino
+#
+# The training overlay (conf/experiment/dinov3.yaml) is NOT reused for eval — it carries
+# only training keys, so composing it would leave policy=random (random policy, not the
+# trained WM). This overlay sets the three eval deltas plus the latency-callback injection.
+# The register-slice (196-patch grid) rides in through the checkpoint's saved
+# model._target_ = src.dino_patch.DINOv3PreJEPA (load_pretrained), not from here.
+
+# Trained DINOv3-WM checkpoint run_name (conf/experiment/dinov3.yaml output_model_name),
+# at $STABLEWM_HOME/checkpoints/dino/.
+policy: dino
+
+eval:
+  # Same trained dataset as the LeWM track (parity) — overrides pusht.yaml's .h5 default.
+  dataset_name: pusht_expert_train.lance
+
+# Identical latency-callback injection to eval_lewm.yaml — same observation-only recorder,
+# same config seam, so the CEM-solve-latency metric is measured identically across tracks.
+solver:
+  callbacks:
+    - _target_: src.eval_latency.SolveLatencyRecorder
+      sync_cuda: true
+
+# Same shared W&B project as every other phase (read by src/wandb_log.py; eval_wm.py never
+# touches cfg.wandb).
+wandb:
+  enabled: true
+  config:
+    entity: null
+    project: lewm-dino-encoder-comparison

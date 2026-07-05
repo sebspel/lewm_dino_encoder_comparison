@@ -1,113 +1,111 @@
-"""Owned observation-only planning-latency hook (Phase 3).
+"""Owned observation-only CEM-solve-latency callback (Phase 3).
 
-Wraps the CEM solver's ``solve`` — one CEM planning cycle (``World._get_actions →
-policy.get_action → solver.solve``) — to record its wall-clock latency **without
-altering the plan**. It calls the original ``solve`` unchanged and records
-``perf_counter`` deltas; a ``torch.cuda.synchronize()`` bracket makes the GPU
-wall-clock number accurate while leaving seeds, sample draws, and the resulting plan
-byte-identical (SPEC §Implementation Boundaries — CLAUDE CODE, observation-only).
+Recast from the initial ``solver.solve`` monkeypatch (commit ``c91d49b``) to a
+``CEMSolver.Callback`` subclass, injected through the platform's own config seam
+(``cfg.solver.callbacks``). The vendored eval entrypoint and the solver therefore stay
+byte-untouched — no monkeypatch, no class shadow (SPEC §Implementation Boundaries).
 
-``callables=`` in the eval driver is dataset-mode env setup, not a timing seam; the
-timing seam is ``solver.solve``, whose signature is
-``solve(info_dict, init_action=None) -> dict`` (confirmed against
-``stable_worldmodel`` 0.1.1 ``CEMSolver``). The policy invokes the solver via
-``self.solver(...)``, whose ``__call__`` forwards to ``self.solve(...)`` — so shadowing
-the instance's ``solve`` attribute intercepts that call. Perturbing seeds, sample
-counts, or the plan would cross into the eval/CEM parity gate (OWNER-ONLY); this hook
-does none of that.
+The base ``CEMSolver.solve`` calls ``reset()`` once at the start of the optimization body
+(after ``prepare_init_action`` / ``init_action_distrib``) and ``end_solve()`` once at the
+end. We bracket that span (``reset → end_solve``) with ``perf_counter`` and an optional
+``torch.cuda.synchronize()`` barrier, recording **one latency per CEM solve**. This
+excludes the ``prepare_init_action`` warm-start — a zero-pad for the non-``Actionable``
+LeWM / DINO-WM models, hence negligible and model-independent (docs/platform_api.md §5),
+so the metric is labelled *CEM-solve latency*.
 
-This module only records. Emitting the summary to W&B is the caller's one-liner
-(``src/wandb_log.py``) in the eval-run step, keeping the hook free of a W&B dependency.
+Parity-safe: the callback only reads a clock and (optionally) inserts a CUDA barrier; it
+never touches seeds, sample draws, or the plan. The per-CEM-step ``__call__`` hook is a
+no-op — perturbing anything there would cross into the eval/CEM parity gate (OWNER-ONLY).
+
+Records only — no W&B dependency here. Because the platform (not the driver) instantiates
+the callback from config, each instance registers itself in a module-level registry so the
+owned eval driver (``src/eval.py``) can read the records via :func:`pop_records` and log
+the median after the run.
 """
 
-from contextlib import contextmanager
 from statistics import median
 from time import perf_counter
 
+from stable_worldmodel.solver.callbacks import Callback
 
-class LatencyHook:
-    """Records the wall-clock latency of each ``solver.solve`` call.
+# Registry: instances append themselves at construction (see module docstring) so the
+# driver can reach the config-instantiated callback after the run.
+_RECORDERS = []
 
-    ``sync_cuda`` brackets the timed region with ``torch.cuda.synchronize()`` so the
-    measured span reflects GPU completion, not just kernel-launch return. It is a pure
-    timing barrier — numerics are identical with or without it.
+
+class SolveLatencyRecorder(Callback):
+    """Records the wall-clock latency of each CEM solve (``reset → end_solve``).
+
+    ``sync_cuda`` brackets the timed span with ``torch.cuda.synchronize()`` so the number
+    reflects GPU completion, not just kernel-launch return — a pure timing barrier that
+    leaves seeds, sample draws, and the plan byte-identical.
     """
 
+    name = "cem_solve_latency"
+
     def __init__(self, sync_cuda=True):
+        super().__init__(reduction="none")
+        self.sync_cuda = sync_cuda
         self.latencies_s = []
-        self._sync_cuda = sync_cuda
-        self._solver = None
-        self._orig_solve = None
+        self._t0 = None
+        _RECORDERS.append(self)
 
     def _sync(self):
-        if not self._sync_cuda:
+        if not self.sync_cuda:
             return
         import torch
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
 
-    def _wrap(self, solve):
-        def timed_solve(*args, **kwargs):
+    def reset(self):
+        """Start of one solve's optimization body (after the warm-start): open the bracket."""
+        super().reset()
+        self._sync()
+        self._t0 = perf_counter()
+
+    def __call__(self, **state):
+        """Observation-only: record nothing per CEM step and touch no solver state."""
+        pass
+
+    def end_solve(self):
+        """End of the solve: close the bracket and record one latency."""
+        super().end_solve()
+        if self._t0 is not None:
             self._sync()
-            t0 = perf_counter()
-            out = solve(*args, **kwargs)  # original, unchanged
-            self._sync()
-            self.latencies_s.append(perf_counter() - t0)
-            return out
-
-        return timed_solve
-
-    def attach(self, solver):
-        """Shadow ``solver.solve`` with a timing wrapper. Idempotent guard: raises if
-        already attached (attach → detach → attach, never double-wrap)."""
-        if self._solver is not None:
-            raise RuntimeError("LatencyHook already attached; detach() first")
-        self._orig_solve = solver.solve
-        solver.solve = self._wrap(self._orig_solve)
-        self._solver = solver
-        return self
-
-    def detach(self):
-        """Restore the original ``solve``, removing the instance shadow."""
-        if self._solver is None:
-            return
-        # solve is a class method on CEMSolver; deleting the instance attribute we set
-        # re-exposes it. Fall back to reassigning the captured original if solve was an
-        # instance attribute to begin with.
-        try:
-            del self._solver.solve
-        except AttributeError:
-            self._solver.solve = self._orig_solve
-        self._solver = None
-        self._orig_solve = None
+            self.latencies_s.append(perf_counter() - self._t0)
+            self._t0 = None
 
     def summary(self):
-        """Eager-baseline latency: median of the recorded ``solve`` calls (ms).
+        """Eager-baseline latency: median over the recorded solves (ms).
 
-        The rigorous p50/p95 timing rig is Phase 5; here we want a single stable number
-        per track. Returns ``None`` medians when nothing was recorded so the caller can
-        surface an empty run instead of dividing by zero.
+        The rigorous p50/p95 rig is Phase 5; here we want one stable number per track.
+        ``median_ms`` is ``None`` when nothing was recorded, so the caller can surface an
+        empty run instead of dividing by zero.
         """
         n = len(self.latencies_s)
         return {
-            "n_calls": n,
+            "n_solves": n,
             "median_ms": median(self.latencies_s) * 1e3 if n else None,
         }
 
 
-@contextmanager
-def timed_solver(solver, sync_cuda=True):
-    """Attach a :class:`LatencyHook` for the duration of the block, then restore.
+def pop_records():
+    """Summary of the most recently constructed recorder; clears the registry.
 
-    Usage in the eval-run step::
-
-        with timed_solver(solver) as hook:
-            world.evaluate(...)
-        wandb.log({"plan_latency_median_ms": hook.summary()["median_ms"]})
+    Raises if no recorder exists — i.e. the callback was never injected via
+    ``cfg.solver.callbacks`` (fails loud, SPEC §Implementation Boundaries — CLAUDE CODE).
     """
-    hook = LatencyHook(sync_cuda=sync_cuda).attach(solver)
-    try:
-        yield hook
-    finally:
-        hook.detach()
+    if not _RECORDERS:
+        raise RuntimeError(
+            "no SolveLatencyRecorder was constructed — is it injected via "
+            "cfg.solver.callbacks in the eval overlay?"
+        )
+    summary = _RECORDERS[-1].summary()
+    _RECORDERS.clear()
+    return summary
+
+
+def reset_registry():
+    """Drop any registered recorders (driver hygiene before a run)."""
+    _RECORDERS.clear()

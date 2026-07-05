@@ -1,0 +1,35 @@
+# @package _global_
+# LeWM eval overlay (Phase 3). Composed on top of the vendored
+# scripts/plan/config/pusht.yaml (which defaults to policy=random) via the owned driver:
+#   uv run python -m src.eval --config-dir conf +experiment=eval_lewm
+#
+# The training overlay (conf/experiment/lewm.yaml) is NOT reused for eval — it carries
+# only training keys, so composing it would leave policy=random (random policy, not the
+# trained WM). This overlay sets the three eval deltas plus the latency-callback injection.
+
+# Trained LeWM checkpoint run_name (scripts/train/config/lewm.yaml output_model_name),
+# at $STABLEWM_HOME/checkpoints/lewm/. eval_wm.py rebuilds the model (incl. its saved
+# _target_) via swm.wm.utils.load_pretrained.
+policy: lewm
+
+eval:
+  # The trained dataset (scripts/train/config/data/pusht.yaml), overriding pusht.yaml's
+  # .h5 default so eval replays the same expert trajectories the model was trained on.
+  dataset_name: pusht_expert_train.lance
+
+# Inject the owned observation-only CEM-solve-latency callback through the platform's own
+# per-solve extension seam. hydra.utils.instantiate(cfg.solver, model=model) in eval_wm.py
+# builds it into CEMSolver(callbacks=[...]); it only records timing (SPEC §Impl Boundaries).
+solver:
+  callbacks:
+    - _target_: src.eval_latency.SolveLatencyRecorder
+      sync_cuda: true
+
+# Single source of truth for the shared W&B project — read by the owned driver
+# (src/wandb_log.py); eval_wm.py itself never touches cfg.wandb. entity: null uses the
+# logged-in account's default entity (or $WANDB_ENTITY), matching the training overlays.
+wandb:
+  enabled: true
+  config:
+    entity: null
+    project: lewm-dino-encoder-comparison

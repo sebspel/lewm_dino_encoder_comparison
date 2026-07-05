@@ -120,7 +120,7 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
 - [x] Owned **W&B helper** (`src/wandb_log.py`): `init()` opens the run with project/entity
   read from the `conf/experiment/` `wandb:` block; phases log via `wandb.log` (SPEC
   §W&B logging discipline). Reused by Phases 5–6.
-- [ ] Owned **observation-only CEM-solve-latency callback** (`src/eval_latency.py` +
+- [x] Owned **observation-only CEM-solve-latency callback** (`src/eval_latency.py` +
   `tests/test_eval_latency.py`) — **recast** from the initial `solver.solve` wrapper (commit
   `c91d49b`) to a `CEMSolver.Callback` subclass, since the callback rides in through the
   platform's own config seam and needs no monkeypatch/vendored edit. Brackets one CEM solve
@@ -133,12 +133,12 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
   `stable_worldmodel` 0.1.1), hence negligible and model-independent. Eager baseline (median
   of a few solves); the rigorous p50/p95 rig is Phase 5.
 
-- [ ] Owned **eval driver** (`src/eval.py`): thin driver that (a) opens the W&B run via the
+- [x] Owned **eval driver** (`src/eval.py`): thin driver that (a) opens the W&B run via the
   owned helper, (b) invokes the vendored `eval_wm.run` (byte-unmodified), (c) captures
   `World.evaluate`'s returned metrics (observation-only) and logs SR + the callback's
   per-solve latency median to that run. No monkeypatch, no class shadow — the latency
   callback rides in via config (below).
-- [ ] Owned **eval overlays** `conf/experiment/eval_{lewm,dino}.yaml` (`@package _global_`):
+- [x] Owned **eval overlays** `conf/experiment/eval_{lewm,dino}.yaml` (`@package _global_`):
   set `policy=<ckpt run_name>` (`lewm` / `dino`), `eval.dataset_name` (trained dataset), the
   `wandb:` block (shared project), and inject the latency callback via `cfg.solver.callbacks`.
   The training overlays (`lewm`/`dinov3`) carry only training keys and are **not** reused for
