@@ -110,10 +110,23 @@ Run on the pod via `uv run`; `setup.sh` provisions the environment (uv + deps + 
 
 - Train LeWM:        `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm`
 - Train DINOv3-WM:   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3`
-- Evaluate (MPC):    `uv run python -m scripts.plan.eval_wm --config-dir conf +experiment=<lewm|dinov3>`
-  — the vendored platform eval driver (`World.evaluate`, CEM solver); exact arg form
-  pod-confirmed. Planning latency is added by an owned observation-only hook that wraps
-  `solver.solve` (one CEM planning cycle).
+- Evaluate (MPC):    `uv run python -m src.eval --config-dir conf +experiment=eval_<lewm|dino>`
+  — a thin **owned** driver (`src/eval.py`) that composes and runs the vendored eval
+  entrypoint (`eval_wm.run`, **byte-unmodified**) and opens/logs the W&B run.
+  **CEM-solve latency** is measured by an owned observation-only `CEMSolver` **callback**
+  injected purely through config (`cfg.solver.callbacks`) — the platform's own per-solve
+  extension seam, so neither the vendored file nor the solver logic is touched (no monkeypatch,
+  no vendored edit). Success rate comes from `World.evaluate`'s return value (captured
+  observation-only); both land in one W&B run. The `eval_<lewm|dino>` overlay selects the
+  trained checkpoint (`policy=<ckpt>`), the eval dataset, the `wandb:` block, and the callback
+  injection; the **training** overlays (`lewm`/`dinov3`) are not reused for eval — they carry
+  only training keys, so composing them would leave `policy=random`.
+  **Latency scope:** the callback brackets the CEM optimization body (`reset → end_solve`),
+  which excludes the `prepare_init_action` warm-start. For LeWM and DINO-WM that warm-start is
+  a zero-pad (neither model is `Actionable`), so the exclusion is negligible and
+  model-independent — the metric is labelled *CEM-solve latency*, not full planning-cycle
+  latency. (If an actor were ever added, making a model `Actionable`, this would need
+  revisiting — but no phase does so.)
 - Export/benchmark:  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
 - QLoRA tune:        `uv run python -m src.qlora`
 - Smoke (tracer bullet): `uv run python -m src.smoke`
@@ -134,7 +147,8 @@ just a PLAN verify assertion.
 ## Project Structure
 
 - `src/`          — the owned layer: interfaces.py, export, benchmark, qlora, smoke,
-  the owned W&B helper, and the observation-only eval-latency hook
+  the owned W&B helper, the observation-only CEM-solve-latency callback, and the thin
+  Phase-3 eval driver (`eval.py`, runs the byte-unmodified `eval_wm.run` + logs SR/latency)
 - `conf/`         — Hydra configs incl. the DINOv3 encoder config (COMMITTED)
 - `scripts/train/`— platform training entrypoints (lewm.py, prejepa.py) as used
 - `scripts/plan/` — platform eval entrypoint (eval_wm.py) + its config group
@@ -171,6 +185,14 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   latent shape differs by model (LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`).
   **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in Python
   around it** — the planner is never compiled into the engine.
+- **Re-entering the platform eval on the optimized model (Phase-5 SR-per-precision).**
+  The CEM solver calls the world model via `get_cost` / `get_action` — not `encode` /
+  `predict` directly. So to produce the SR that pairs with each precision's speed number,
+  the exported/quantized adapter is re-wrapped in a thin **Python** shim exposing
+  `get_cost` / `get_action` (which call the engine's `encode` / `predict` underneath) and
+  slotted into `CEMSolver(model=...)`, letting the Phase-3 owned eval driver re-run
+  unchanged on the optimized model. The shim stays in Python; only `encode` / `predict`
+  lives inside the engine — the planner is still never compiled in.
 
 Constants (`LATENT_DIM` for LeWM's single-token latent, the DINO-WM patch-grid latent
 shape `(N_patches, D)`, `ACTION_DIM = 2`) are defined ONCE here; the platform's own
@@ -190,9 +212,9 @@ dims are read from its config, not re-guessed.
   budget**, same env/goal, and the **same shared inference batch size**. Within that
   budget we compare per-step inference latency (**p50 and p95**) and the **number of CEM
   rollouts completed** — rollout count is the intended degree of freedom; the only other
-  difference is the model itself. **Training batch size is deliberately per-paper-
-  asymmetric (LeWM 128, DINO-WM 32) and does not carry into inference** — that asymmetry
-  belongs to the emulated training recipes, not the benchmark. **Every
+  difference is the model itself. **Training batch size is held equal across tracks (128,
+  LeWM's paper value) and does not carry into inference** — inference uses the shared batch
+  size above, so no training-time batch difference can confound the benchmark. **Every
   speed figure is reported with its SR**, and per-model FP16/INT8 results quote the
   **SR and latency degradation relative to FP32** (a precision that is faster but
   degrades task quality must be visible, not hidden behind throughput).
@@ -223,14 +245,17 @@ and ask before touching:
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
 - Dockerfile, compose, uv/pyproject scaffolding, `.dockerignore`
 - Hydra / W&B wiring around the platform entrypoints, incl. the owned W&B helper for the
-  non-training phases and the **observation-only** eval-latency hook that wraps
-  `solver.solve` — the CEM planning cycle (`World._get_actions → policy.get_action →
-  solver.solve`); `callables=` is dataset-mode env setup, not a timing seam. It may only
-  read/record timing: it calls the original `solve` unchanged and records `perf_counter`
-  deltas. A `torch.cuda.synchronize()` timing bracket stays within this boundary — it
-  blocks the CPU for an accurate GPU wall-clock number but leaves seeds, sample draws, and
-  the resulting plan byte-identical. Perturbing seeds, sample counts, or the plan crosses
-  into the eval/CEM parity gate above and is OWNER-ONLY.
+  non-training phases and the **observation-only** CEM-solve-latency **callback** — an owned
+  `CEMSolver.Callback` subclass injected through config (`cfg.solver.callbacks`), the
+  platform's own per-solve extension seam, so the vendored `eval_wm.py` and the solver stay
+  byte-untouched (no monkeypatch, no vendored edit). It may only read/record timing: it
+  brackets one CEM solve (`reset → end_solve`) with `perf_counter` and an optional
+  `torch.cuda.synchronize()` barrier — the barrier blocks the CPU for an accurate GPU
+  wall-clock number but leaves seeds, sample draws, and the plan byte-identical. It brackets
+  the optimization body only, excluding the `prepare_init_action` warm-start (a zero-pad for
+  these non-`Actionable` models, hence negligible and model-independent — labelled *CEM-solve
+  latency*). Perturbing seeds, sample counts, or the plan crosses into the eval/CEM parity
+  gate above and is OWNER-ONLY.
 - the DINOv3 encoder config for `prejepa.py` (model string, dims read from config)
 - export-script and benchmark-harness *plumbing* (ONNX trace call, TensorRT builder
   invocation, percentile timing, memory logging, the speedup-table runner)
@@ -270,8 +295,8 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
 
 - **Hard caps.** The TensorRT/INT8 export (unsupported-op failures, fiddly calibration)
   is time-capped with an explicit fallback (FP16-only); surface when approaching the cap
-  rather than iterating silently. Training is bounded by a fixed **epoch budget** (LeWM 10,
-  DINO-WM 100), not a wall-clock cap.
+  rather than iterating silently. Training is bounded by a fixed **epoch budget** (10 epochs
+  for both tracks, batch size 128), not a wall-clock cap.
 - **Lean on the platform; don't reimplement it.** If a need looks like training,
   env, CEM, or eval, it's the platform's — wire to it, don't rebuild it.
 - **Tracer bullet is the sole pre-optimization integration check.** Keep it strict —

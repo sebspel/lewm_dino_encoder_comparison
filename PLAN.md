@@ -86,8 +86,8 @@ Produce the two reference checkpoints.
   `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm` → `$STABLEWM_HOME/checkpoints/lewm/`.
 - [x] 🖥️ Train DINOv3-WM:
   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3` → `$STABLEWM_HOME/checkpoints/dino/`.
-- [x] ⏱️ **Training is epoch-capped** — LeWM 10, DINO-WM 100 (set in the conf overlays);
-  no wall-clock cap.
+- [x] ⏱️ **Training is epoch-capped** — **10 epochs for both tracks**, batch size 128
+  (LeWM's paper value, applied to both; set in the conf overlays); no wall-clock cap.
 
 **Verify:** two checkpoints exist; both W&B runs logged; encode
 sanity `uv run python -m scripts.verify_encode` passes — confirms Phase-1 latent dims
@@ -114,31 +114,49 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
 - [x] Vendor the platform eval entrypoint **as used** (same as Phase-2 train vendoring):
   `scripts/plan/eval_wm.py` + its config group `scripts/plan/config/{pusht.yaml, solver/cem.yaml,
   launcher/local.yaml}` from GitHub tag `0.1.1`; provenance in `scripts/plan/VENDORED.md`.
-  Unmodified — register-slice flows in via the checkpoint's saved `model._target_` (`load_pretrained`).
+  Unmodified — register-slice flows in via the checkpoint's saved `model._target_`
+  (`load_pretrained`). **Stays byte-unmodified in Phase 3:** latency rides in via a
+  config-injected CEM callback and SR/W&B via the owned driver (below), never by editing it.
 - [x] Owned **W&B helper** (`src/wandb_log.py`): `init()` opens the run with project/entity
   read from the `conf/experiment/` `wandb:` block; phases log via `wandb.log` (SPEC
   §W&B logging discipline). Reused by Phases 5–6.
-- [x] Owned **observation-only latency hook** (`src/eval_latency.py` +
-  `tests/test_eval_latency.py`): wraps
-  `solver.solve` (the CEM planning cycle: `World._get_actions → policy.get_action →
-  solver.solve`) and logs it. `callables=` is dataset-mode env setup, not a timing seam.
-  Signature confirmed against installed `stable_worldmodel` 0.1.1 source
-  (`CEMSolver.solve(info_dict, init_action=None) -> dict`; `__call__` forwards to `solve`);
-  pod-confirm that the
-  recorded plan/SR is unchanged with the hook attached. Must only read/record — no effect
-  on seeds, sample counts, or the plan (else → 🔴 OWNER, SPEC parity gate); a
-  `torch.cuda.synchronize()` timing bracket is allowed (numerics identical). Eager-baseline
-  latency (median of a few `solve` calls); the rigorous p50/p95 rig is Phase 5.
+- [ ] Owned **observation-only CEM-solve-latency callback** (`src/eval_latency.py` +
+  `tests/test_eval_latency.py`) — **recast** from the initial `solver.solve` wrapper (commit
+  `c91d49b`) to a `CEMSolver.Callback` subclass, since the callback rides in through the
+  platform's own config seam and needs no monkeypatch/vendored edit. Brackets one CEM solve
+  (`reset → end_solve`) with `perf_counter` + optional `torch.cuda.synchronize()` and records
+  per-solve latency; the owned driver reads the records and logs the median (records only —
+  no W&B dependency in the callback). Injected via `cfg.solver.callbacks`. Must only
+  read/record — no effect on seeds, sample counts, or the plan (else → 🔴 OWNER, SPEC parity
+  gate). Measures **CEM-solve latency** — excludes `prepare_init_action` warm-start, a
+  zero-pad for non-`Actionable` LeWM/DINO-WM (`get_cost` only, no `get_action` — confirmed in
+  `stable_worldmodel` 0.1.1), hence negligible and model-independent. Eager baseline (median
+  of a few solves); the rigorous p50/p95 rig is Phase 5.
 
-- [ ] 🖥️ Run `scripts.plan.eval_wm` (CEM solver) for **both** tracks: Push-T **success rate**
-  + **planning latency**.
+- [ ] Owned **eval driver** (`src/eval.py`): thin driver that (a) opens the W&B run via the
+  owned helper, (b) invokes the vendored `eval_wm.run` (byte-unmodified), (c) captures
+  `World.evaluate`'s returned metrics (observation-only) and logs SR + the callback's
+  per-solve latency median to that run. No monkeypatch, no class shadow — the latency
+  callback rides in via config (below).
+- [ ] Owned **eval overlays** `conf/experiment/eval_{lewm,dino}.yaml` (`@package _global_`):
+  set `policy=<ckpt run_name>` (`lewm` / `dino`), `eval.dataset_name` (trained dataset), the
+  `wandb:` block (shared project), and inject the latency callback via `cfg.solver.callbacks`.
+  The training overlays (`lewm`/`dinov3`) carry only training keys and are **not** reused for
+  eval — composing one leaves `policy=random` (random policy, not the trained WM).
+- [ ] 🖥️ Run the eval driver for **both** tracks:
+  `uv run python -m src.eval --config-dir conf +experiment=eval_<lewm|dino>` → Push-T
+  **success rate** + **CEM-solve latency**. Pod-confirm: the checkpoint's saved
+  `model._target_` reconstructs the register-slice subclass (196-grid, `src` importable),
+  and SR is unchanged vs a callback-free run (callbacks feed `outputs['callbacks']` only,
+  never the optimization).
 - [ ] 🔴 **Parity (load-bearing):** same CEM config (300 samples, 30 elites, horizon 5,
   init var 1, 10–30 iters), same action budget, same goal encoding, same eval seeds,
   identical ImageNet normalization — confirm **not varied between tracks** (do not change
   the platform eval/CEM config).
 
-**Verify:** success-rate + latency for both tracks, logged to W&B (via the owned helper,
-shared project); parity conditions recorded as identical.
+**Verify:** success-rate + CEM-solve latency for both tracks, logged to W&B by the eval
+driver (owned helper, shared project); SR identical with/without the callback; parity
+conditions recorded as identical.
 
 ---
 
@@ -181,8 +199,10 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   mode). Use the Phase-1 cycle decomposition.
 - [ ] 🖥️ **Fixed-time-budget benchmark** on the L40S: per model × precision, record
   **rollouts completed**, **per-step latency p50/p95**, throughput (rollouts/sec), **peak
-  GPU memory**, **and SR** (Phase-3 eval re-run on the optimized model). Same
-  env/goal/precision/budget across models; only the model differs.
+  GPU memory**, **and SR** — the Phase-3 eval driver re-run on the optimized model, which
+  slots into `CEMSolver(model=...)` through a thin Python `get_cost`/`get_action` shim over
+  the engine's `encode`/`predict` (SPEC §Interface Contracts). Same env/goal/precision/budget
+  across models; only the model differs.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
@@ -221,8 +241,13 @@ W&B; adapter target modules confirmed real.
 - `src/adapter.py`, `src/export.py`, `src/benchmark.py`, `src/profile.py`,
   `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
-- `src/eval_latency.py` — owned observation-only planning-latency hook (Phase 3).
-- `conf/` — owned Hydra overlays (incl. `conf/experiment/{lewm,dinov3}.yaml`).
+- `src/eval_latency.py` — owned observation-only CEM-solve-latency callback (`CEMSolver.Callback`
+  subclass, injected via `cfg.solver.callbacks`; Phase 3).
+- `src/eval.py` — owned thin Phase-3 eval driver: runs the byte-unmodified `eval_wm.run`,
+  captures `World.evaluate`'s SR, and logs SR + latency to W&B (no monkeypatch/vendored edit).
+- `conf/` — owned Hydra overlays (`conf/experiment/{lewm,dinov3}.yaml` train,
+  `conf/experiment/eval_{lewm,dino}.yaml` eval — the latter set `policy`/`eval.dataset_name`/
+  `wandb:` and inject the latency callback via `cfg.solver.callbacks`).
 - `scripts/train/lewm.py`, `scripts/train/prejepa.py` + `scripts/train/config/` —
   vendored platform entrypoints/configs, as used (provenance in `scripts/train/VENDORED.md`).
 - `scripts/plan/eval_wm.py` + `scripts/plan/config/{pusht.yaml, solver/cem.yaml}` —

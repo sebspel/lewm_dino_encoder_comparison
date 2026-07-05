@@ -131,7 +131,8 @@ subclass in `src/` (§6), not by editing the wheel.
 ## 5. One CEM planning cycle → encoder / predictor / planner (for Phase-5 profiling)
 
 `CEMSolver.solve` (one `policy.get_action` replan):
-1. `prepare_init_action` (warm-start).
+1. `prepare_init_action` (warm-start). **Outside the latency-callback bracket** (the callback
+   starts at the first `reset` / `start_batch`, after this step).
 2. Loop `n_steps=30` CEM iterations:
    - sample `candidates` via `torch.randn` — **PLANNER**
    - `model.get_cost(expanded_infos, candidates)`:
@@ -151,6 +152,16 @@ predictor/planner cost. The `encoder/predictor/planner` profile must attribute t
 accordingly (SPEC §Parity). Export boundary is confirmed: `eval_wm.py` `torch.compile`s
 **`encoder` + `predictor` only** — the CEM loop stays in Python, exactly the
 `WMStepAdapter` boundary TRT will optimize.
+
+**Latency-scope note (Phase-3 metric).** The owned observation-only latency measure is a
+config-injected `CEMSolver.Callback` bracketing one solve (`reset → end_solve`), so it times
+the **optimization body (step 2 onward)** and excludes the step-1 `prepare_init_action`
+warm-start. For LeWM and DINO-WM that warm-start is a **zero-pad** — neither model is
+`Actionable` (`get_cost` only, no `get_action`), so `prepare_init_action` takes the
+`torch.zeros` branch, no model forward. The exclusion is therefore negligible and
+model-independent (same for both tracks, so it cannot bias the LeWM-vs-DINOv3 ratio). The
+metric is labelled **CEM-solve latency**, not full planning-cycle latency; if an actor were
+ever added (making a model `Actionable`) this would need revisiting — no phase does so.
 
 ---
 
