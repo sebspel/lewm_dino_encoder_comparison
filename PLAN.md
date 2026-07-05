@@ -118,11 +118,14 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
 - [x] Owned **W&B helper** (`src/wandb_log.py`): `init()` opens the run with project/entity
   read from the `conf/experiment/` `wandb:` block; phases log via `wandb.log` (SPEC
   §W&B logging discipline). Reused by Phases 5–6.
-- [ ] Owned **observation-only latency hook** (`src/eval_latency.py`): times one CEM
-  planning cycle via the vendored eval's `callables=` seam and logs it. Read the real
-  `callables=` signature from `eval_wm.py` on the pod first. Must only read/record — no
-  effect on seeds, sample counts, or the plan (else → 🔴 OWNER, SPEC parity gate).
-  Eager-baseline latency (median of a few `solve` calls); the rigorous p50/p95 rig is Phase 5.
+- [ ] Owned **observation-only latency hook** (`src/eval_latency.py`): wraps
+  `solver.solve` (the CEM planning cycle: `World._get_actions → policy.get_action →
+  solver.solve`) and logs it. `callables=` is dataset-mode env setup, not a timing seam.
+  Pod-confirm the signature (`solve(info_dict, init_action=None) -> dict`) and that the
+  recorded plan/SR is unchanged with the hook attached. Must only read/record — no effect
+  on seeds, sample counts, or the plan (else → 🔴 OWNER, SPEC parity gate); a
+  `torch.cuda.synchronize()` timing bracket is allowed (numerics identical). Eager-baseline
+  latency (median of a few `solve` calls); the rigorous p50/p95 rig is Phase 5.
 
 - [ ] 🖥️ Run `scripts.plan.eval_wm` (CEM solver) for **both** tracks: Push-T **success rate**
   + **planning latency**.

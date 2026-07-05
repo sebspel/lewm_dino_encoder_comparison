@@ -112,7 +112,8 @@ Run on the pod via `uv run`; `setup.sh` provisions the environment (uv + deps + 
 - Train DINOv3-WM:   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3`
 - Evaluate (MPC):    `uv run python -m scripts.plan.eval_wm --config-dir conf +experiment=<lewm|dinov3>`
   — the vendored platform eval driver (`World.evaluate`, CEM solver); exact arg form
-  pod-confirmed. Planning latency is added by an owned observation-only `callables=` hook.
+  pod-confirmed. Planning latency is added by an owned observation-only hook that wraps
+  `solver.solve` (one CEM planning cycle).
 - Export/benchmark:  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
 - QLoRA tune:        `uv run python -m src.qlora`
 - Smoke (tracer bullet): `uv run python -m src.smoke`
@@ -222,9 +223,14 @@ and ask before touching:
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
 - Dockerfile, compose, uv/pyproject scaffolding, `.dockerignore`
 - Hydra / W&B wiring around the platform entrypoints, incl. the owned W&B helper for the
-  non-training phases and the **observation-only** eval-latency `callables=` hook (it may
-  only read/record timing — perturbing seeds, sample counts, or the plan crosses into the
-  eval/CEM parity gate above and is OWNER-ONLY)
+  non-training phases and the **observation-only** eval-latency hook that wraps
+  `solver.solve` — the CEM planning cycle (`World._get_actions → policy.get_action →
+  solver.solve`); `callables=` is dataset-mode env setup, not a timing seam. It may only
+  read/record timing: it calls the original `solve` unchanged and records `perf_counter`
+  deltas. A `torch.cuda.synchronize()` timing bracket stays within this boundary — it
+  blocks the CPU for an accurate GPU wall-clock number but leaves seeds, sample draws, and
+  the resulting plan byte-identical. Perturbing seeds, sample counts, or the plan crosses
+  into the eval/CEM parity gate above and is OWNER-ONLY.
 - the DINOv3 encoder config for `prejepa.py` (model string, dims read from config)
 - export-script and benchmark-harness *plumbing* (ONNX trace call, TensorRT builder
   invocation, percentile timing, memory logging, the speedup-table runner)
