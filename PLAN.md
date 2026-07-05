@@ -2,8 +2,8 @@
 
 > Generated from `SPEC.md` (rationale lives there; this file is execution steps only).
 > Carries execution progress. `CLAUDE.md` holds behavioral rules; `src/interfaces.py` is
-> the typed contract for the owned layer. Every completed step records: `[x]` + W&B run
-> URL + artifact name (commit hash added by the owner). Tick a box before the next step.
+> the typed contract for the owned layer. Every completed step records: `[x]` + artifact
+> name (commit hash added by the owner). Tick a box before the next step.
 
 ## Context
 
@@ -68,28 +68,28 @@ to `docs/platform_api.md` and owner-confirmed.
 
 Produce the two reference checkpoints.
 
-- [ ] Vendor `scripts/train/lewm.py` and `scripts/train/prejepa.py` (GitHub tag `0.1.1`,
+- [x] Vendor `scripts/train/lewm.py` and `scripts/train/prejepa.py` (GitHub tag `0.1.1`,
   not in the wheel — provenance in `scripts/train/VENDORED.md`) as used; wire Hydra + W&B.
-- [ ] 🔴 **DINOv3 config + register-slice subclass** for `prejepa.py` (owner-approved,
+- [x] 🔴 **DINOv3 config + register-slice subclass** for `prejepa.py` (owner-approved,
   Phase-1 §6) — wiring done, on-pod slot-in confirmation pending:
   - `conf/experiment/dinov3.yaml` overlay (via `--config-dir conf +experiment=dinov3`):
     `backbone.name/type=dinov3_small`, `patch_size=16`.
   - `src/dino_patch.py::DINOv3PreJEPA` — `PreJEPA` subclass overriding `_encode_image`
     slice `[:, 1:, :]` → `[:, 1+num_reg:, :]`, injected via `model._target_`; reused by
     Phase-3 eval. Owner confirms slot-in on the pod (import + one forward).
-- [ ] **Pre-flight before any GPU run:** `STABLEWM_HOME` points at the persistent network
+- [x] **Pre-flight before any GPU run:** `STABLEWM_HOME` points at the persistent network
   volume (not `~`); Push-T expert dataset pre-downloaded to `$STABLEWM_HOME/datasets/`
   (`hf download galilai-group/lewm-pusht --repo-type dataset --include
   "pusht_expert_train.lance/*"`, wired into `setup.sh` §8) — the bare `.lance` name does
   not auto-stream from HF; resolves and one batch loads.
-- [ ] 🖥️ Train LeWM:
+- [x] 🖥️ Train LeWM:
   `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm` → `$STABLEWM_HOME/checkpoints/lewm/`.
-- [ ] 🖥️ Train DINOv3-WM:
+- [x] 🖥️ Train DINOv3-WM:
   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3` → `$STABLEWM_HOME/checkpoints/dino/`.
-- [ ] ⏱️ **Training is epoch-capped** — LeWM 10, DINO-WM 100 (set in the conf overlays);
+- [x] ⏱️ **Training is epoch-capped** — LeWM 10, DINO-WM 100 (set in the conf overlays);
   no wall-clock cap.
 
-**Verify:** two checkpoints exist; both W&B runs logged (URLs recorded here); encode
+**Verify:** two checkpoints exist; both W&B runs logged; encode
 sanity `uv run python -m scripts.verify_encode` passes — confirms Phase-1 latent dims
 (LeWM CLS `(B, 192)`, DINO-WM grid `(B, T, 196, 384)`) and the register-slice
 differential (override 196 vs base `PreJEPA` 200, `num_reg=4`). Expected tail:
@@ -211,7 +211,7 @@ W&B; adapter target modules confirmed real.
   targeting, benchmark methodology, adapter dims, eval/CEM parity) → STOP and ask.
 - **Git:** never run git. On completing a unit of work, output the files to stage and a
   `type(scope): summary` commit message; the owner runs git.
-- **Progress:** each `[x]` records W&B URL + artifact name; tick before advancing.
+- **Progress:** each `[x]` records artifact name; tick before advancing.
 - **Caps:** TRT/INT8 is time-capped with a fallback; training is epoch-capped; 3-attempt
   debugging cap; log-before-delete.
 

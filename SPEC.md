@@ -253,8 +253,8 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   env, CEM, or eval, it's the platform's — wire to it, don't rebuild it.
 - **Tracer bullet is the sole pre-optimization integration check.** Keep it strict —
   every owned boundary typed/asserted, on a real (or dummy) checkpoint.
-- **PLAN.md progress:** every completed step records a checkbox + W&B run URL +
-  artifact name (commit hash added by me when I commit).
+- **PLAN.md progress:** every completed step records a checkbox + artifact name
+  (commit hash added by me when I commit).
 - **Tick before advancing:** a step's checkbox should be ticked before the next begins.
 - **Debugging cap:** after 3+ failed attempts at the same fix, stop, summarize, ask.
 - **Log before delete:** never overwrite a run, checkpoint, or config representing
