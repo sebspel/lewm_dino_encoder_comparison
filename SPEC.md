@@ -122,10 +122,11 @@ On the pod: `bash setup.sh`, then `uv run pytest -v`.
 **W&B logging discipline (all phases, one shared project).** Every phase logs to the
 **same** W&B project. Training logs via the platform's Lightning `WandbLogger` (driven by
 the `wandb:` block in `conf/experiment/`). The non-training phases (eval/benchmark/QLoRA)
-have no Lightning `Trainer`, so they log via a small **owned** helper (`wandb.init` +
-`wandb.log`) that reads the project name from the same `conf/experiment/` `wandb:` block —
-no second source of truth. This makes "logged to W&B" an established path, not just a
-PLAN verify assertion.
+have no Lightning `Trainer`, so they open the run via a small **owned** helper
+(`src/wandb_log.py`): its `init()` reads the project (and entity) from the same
+`conf/experiment/` `wandb:` block — no second source of truth — then phases log with
+`wandb.log` directly against that run. This makes "logged to W&B" an established path, not
+just a PLAN verify assertion.
 
 ---
 

@@ -48,10 +48,3 @@ def init(experiment, name=None, config=None):
         config=config,
         mode="online" if block.get("enabled", True) else "disabled",
     )
-
-
-def log(*args, **kwargs):
-    """Thin pass-through to ``wandb.log`` (kept here so phases import one module)."""
-    import wandb
-
-    return wandb.log(*args, **kwargs)
