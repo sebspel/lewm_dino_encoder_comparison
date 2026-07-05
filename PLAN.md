@@ -108,14 +108,14 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
 
 **Prerequisites (implicit in "Run World.evaluate" — established here, not assumed):**
 
-- [ ] **Pod-confirm** `scripts/plan/eval_wm.py` is absent from the installed wheel before
+- [x] **Pod-confirm** `scripts/plan/eval_wm.py` is absent from the installed wheel before
   vendoring (`python -c "import stable_worldmodel, os; print(os.path.dirname(stable_worldmodel.__file__))"`
   then check for a shipped `plan`/eval module).
-- [ ] Vendor the platform eval entrypoint **as used** (same as Phase-2 train vendoring):
-  `scripts/plan/eval_wm.py` + its config group `scripts/plan/config/{pusht.yaml, solver/cem.yaml}`
-  from GitHub tag `0.1.1`; provenance in `scripts/plan/VENDORED.md`. Unmodified — the
-  DINOv3 register-slice flows in via the same `conf/experiment/dinov3.yaml` `model._target_`.
-- [ ] Owned **W&B helper** (`src/wandb_log.py`): `wandb.init`/`wandb.log` for the
+- [x] Vendor the platform eval entrypoint **as used** (same as Phase-2 train vendoring):
+  `scripts/plan/eval_wm.py` + its config group `scripts/plan/config/{pusht.yaml, solver/cem.yaml,
+  launcher/local.yaml}` from GitHub tag `0.1.1`; provenance in `scripts/plan/VENDORED.md`.
+  Unmodified — register-slice flows in via the checkpoint's saved `model._target_` (`load_pretrained`).
+- [x] Owned **W&B helper** (`src/wandb_log.py`): `wandb.init`/`wandb.log` for the
   non-training phases, project name read from the `conf/experiment/` `wandb:` block (SPEC
   §W&B logging discipline). Reused by Phases 5–6.
 - [ ] Owned **observation-only latency hook** (`src/eval_latency.py`): times one CEM
