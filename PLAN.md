@@ -90,7 +90,16 @@ Produce the two reference checkpoints.
   no wall-clock cap.
 
 **Verify:** two checkpoints exist; both W&B runs logged (URLs recorded here); encode
-sanity confirms Phase-1 latent dims (LeWM `(B, 192)`, DINO-WM `(B, 196, 384)`).
+sanity `uv run python -m scripts.verify_encode` passes — confirms Phase-1 latent dims
+(LeWM CLS `(B, 192)`, DINO-WM grid `(B, T, 196, 384)`) and the register-slice
+differential (override 196 vs base `PreJEPA` 200, `num_reg=4`). Expected tail:
+```
+[DINO-WM] override grid (2, 3, 196, 384) vs base (2, 3, 200, 384) (D=384, num_reg=4) -> 196 patches OK
+[LeWM] CLS latent (2, 192) -> single token, D=192 OK
+encode sanity: PASS
+```
+Dims are set by the encoder config (not training), so this is valid pre- or
+post-training; it also satisfies the §2 slot-in "import + one forward".
 **Log-before-delete:** confirm logged to W&B or committed before overwriting (CLAUDE.md §7).
 
 ---
@@ -190,6 +199,8 @@ W&B; adapter target modules confirmed real.
 - `conf/` — owned Hydra overlays (incl. `conf/experiment/{lewm,dinov3}.yaml`).
 - `scripts/train/lewm.py`, `scripts/train/prejepa.py` + `scripts/train/config/` —
   vendored platform entrypoints/configs, as used (provenance in `scripts/train/VENDORED.md`).
+- `scripts/verify_encode.py` — Phase-2 encode sanity: latent dims + register-slice
+  differential (owned, fails loud; no dataset/checkpoint needed).
 - `pyproject.toml`, `uv.lock`, `setup.sh` (pod bootstrap). `Dockerfile` +
   `docker-compose.yml` composed at project end (off-pod).
 - `tests/` — pytest for the owned boundaries.
@@ -209,8 +220,8 @@ W&B; adapter target modules confirmed real.
 1. `bash setup.sh` (uv + deps + TensorRT) + import check (Phase 0).
 2. Platform API introspection in-container; DINOv3 `config.hidden_size`/
    `last_hidden_state` confirmed (Phase 1).
-3. Two checkpoints + W&B runs (Phase 2); both-track success-rate + latency under matched
-   CEM config (Phase 3).
+3. Two checkpoints + W&B runs + `scripts.verify_encode` PASS (Phase 2); both-track
+   success-rate + latency under matched CEM config (Phase 3).
 4. `python -m src.smoke` + `pytest -v` green on dummy weights (Phase 4).
 5. `src.export` builds TRT engines on the L40S; fixed-budget benchmark emits
    rollouts-in-budget + latency comparison and the encoder/predictor/planner profile
