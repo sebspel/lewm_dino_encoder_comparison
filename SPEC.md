@@ -110,20 +110,33 @@ Run on the pod via `uv run`; `setup.sh` provisions the environment (uv + deps + 
 
 - Train LeWM:        `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm`
 - Train DINOv3-WM:   `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3`
-- Evaluate (MPC):    via the platform's `World.evaluate` (CEM solver)
+- Evaluate (MPC):    `uv run python -m scripts.plan.eval_wm --config-dir conf +experiment=<lewm|dinov3>`
+  — the vendored platform eval driver (`World.evaluate`, CEM solver); exact arg form
+  pod-confirmed. Planning latency is added by an owned observation-only `callables=` hook.
 - Export/benchmark:  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`
 - QLoRA tune:        `uv run python -m src.qlora`
 - Smoke (tracer bullet): `uv run python -m src.smoke`
 
 On the pod: `bash setup.sh`, then `uv run pytest -v`.
 
+**W&B logging discipline (all phases, one shared project).** Every phase logs to the
+**same** W&B project. Training logs via the platform's Lightning `WandbLogger` (driven by
+the `wandb:` block in `conf/experiment/`). The non-training phases (eval/benchmark/QLoRA)
+have no Lightning `Trainer`, so they log via a small **owned** helper (`wandb.init` +
+`wandb.log`) that reads the project name from the same `conf/experiment/` `wandb:` block —
+no second source of truth. This makes "logged to W&B" an established path, not just a
+PLAN verify assertion.
+
 ---
 
 ## Project Structure
 
-- `src/`          — the owned layer: interfaces.py, export, benchmark, qlora, smoke
+- `src/`          — the owned layer: interfaces.py, export, benchmark, qlora, smoke,
+  the owned W&B helper, and the observation-only eval-latency hook
 - `conf/`         — Hydra configs incl. the DINOv3 encoder config (COMMITTED)
 - `scripts/train/`— platform training entrypoints (lewm.py, prejepa.py) as used
+- `scripts/plan/` — platform eval entrypoint (eval_wm.py) + its config group
+  (pusht.yaml, solver/cem.yaml), vendored as used (provenance in `scripts/plan/VENDORED.md`)
 - `tests/`        — pytest
 - `data/`         — Push-T dataset cache (GITIGNORED, mounted volume or HF stream)
 - `checkpoints/`  — trained weights, `lewm/` vs `dino/` (GITIGNORED, mounted volume)
@@ -207,7 +220,10 @@ and ask before touching:
 
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
 - Dockerfile, compose, uv/pyproject scaffolding, `.dockerignore`
-- Hydra / W&B wiring around the platform entrypoints
+- Hydra / W&B wiring around the platform entrypoints, incl. the owned W&B helper for the
+  non-training phases and the **observation-only** eval-latency `callables=` hook (it may
+  only read/record timing — perturbing seeds, sample counts, or the plan crosses into the
+  eval/CEM parity gate above and is OWNER-ONLY)
 - the DINOv3 encoder config for `prejepa.py` (model string, dims read from config)
 - export-script and benchmark-harness *plumbing* (ONNX trace call, TensorRT builder
   invocation, percentile timing, memory logging, the speedup-table runner)

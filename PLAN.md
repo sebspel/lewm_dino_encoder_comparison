@@ -106,15 +106,33 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
 
 ## Phase 3 — Task baseline (platform CEM/MPC eval)  🟢 wiring · 🔴 parity · 🖥️
 
-- [ ] 🖥️ Run `World.evaluate` (CEM solver) for **both** tracks: Push-T **success rate** +
-  **planning latency**.
+**Prerequisites (implicit in "Run World.evaluate" — established here, not assumed):**
+
+- [ ] **Pod-confirm** `scripts/plan/eval_wm.py` is absent from the installed wheel before
+  vendoring (`python -c "import stable_worldmodel, os; print(os.path.dirname(stable_worldmodel.__file__))"`
+  then check for a shipped `plan`/eval module).
+- [ ] Vendor the platform eval entrypoint **as used** (same as Phase-2 train vendoring):
+  `scripts/plan/eval_wm.py` + its config group `scripts/plan/config/{pusht.yaml, solver/cem.yaml}`
+  from GitHub tag `0.1.1`; provenance in `scripts/plan/VENDORED.md`. Unmodified — the
+  DINOv3 register-slice flows in via the same `conf/experiment/dinov3.yaml` `model._target_`.
+- [ ] Owned **W&B helper** (`src/wandb_log.py`): `wandb.init`/`wandb.log` for the
+  non-training phases, project name read from the `conf/experiment/` `wandb:` block (SPEC
+  §W&B logging discipline). Reused by Phases 5–6.
+- [ ] Owned **observation-only latency hook** (`src/eval_latency.py`): times one CEM
+  planning cycle via the vendored eval's `callables=` seam and logs it. Read the real
+  `callables=` signature from `eval_wm.py` on the pod first. Must only read/record — no
+  effect on seeds, sample counts, or the plan (else → 🔴 OWNER, SPEC parity gate).
+  Eager-baseline latency (median of a few `solve` calls); the rigorous p50/p95 rig is Phase 5.
+
+- [ ] 🖥️ Run `scripts.plan.eval_wm` (CEM solver) for **both** tracks: Push-T **success rate**
+  + **planning latency**.
 - [ ] 🔴 **Parity (load-bearing):** same CEM config (300 samples, 30 elites, horizon 5,
   init var 1, 10–30 iters), same action budget, same goal encoding, same eval seeds,
   identical ImageNet normalization — confirm **not varied between tracks** (do not change
   the platform eval/CEM config).
 
-**Verify:** success-rate + latency for both tracks, logged to W&B; parity conditions
-recorded as identical.
+**Verify:** success-rate + latency for both tracks, logged to W&B (via the owned helper,
+shared project); parity conditions recorded as identical.
 
 ---
 
@@ -196,9 +214,13 @@ W&B; adapter target modules confirmed real.
   per-component profile; dim constants filled in Phase 4 from Phase-1 values).
 - `src/adapter.py`, `src/export.py`, `src/benchmark.py`, `src/profile.py`,
   `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
+- `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
+- `src/eval_latency.py` — owned observation-only planning-latency hook (Phase 3).
 - `conf/` — owned Hydra overlays (incl. `conf/experiment/{lewm,dinov3}.yaml`).
 - `scripts/train/lewm.py`, `scripts/train/prejepa.py` + `scripts/train/config/` —
   vendored platform entrypoints/configs, as used (provenance in `scripts/train/VENDORED.md`).
+- `scripts/plan/eval_wm.py` + `scripts/plan/config/{pusht.yaml, solver/cem.yaml}` —
+  vendored platform eval entrypoint/config, as used (provenance in `scripts/plan/VENDORED.md`).
 - `scripts/verify_encode.py` — Phase-2 encode sanity: latent dims + register-slice
   differential (owned, fails loud; no dataset/checkpoint needed).
 - `pyproject.toml`, `uv.lock`, `setup.sh` (pod bootstrap). `Dockerfile` +
