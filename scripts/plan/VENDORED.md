@@ -15,7 +15,14 @@ reserved `episode_idx`/`step_idx` index columns, so the check always falls back 
 available — `getattr(dataset, '_schema_names', dataset.column_names)` — so lance's
 `episode_idx` is seen while H5 behavior is unchanged. Upstream bug, specific to running eval
 on a `.lance` dataset (the eval overlays point `eval.dataset_name` at the trained
-`pusht_expert_train.lance`). No other lines changed.
+`pusht_expert_train.lance`).
+
+Same root cause, second site: the eval-episode selection read the reserved index columns via
+`dataset.get_row_data(idxs)[col_name]` / `[...]['step_idx']`, but `LanceDataset.get_row_data`
+builds its dict from `self._keys` — which excludes the reserved `episode_idx`/`step_idx` — so
+those keys are absent (`KeyError`). Switched to `dataset.get_col_data(col)[idxs]` (which reads
+the raw column directly, works for reserved columns, and is what the two preceding lines
+already use). Equivalent for H5. No other lines changed.
 
 Otherwise copied **verbatim.** The DINOv3-WM register-slice does **not** need a change
 here: eval reconstructs the model with `swm.wm.utils.load_pretrained(cfg.policy)`, which

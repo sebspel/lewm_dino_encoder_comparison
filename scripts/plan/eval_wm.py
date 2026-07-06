@@ -165,8 +165,8 @@ def run(cfg: DictConfig):
 
     print(random_episode_indices)
 
-    eval_episodes = dataset.get_row_data(random_episode_indices)[col_name]
-    eval_start_idx = dataset.get_row_data(random_episode_indices)['step_idx']
+    eval_episodes = dataset.get_col_data(col_name)[random_episode_indices]
+    eval_start_idx = dataset.get_col_data('step_idx')[random_episode_indices]
 
     if len(eval_episodes) < cfg.eval.num_eval:
         raise ValueError(
