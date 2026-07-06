@@ -10,8 +10,9 @@
 # model._target_ = src.dino_patch.DINOv3PreJEPA (load_pretrained), not from here.
 
 # Trained DINOv3-WM checkpoint run_name (conf/experiment/dinov3.yaml output_model_name),
-# at $STABLEWM_HOME/checkpoints/dino/.
-policy: dino
+# at $STABLEWM_HOME/checkpoints/dino/. Point at the final-epoch file directly: training
+# saves at epochs 5 and 10 (weights_epoch_{5,10}.pt), so the bare folder is ambiguous.
+policy: dino/weights_epoch_10.pt
 
 eval:
   # Same trained dataset as the LeWM track (parity) — overrides pusht.yaml's .h5 default.

@@ -9,8 +9,9 @@
 
 # Trained LeWM checkpoint run_name (scripts/train/config/lewm.yaml output_model_name),
 # at $STABLEWM_HOME/checkpoints/lewm/. eval_wm.py rebuilds the model (incl. its saved
-# _target_) via swm.wm.utils.load_pretrained.
-policy: lewm
+# _target_) via swm.wm.utils.load_pretrained. Point at the final-epoch file directly:
+# training saves every epoch (weights_epoch_{1..10}.pt), so the bare folder is ambiguous.
+policy: lewm/weights_epoch_10.pt
 
 eval:
   # The trained dataset (scripts/train/config/data/pusht.yaml), overriding pusht.yaml's
