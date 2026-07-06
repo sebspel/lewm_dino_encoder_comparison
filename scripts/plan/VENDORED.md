@@ -6,7 +6,18 @@ shipped in the PyPI wheel** (pod-confirmed absent — PLAN Phase 3), so they are
 from the tagged GitHub tree, same as the Phase-2 train vendoring
 (`scripts/train/VENDORED.md`).
 
-Copied **verbatim, unmodified.** The DINOv3-WM register-slice does **not** need a change
+**Deviation from verbatim (one bugfix — owner-approved).** `eval_wm.py`'s episode-index
+column detection reads `dataset.column_names` to choose `episode_idx` vs `ep_idx`. That
+works for the H5 format but not for `.lance`: `LanceDataset.column_names` excludes the
+reserved `episode_idx`/`step_idx` index columns, so the check always falls back to `ep_idx`
+— a field that doesn't exist in the lance schema — and `get_col_data('ep_idx')` raises
+`Schema error: No field named ep_idx`. Fix (all 3 occurrences): consult the raw schema when
+available — `getattr(dataset, '_schema_names', dataset.column_names)` — so lance's
+`episode_idx` is seen while H5 behavior is unchanged. Upstream bug, specific to running eval
+on a `.lance` dataset (the eval overlays point `eval.dataset_name` at the trained
+`pusht_expert_train.lance`). No other lines changed.
+
+Otherwise copied **verbatim.** The DINOv3-WM register-slice does **not** need a change
 here: eval reconstructs the model with `swm.wm.utils.load_pretrained(cfg.policy)`, which
 rebuilds it from the checkpoint's own saved `config.yaml` — that config already carries
 `model._target_: src.dino_patch.DINOv3PreJEPA` (baked in at train time,

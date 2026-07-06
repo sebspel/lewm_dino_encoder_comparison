@@ -31,7 +31,9 @@ def img_transform(cfg, dtype=torch.float32):
 
 def get_episodes_length(dataset, episodes):
     col_name = (
-        'episode_idx' if 'episode_idx' in dataset.column_names else 'ep_idx'
+        'episode_idx'
+        if 'episode_idx' in getattr(dataset, '_schema_names', dataset.column_names)
+        else 'ep_idx'
     )
 
     episode_idx = dataset.get_col_data(col_name)
@@ -73,7 +75,9 @@ def run(cfg: DictConfig):
     dataset = get_dataset(cfg, cfg.eval.dataset_name)
     stats_dataset = dataset  # get_dataset(cfg, cfg.dataset.stats)
     col_name = (
-        'episode_idx' if 'episode_idx' in dataset.column_names else 'ep_idx'
+        'episode_idx'
+        if 'episode_idx' in getattr(dataset, '_schema_names', dataset.column_names)
+        else 'ep_idx'
     )
     ep_indices, _ = np.unique(
         stats_dataset.get_col_data(col_name), return_index=True
@@ -138,7 +142,9 @@ def run(cfg: DictConfig):
     }
     # Map each dataset row’s episode_idx to its max_start_idx
     col_name = (
-        'episode_idx' if 'episode_idx' in dataset.column_names else 'ep_idx'
+        'episode_idx'
+        if 'episode_idx' in getattr(dataset, '_schema_names', dataset.column_names)
+        else 'ep_idx'
     )
     max_start_per_row = np.array(
         [max_start_idx_dict[ep_id] for ep_id in dataset.get_col_data(col_name)]
