@@ -15,6 +15,14 @@ behavioural change is layered on top via Hydra (`conf/experiment/dinov3.yaml` �
   line is dropped rather than replaced. DINOv3-WM (frozen ViT-S/16, batch 32) fits the
   L40S without it. `lewm.py` does not reference this callback, so it needs no change.
 
+- `lewm.py`: `SaveCkptCallback` was passed `cfg=cfg` (the whole training config) →
+  `save_pretrained` wrote that as `config.json`, which has no top-level `_target_`, so
+  `load_pretrained`'s `instantiate(config)` returns a dict and `.load_state_dict` fails at
+  eval time. Changed to `cfg=cfg.model` to match `prejepa.py` (which already passes
+  `cfg.model`), so `config.json` is the model node and reconstructs the model. Preventive —
+  does not fix checkpoints already saved with the whole cfg (repair those config.json files
+  to their `["model"]` sub-node; the state_dict is unaffected).
+
 - **Source:** `galilai-group/stable-worldmodel`
 - **Tag:** `0.1.1` (matches the `stable-worldmodel==0.1.1` pin in `uv.lock`)
 - **Commit:** `15a5538d492ae524c64cb18cc56a2d70611e877e`
