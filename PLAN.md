@@ -209,9 +209,13 @@ CEM rollouts completed**. **Every speed number is paired with an SR** (Phase-3 e
 precision). (See SPEC §Parity, `src/interfaces.py`.)
 
 - [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, **FP32→FP16→INT8**, per model:
-  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. ONNX/TRT
-  debugging, INT8 **calibration set + procedure**, and FP32/FP16/INT8 **precision
-  matching** are OWNER-ONLY — STOP and ask.
+  `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
+  `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
+  `dynamo=True` explicitly on torch 2.6), aiming a thin `nn.Module` forward-wrapper at each
+  method — `encode` + `predict` traced separately → **4 ONNX graphs** total (2 methods × 2
+  models); precision multiplies TensorRT engines, not graphs. ONNX/TRT debugging, INT8
+  **calibration set + procedure**, and FP32/FP16/INT8 **precision matching** are
+  OWNER-ONLY — STOP and ask.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
   per planning cycle, for both models × precisions (`src/profile.py` or a `benchmark`
   mode). Use the Phase-1 cycle decomposition.

@@ -175,7 +175,14 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   predict many times over the cached latent — a single fused `obs -> latent` graph could
   not reproduce that call pattern (see the adapter bullet). ONNX/TensorRT does not require
   a single fused forward: each method is exported by pointing the tracer at it with its own
-  example inputs. Only the **model** (encoder + predictor) is exported; the CEM planner is not.
+  example inputs. Tracing uses the **TorchDynamo exporter** (`torch.onnx.export(dynamo=True)`
+  — the legacy TorchScript exporter is deprecated; on the pinned torch 2.6 `dynamo=True` is
+  passed explicitly since it is not the default until 2.9), aimed at each method via a thin
+  `nn.Module` whose `forward` calls it (shapes come from the example inputs + `dynamic_shapes`
+  for the variable candidate batch). Across both tracks this is **4 ONNX graphs** (encode +
+  predict × LeWM + DINO-WM); precision (FP32/FP16/INT8) is a TensorRT engine-build setting,
+  not additional graphs, so it multiplies engines, not ONNX. Only the **model** (encoder +
+  predictor) is exported; the CEM planner is not.
 - `benchmark(engine, time_budget) -> {latency_p50, latency_p95, rollouts_completed,
   throughput, peak_mem, success_rate}` — fixed wall-clock budget; rollouts is the
   headline speed measure, and **every speed result carries the SR for that engine
