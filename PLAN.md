@@ -149,7 +149,7 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
   `model._target_` reconstructs the register-slice subclass (196-grid, `src` importable),
   and SR is unchanged vs a callback-free run (callbacks feed `outputs['callbacks']` only,
   never the optimization).
-- [ ] 🔴 **Parity (load-bearing):** same CEM config (300 samples, 30 elites, horizon 5,
+- [x] 🔴 **Parity (load-bearing):** same CEM config (300 samples, 30 elites, horizon 5,
   init var 1, 10–30 iters), same action budget, same goal encoding, same eval seeds,
   identical ImageNet normalization — confirm **not varied between tracks** (do not change
   the platform eval/CEM config).
@@ -160,22 +160,40 @@ conditions recorded as identical.
 
 ---
 
-## Phase 4 — Owned adapter + tracer bullet  🟢 · (sole pre-optimization check)
+## Phase 4 — Owned adapter + tracer bullet  🟢 · 🔴 (adapter-dims sign-off) · (sole pre-optimization check)
 
+- [ ] **Reconcile `src/interfaces.py` to the two-method adapter** (SPEC §Interface
+  Contracts): replace the single fused `WMStepAdapter.__call__(obs, action) -> latent`
+  with separately-callable `encode(obs) -> latent` + `predict(latent, action) -> latent`,
+  so each exports to its own engine and the rollout can encode-once / predict-many. Adjust
+  the `Export` (and `Benchmark`) Protocols to the two-engine reality — `export` targets
+  `encode` and `predict` separately (per-method example inputs: `encode` obs; `predict`
+  cached latent + action) and yields the encoder + predictor engine paths; the benchmark
+  consumes both.
+- [ ] Constants defined **once** in `interfaces.py` from the Phase-1 values: `LATENT_DIM=192`,
+  DINO-WM patch-grid `(N_patches, D)=(196, 384)`, `ACTION_DIM=2`, and the DINO-WM
+  predictor-input token width `404` (`=384+20` extras concatenated on the feature axis,
+  distinct from the 384 latent); platform dims read from config.
+- [ ] 🔴 **OWNER gate — adapter dims:** confirm the DINO-WM `predict` boundary widths
+  (input `404 = 384 latent + 20 extras`; output width per the instantiated predictor) by
+  introspecting the real predictor on the pod before hard-coding — a wrong width mis-shapes
+  the predictor engine **silently** (SPEC §Implementation Boundaries).
 - [ ] Implement **`WMStepAdapter`** as two classes (`LeWMAdapter` single-token latent,
-  `DINOWMAdapter` patch-grid latent) behind a common `encode`/`predict` signature, typed
-  per `src/interfaces.py`. The adapter wraps the model (encoder + predictor); the CEM
-  planner / rollout loop stays in Python outside it.
-- [ ] Constants (`LATENT_DIM`, DINO-WM patch-grid `(N_patches, D)`, `ACTION_DIM`) defined
-  **once** in `interfaces.py` from the Phase-1 values; platform dims read from config.
+  `DINOWMAdapter` patch-grid latent) behind the common `encode`/`predict` signature, typed
+  per `src/interfaces.py`. Each wraps the model's encoder + predictor; action enters
+  `predict` per-track (LeWM: separate AdaLN arg; DINO-WM: concatenated on the feature axis
+  inside the adapter). The CEM planner / rollout loop stays in Python outside it.
 - [ ] Implement `export()` and `benchmark()` **stubs** conforming to the `Export` /
-  `Benchmark` Protocols + `ExportConfig`.
-- [ ] `src/smoke.py`: dummy checkpoint → adapter → export-stub → benchmark-stub, with
-  jaxtyping + beartype assertions at **every owned boundary**.
-- [ ] `tests/` covering adapter shapes and the typed boundaries.
+  `Benchmark` Protocols + `ExportConfig` — `export` stub emits an encoder + a predictor
+  engine path per model; `benchmark` stub consumes both.
+- [ ] `src/smoke.py`: dummy checkpoint → adapter (`encode`, then `predict` on the cached
+  latent) → export-stub → benchmark-stub, with jaxtyping + beartype assertions at **every
+  owned boundary**.
+- [ ] `tests/` covering adapter shapes (both `encode` and `predict`, both tracks) and the
+  typed boundaries.
 
 **Verify:** `uv run python -m src.smoke` passes; `uv run pytest -v` green; a
-shape/precision violation actually raises.
+shape/precision violation actually raises at both the `encode` and `predict` boundaries.
 
 ---
 

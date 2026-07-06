@@ -169,8 +169,13 @@ just a PLAN verify assertion.
 export/benchmark/QLoRA layer that sits on top of a trained platform model.
 Runtime-checked via jaxtyping + beartype with shared named axes.
 
-- `export(model, precision) -> engine_path` — PyTorch -> ONNX -> TensorRT. Only the
-  **model** (encoder + predictor, via the adapter) is exported; the CEM planner is not.
+- `export(adapter, precision) -> {encoder, predictor} engine paths` — PyTorch -> ONNX ->
+  TensorRT. The adapter's `encode` and `predict` are traced and built **separately** (one
+  ONNX graph / TensorRT engine each), because the CEM rollout encodes once and calls
+  predict many times over the cached latent — a single fused `obs -> latent` graph could
+  not reproduce that call pattern (see the adapter bullet). ONNX/TensorRT does not require
+  a single fused forward: each method is exported by pointing the tracer at it with its own
+  example inputs. Only the **model** (encoder + predictor) is exported; the CEM planner is not.
 - `benchmark(engine, time_budget) -> {latency_p50, latency_p95, rollouts_completed,
   throughput, peak_mem, success_rate}` — fixed wall-clock budget; rollouts is the
   headline speed measure, and **every speed result carries the SR for that engine
@@ -178,13 +183,24 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
 - `profile(adapter, ...) -> {encoder_ms, predictor_ms, planner_ms}` — per-component
   breakdown to locate the bottleneck (encoder vs predictor vs CEM planner)
 - `plan_latency(model, obs, goal) -> seconds` — one CEM planning cycle, timed
-- A thin adapter exposing each platform model behind a common
-  `encode / predict` signature so export and benchmark treat both tracks identically.
-  **One shared Protocol, two concrete implementations** (`LeWMAdapter`,
-  `DINOWMAdapter`): identical call signature so the plumbing never branches, but the
-  latent shape differs by model (LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`).
-  **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in Python
-  around it** — the planner is never compiled into the engine.
+- A thin adapter exposing each platform model behind a common **two-method**
+  `encode` / `predict` signature — **not** a single fused `__call__(obs, action) -> latent`
+  — so export and benchmark treat both tracks identically. The two methods are **separately
+  callable and separately exported**: the CEM rollout encodes the obs **once**, caches the
+  latent, then calls `predict` autoregressively over the horizon for all candidates (the
+  platform's `rollout`). `encode` and `predict` must therefore stay distinct — a fused
+  `obs -> latent` step would re-encode on every predictor call, inflating encoder cost and
+  erasing the encoder-cached / predictor-dominates asymmetry the study measures. Export
+  produces **two engines per model** (encoder + predictor), each traced from its own
+  example inputs (`encode`: obs; `predict`: cached latent + action), and the Python rollout
+  drives both at benchmark time.
+  **One shared Protocol, two concrete implementations** (`LeWMAdapter`, `DINOWMAdapter`):
+  identical method signatures so the plumbing never branches, but the latent shape differs
+  by model (LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`) and the action enters `predict`
+  differently per track (LeWM: a separate AdaLN-conditioning argument; DINO-WM: concatenated
+  onto the feature axis inside the adapter, widening the predictor tokens to 404 — see
+  Constants). **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in
+  Python around it** — the planner is never compiled into the engine.
 - **Re-entering the platform eval on the optimized model (Phase-5 SR-per-precision).**
   The CEM solver calls the world model via `get_cost` / `get_action` — not `encode` /
   `predict` directly. So to produce the SR that pairs with each precision's speed number,
@@ -194,9 +210,15 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   unchanged on the optimized model. The shim stays in Python; only `encode` / `predict`
   lives inside the engine — the planner is still never compiled in.
 
-Constants (`LATENT_DIM` for LeWM's single-token latent, the DINO-WM patch-grid latent
-shape `(N_patches, D)`, `ACTION_DIM = 2`) are defined ONCE here; the platform's own
-dims are read from its config, not re-guessed.
+Constants (`LATENT_DIM = 192` for LeWM's single-token latent, the DINO-WM patch-grid latent
+shape `(N_patches, D) = (196, 384)`, `ACTION_DIM = 2`, and the DINO-WM **predictor-input
+token width** `404 = D + Σ(extra encoding dims) = 384 + 20`) are defined ONCE here; the
+platform's own dims are read from its config, not re-guessed. The 404 width is distinct from
+the 384 latent because the action/proprio embeddings are tiled and concatenated onto the
+feature axis before `predict` (`prejepa.encode`), so the DINO-WM `predict` boundary is
+404-wide on input, not 384. It is a **silently-failing** dim (a wrong value mis-shapes the
+predictor engine with no error), so it is owner-confirmed against the instantiated predictor
+alongside the Phase-1 dims.
 
 ---
 
@@ -239,7 +261,8 @@ and ask before touching:
 - QLoRA targeting (which DINOv3 modules, rank, what stays frozen — note the predictor
   is unfrozen and co-trained, so only backbone targeting is open)
 - the benchmark fairness conditions (matched precision, fixed time budget, env/goal)
-- the model adapter dims (`LATENT_DIM`, DINO-WM patch-grid latent shape `(N_patches, D)`, `ACTION_DIM`)
+- the model adapter dims (`LATENT_DIM`, DINO-WM patch-grid latent shape `(N_patches, D)`,
+  the DINO-WM predictor-input token width `404 = 384 + 20 extras`, `ACTION_DIM`)
 - any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity
 
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
