@@ -143,7 +143,7 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
   `wandb:` block (shared project), and inject the latency callback via `cfg.solver.callbacks`.
   The training overlays (`lewm`/`dinov3`) carry only training keys and are **not** reused for
   eval — composing one leaves `policy=random` (random policy, not the trained WM).
-- [ ] 🖥️ Run the eval driver for **both** tracks:
+- [x] 🖥️ Run the eval driver for **both** tracks:
   `uv run python -m src.eval --config-dir conf +experiment=eval_<lewm|dino>` → Push-T
   **success rate** + **CEM-solve latency**. Pod-confirm: the checkpoint's saved
   `model._target_` reconstructs the register-slice subclass (196-grid, `src` importable),
@@ -162,7 +162,7 @@ conditions recorded as identical.
 
 ## Phase 4 — Owned adapter + tracer bullet  🟢 · 🔴 (adapter-dims sign-off) · (sole pre-optimization check)
 
-- [ ] **Reconcile `src/interfaces.py` to the two-method adapter** (SPEC §Interface
+- [x] **Reconcile `src/interfaces.py` to the two-method adapter** (SPEC §Interface
   Contracts): replace the single fused `WMStepAdapter.__call__(obs, action) -> latent`
   with separately-callable `encode(obs) -> latent` + `predict(latent, action) -> latent`,
   so each exports to its own engine and the rollout can encode-once / predict-many. Adjust
@@ -170,26 +170,26 @@ conditions recorded as identical.
   `encode` and `predict` separately (per-method example inputs: `encode` obs; `predict`
   cached latent + action) and yields the encoder + predictor engine paths; the benchmark
   consumes both.
-- [ ] Constants defined **once** in `interfaces.py` from the Phase-1 values: `LATENT_DIM=192`,
+- [x] Constants defined **once** in `interfaces.py` from the Phase-1 values: `LATENT_DIM=192`,
   DINO-WM patch-grid `(N_patches, D)=(196, 384)`, `ACTION_DIM=2`, and the DINO-WM
   predictor-input token width `404` (`=384+20` extras concatenated on the feature axis,
   distinct from the 384 latent); platform dims read from config.
-- [ ] 🔴 **OWNER gate — adapter dims:** confirm the DINO-WM `predict` boundary widths
+- [x] 🔴 **OWNER gate — adapter dims:** confirm the DINO-WM `predict` boundary widths
   (input `404 = 384 latent + 20 extras`; output width per the instantiated predictor) by
   introspecting the real predictor on the pod before hard-coding — a wrong width mis-shapes
   the predictor engine **silently** (SPEC §Implementation Boundaries).
-- [ ] Implement **`WMStepAdapter`** as two classes (`LeWMAdapter` single-token latent,
+- [x] Implement **`WMStepAdapter`** as two classes (`LeWMAdapter` single-token latent,
   `DINOWMAdapter` patch-grid latent) behind the common `encode`/`predict` signature, typed
   per `src/interfaces.py`. Each wraps the model's encoder + predictor; action enters
   `predict` per-track (LeWM: separate AdaLN arg; DINO-WM: concatenated on the feature axis
   inside the adapter). The CEM planner / rollout loop stays in Python outside it.
-- [ ] Implement `export()` and `benchmark()` **stubs** conforming to the `Export` /
+- [x] Implement `export()` and `benchmark()` **stubs** conforming to the `Export` /
   `Benchmark` Protocols + `ExportConfig` — `export` stub emits an encoder + a predictor
   engine path per model; `benchmark` stub consumes both.
-- [ ] `src/smoke.py`: dummy checkpoint → adapter (`encode`, then `predict` on the cached
+- [x] `src/smoke.py`: dummy checkpoint → adapter (`encode`, then `predict` on the cached
   latent) → export-stub → benchmark-stub, with jaxtyping + beartype assertions at **every
   owned boundary**.
-- [ ] `tests/` covering adapter shapes (both `encode` and `predict`, both tracks) and the
+- [x] `tests/` covering adapter shapes (both `encode` and `predict`, both tracks) and the
   typed boundaries.
 
 **Verify:** `uv run python -m src.smoke` passes; `uv run pytest -v` green; a
