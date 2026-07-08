@@ -73,7 +73,7 @@ class EngineRunner:
             output_shape = self.context.get_tensor_shape(name)
             output_dtype = _torch_dtype(self.engine.get_tensor_dtype(name))
             output_buffer = torch.empty(
-                output_shape,
+                tuple(output_shape),
                 dtype=output_dtype,
                 device=self.device,
             )
