@@ -214,6 +214,18 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   trained checkpoint via the platform `load_pretrained` (reuse the Phase-3 eval load path,
   not a hand-rolled `torch.load`) and wrap in `LeWM`/`DINOWMAdapter`. Fails loud.
 
+- [ ] 🔴 **DINO-WM `predict` — faithful `404 → 404` reconstruction:** revise
+  `DINOWMAdapter.predict` to mirror `PreJEPA.predict` (dim-preserving; do **not** slice to
+  384 — keep the predicted proprio). Move the extras embedding + initial `384 → 404` assembly
+  and the per-step action-replacement + proprio-carry (`replace_action_in_embedding`) into
+  the Python rollout/shim. Update `interfaces.py` predict I/O (`404 → 404`) + the `predict`
+  example inputs (SPEC §Interface Contracts). → verify: predict output width == 404.
+- [ ] 🟢 **Adapter-fidelity gate (before export):** on the real checkpoint, assert the
+  adapter's `encode` + `predict` + shim rollout + criterion reproduces the platform's
+  `rollout` / `get_cost` within tolerance — `predict` *reconstructs* the platform forward, so
+  a wrong `404` assembly/carry passes engine precision-match yet corrupts SR. → verify: max
+  abs drift vs `get_cost` within tolerance on real weights.
+
 - [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
   `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
@@ -227,7 +239,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   dataset — a representative Push-T sample drawn **through the platform** (matched ImageNet
   normalization), streamed through the real adapter so TensorRT observes `encode`/`predict`
   activations and derives per-tensor INT8 scales — then build the INT8 engines
-  (`src.export … precision=int8`). Two streams (encoder obs; predictor cached-latent+action).
+  (`src.export … precision=int8`). Two streams (encoder obs; predictor `404` embedding).
   OWNER-ONLY silent-failure: owner sets the sample source/count and calibrator. Sequenced
   **before** the precision-match gate so INT8 earns a drift row (its drift *is* the
   calibration-quality signal), not just a downstream SR. ⏱️ capped with FP16-only fallback.
@@ -243,8 +255,9 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   **rollouts completed**, **per-step latency p50/p95**, throughput (rollouts/sec), **peak
   GPU memory**, **and SR** — the Phase-3 eval driver re-run on the optimized model, which
   slots into `CEMSolver(model=...)` through a thin Python `get_cost`/`get_action` shim over
-  the engine's `encode`/`predict` (SPEC §Interface Contracts). Same env/goal/precision/budget
-  across models; only the model differs.
+  the engine's `encode`/`predict` (SPEC §Interface Contracts). The DINO shim reproduces
+  `PreJEPA.rollout` (full `404` carry, per-step action-replace, proprio+pixels cost). Same
+  env/goal/precision/budget across models; only the model differs.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component

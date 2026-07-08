@@ -199,14 +199,23 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   `obs -> latent` step would re-encode on every predictor call, inflating encoder cost and
   erasing the encoder-cached / predictor-dominates asymmetry the study measures. Export
   produces **two engines per model** (encoder + predictor), each traced from its own
-  example inputs (`encode`: obs; `predict`: cached latent + action), and the Python rollout
-  drives both at benchmark time.
+  example inputs (`encode`: obs -> the `(196, 384)` patch grid; `predict`: the assembled
+  `404` embedding), and the Python rollout drives both at benchmark time.
   **One shared Protocol, two concrete implementations** (`LeWMAdapter`, `DINOWMAdapter`):
   identical method signatures so the plumbing never branches, but the latent shape differs
   by model (LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`) and the action enters `predict`
-  differently per track (LeWM: a separate AdaLN-conditioning argument; DINO-WM: concatenated
-  onto the feature axis inside the adapter, widening the predictor tokens to 404 — see
-  Constants). **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in
+  differently per track (LeWM: a separate AdaLN-conditioning argument; DINO-WM: as part of
+  the `404` predictor embedding — see Constants). **DINO-WM `predict` is a faithful,
+  dim-preserving `404 -> 404` reconstruction of `PreJEPA.predict`**: it runs the causal
+  predictor over the `(pixels 384 | proprio 10 | action 10)` embedding and returns `404` —
+  it is **NOT** sliced back to 384, because the predicted **proprio** must survive (the CEM
+  criterion scores predicted proprio *and* pixels against the goal, and the autoregressive
+  state carried across the horizon is the full `404`). The extras embedding
+  (`extra_encoders`), the initial `384 -> 404` assembly, and the per-step
+  **action-replacement + proprio-carry** (mirroring `PreJEPA.rollout` /
+  `replace_action_in_embedding`: replace only the action channels each step, keep the
+  predictor's own predicted proprio) live in the **Python rollout/shim**, not the compiled
+  engine. **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in
   Python around it** — the planner is never compiled into the engine.
 - **Re-entering the platform eval on the optimized model (Phase-5 SR-per-precision).**
   The CEM solver calls the world model via `get_cost` / `get_action` — not `encode` /
@@ -215,7 +224,11 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   `get_cost` / `get_action` (which call the engine's `encode` / `predict` underneath) and
   slotted into `CEMSolver(model=...)`, letting the Phase-3 owned eval driver re-run
   unchanged on the optimized model. The shim stays in Python; only `encode` / `predict`
-  lives inside the engine — the planner is still never compiled in.
+  lives inside the engine — the planner is still never compiled in. For DINO-WM the shim
+  must reproduce `PreJEPA.rollout` **faithfully**: carry the full `404` state, replace only
+  the action channels each step (`replace_action_in_embedding`), keep the predictor's
+  predicted proprio, and compute the cost from predicted **proprio and pixels** — otherwise
+  the SR is not comparable to the Phase-3 baseline (a silent parity break).
 
 Constants (`LATENT_DIM = 192` for LeWM's single-token latent, the DINO-WM patch-grid latent
 shape `(N_patches, D) = (196, 384)`, `ACTION_DIM = 2`, and the DINO-WM **predictor-input
@@ -223,9 +236,11 @@ token width** `404 = D + Σ(extra encoding dims) = 384 + 20`) are defined ONCE h
 platform's own dims are read from its config, not re-guessed. The 404 width is distinct from
 the 384 latent because the action/proprio embeddings are tiled and concatenated onto the
 feature axis before `predict` (`prejepa.encode`), so the DINO-WM `predict` boundary is
-404-wide on input, not 384. It is a **silently-failing** dim (a wrong value mis-shapes the
-predictor engine with no error), so it is owner-confirmed against the instantiated predictor
-alongside the Phase-1 dims.
+`404`-wide on **both input and output** — the predictor is dim-preserving and its output is
+**not** sliced back to 384 (the predicted proprio channels are load-bearing for the criterion
+and the autoregressive carry). It is a **silently-failing** dim (a wrong value, or a dropped
+proprio channel, mis-shapes or mis-scores with no error), so it is owner-confirmed against
+the instantiated predictor alongside the Phase-1 dims.
 
 ---
 
@@ -308,6 +323,12 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   adapter -> export stub -> benchmark stub end-to-end on random/dummy weights in the
   container, typed checks passing at every owned boundary. Sole pre-optimization
   integration check.
+- **Adapter-fidelity gate (before export):** because DINO-WM `predict` *reconstructs* the
+  platform forward rather than calling it, the adapter's `encode` + `predict` + rollout/shim
+  is first validated against the platform's own `rollout` / `get_cost` on the **real
+  checkpoint** (short-horizon drift within tolerance). A wrong `404` assembly, orientation, or
+  a dropped proprio channel passes engine precision-match (which only compares engine-vs-
+  adapter) yet silently corrupts every SR — this gate catches it before any engine is built.
 - **Engine fidelity gate (before benchmarking):** exported FP32/FP16/INT8 engines are
   precision-matched against the PyTorch reference on the **real checkpoints** before any
   profiling/benchmark builds on them (INT8 after its calibration set is built) — the export-stage analogue of the tracer bullet, so a
