@@ -65,15 +65,9 @@ class EngineRunner:
                 self.output_names.append(name)
 
     def _bind_outputs(self) -> list[Tensor]:
-        """Allocate + register an output buffer for each output tensor.
-
-        name in `self.output_names`:
-          1. read the now-resolved output shape: `self.context.get_tensor_shape(name)`
-          2. allocate a torch buffer: `torch.empty(shape, dtype=..., device=self.device)`
-             (dtype via `_torch_dtype(self.engine.get_tensor_dtype(name))`)
-          3. register its pointer: `self.context.set_tensor_address(name, buf.data_ptr())`
-        Collect the buffers in order and return them.
-        """
+        """Allocate + register an output buffer for each output tensor. Called after input
+        shapes are set on the context, since a dynamic output axis only resolves once the
+        inputs it depends on are known."""
         outputs = []
         for name in self.output_names:
             output_shape = self.context.get_tensor_shape(name)

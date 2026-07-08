@@ -54,19 +54,10 @@ def reference_outputs(
     encode_inputs: tuple[Tensor, ...],
     predict_inputs: tuple[Tensor, ...],
 ) -> dict[str, Tensor]:
-    """TODO(human): compute the PyTorch reference outputs the engines are compared against.
-
-    Return a dict with exactly these keys (they line up with `EnginePaths` so the loop can
-    pair engine → reference by name):
-        {"encoder":  adapter.encode(*encode_inputs),
-         "predictor": adapter.predict(*predict_inputs)}
-
-    Two things that make the comparison valid:
-      - put the adapter in eval mode and wrap the calls in `torch.no_grad()` (deterministic,
-        no dropout/autograd — the engine has none either).
-      - feed `predict` the SAME cached latent that's in `predict_inputs` (do NOT re-encode);
-        that isolates predict's quantization drift from encode's.
-    """
+    """Compute the PyTorch reference outputs the engines are compared against. Keys
+    ("encoder"/"predictor") line up with `EnginePaths` so the loop can pair engine ->
+    reference by name. `predict` reuses the cached latent already in `predict_inputs`
+    (no re-encode), isolating predict's quantization drift from encode's."""
     adapter.eval()
     reference_dict = {}
     with torch.no_grad():
