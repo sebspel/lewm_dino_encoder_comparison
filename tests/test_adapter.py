@@ -14,6 +14,7 @@ from src.interfaces import (
     LATENT_DIM,
     DINO_N_PATCHES,
     DINO_LATENT_DIM,
+    DINO_PREDICTOR_DIM,
     MODEL_ACTION_DIM,
     DINO_PROPRIO_DIM,
     HISTORY_SIZE,
@@ -36,20 +37,21 @@ def _proprio():
     return torch.randn(B, T, DINO_PROPRIO_DIM)
 
 
-def _predict_conditioning(adapter, action=None):
-    """Per-track predict conditioning after the latent — DINO carries proprio + action,
-    LeWM just action (the plumbing drives predict(latent, *conditioning))."""
+def _predict_inputs(adapter, latent, action=None):
+    """Per-track predict input tuple. LeWM: (latent, action). DINO: a single pre-assembled
+    404 embedding (assemble_embedding tiles proprio+action onto the 384 latent) — the
+    plumbing drives predict(*inputs) for both."""
     action = _action() if action is None else action
     if isinstance(adapter, DINOWMAdapter):
-        return (_proprio(), action)
-    return (action,)
+        return (adapter.assemble_embedding(latent, _proprio(), action),)
+    return (latent, action)
 
 
 def test_lewm_shapes():
     adapter = LeWMAdapter(build_dummy_lewm())
     latent = adapter.encode(_obs())
     assert latent.shape == (B, T, LATENT_DIM)  # single token
-    nxt = adapter.predict(latent, *_predict_conditioning(adapter))
+    nxt = adapter.predict(*_predict_inputs(adapter, latent))
     assert nxt.shape == (B, T, LATENT_DIM)
 
 
@@ -57,8 +59,9 @@ def test_dino_shapes():
     adapter = DINOWMAdapter(build_dummy_dino())
     latent = adapter.encode(_obs())
     assert latent.shape == (B, T, DINO_N_PATCHES, DINO_LATENT_DIM)  # patch grid
-    nxt = adapter.predict(latent, *_predict_conditioning(adapter))
-    assert nxt.shape == (B, T, DINO_N_PATCHES, DINO_LATENT_DIM)
+    # predict is a faithful dim-preserving 404->404 step over the assembled embedding.
+    nxt = adapter.predict(*_predict_inputs(adapter, latent))
+    assert nxt.shape == (B, T, DINO_N_PATCHES, DINO_PREDICTOR_DIM)
 
 
 @pytest.mark.parametrize("build, cls", [
@@ -79,9 +82,9 @@ def test_encode_boundary_raises(build, cls):
 def test_predict_boundary_raises(build, cls):
     adapter = cls(build())
     latent = adapter.encode(_obs())
-    bad_action = torch.randn(B, T)  # missing the action_dim axis (2-D, not 3-D)
-    # The @typed boundary validates args on entry, before the body runs, so this fires for
-    # DINO too even though its predict body is not yet filled.
-    conditioning = _predict_conditioning(adapter, action=bad_action)
+    inputs = list(_predict_inputs(adapter, latent))
+    inputs[0] = inputs[0][:, 0]  # drop the hist axis of the state -> rank violation
+    # The @typed boundary validates args on entry, before the body runs, so a malformed
+    # predictor state is rejected for both tracks.
     with pytest.raises(BOUNDARY_VIOLATION):
-        adapter.predict(latent, *conditioning)
+        adapter.predict(*inputs)

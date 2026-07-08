@@ -44,11 +44,13 @@ class WMStepAdapter(Protocol):
         LeWMAdapter   -> Float[Tensor, "batch hist latent"]        (single token, D=192)
         DINOWMAdapter -> Float[Tensor, "batch hist patch latent"]  (patch grid, 196x384)
     Conditioning enters `predict` per-track and with per-track *arity* (hence the variadic
-    `*conditioning`): LeWM takes a single action tensor (AdaLN-conditioning); DINO-WM takes
-    proprio AND action, embedded and concatenated onto the feature axis inside the adapter
-    (widening the predictor tokens to 404). The plumbing stays arity-agnostic by driving
-    `predict(*inputs)`. The CEM planner / rollout loop stays in Python outside the adapter —
-    the adapter is the unit TensorRT optimizes.
+    `*conditioning`): LeWM takes `(latent, action)` — a single AdaLN-conditioning tensor
+    after the latent. DINO-WM's `predict` is a faithful, dim-preserving 404->404 step over a
+    *pre-assembled* embedding, so it takes a SINGLE 404-wide tensor (no separate conditioning
+    arg): the 384->404 proprio/action assembly (`DINOWMAdapter.assemble_embedding`) and the
+    per-step action-replacement live in the Python rollout/shim, not this call. The plumbing
+    stays arity-agnostic by driving `predict(*inputs)`. The CEM planner / rollout loop stays
+    in Python outside the adapter — the adapter is the unit TensorRT optimizes.
     """
 
     def encode(
@@ -75,7 +77,8 @@ class Export(Protocol):
         adapter: WMStepAdapter,
         precision: Precision,
         encode_inputs: tuple[Tensor, ...],  # example obs for the encoder graph
-        predict_inputs: tuple[Tensor, ...],  # example cached latent + action for predict
+        # example predict inputs: LeWM (cached latent, action); DINO (assembled 404 embedding)
+        predict_inputs: tuple[Tensor, ...],
         engine_dir: Path,
         calib_loader: DataLoader | None = None,  # required iff precision == "int8"
     ) -> EnginePaths: ...

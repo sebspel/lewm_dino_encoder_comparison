@@ -51,8 +51,8 @@ class _PredictModule(nn.Module):
         self.adapter = adapter
 
     def forward(self, *inputs: Tensor) -> Tensor:
-        # Arity-agnostic: LeWM drives (latent, action); DINO drives (latent, proprio,
-        # action). The per-track shapes come from the example inputs handed to the tracer.
+        # Arity-agnostic: LeWM drives (latent, action); DINO drives the single assembled 404
+        # embedding. The per-track shapes come from the example inputs handed to the tracer.
         return self.adapter.predict(*inputs)
 
 
@@ -60,7 +60,7 @@ def _batch_dynamic(n_inputs: int):
     """The `torch.export` dynamic_shapes spec handed to `torch.onnx.export(dynamo=True)` —
     one entry per positional forward arg, each declaring axis 0 (the CEM candidate batch) as
     dynamic so the ONNX graph and the TensorRT optimization profile accept a variable batch.
-    Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 3 (DINO)."""
+    Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 1 (DINO)."""
     batch = Dim("batch", min=1, max=_MAX_CANDIDATE_BATCH)
     return tuple({0: batch} for _ in range(n_inputs))
 

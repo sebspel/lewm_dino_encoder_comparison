@@ -19,7 +19,8 @@ def _inputs(adapter, batch=2):
     action = torch.randn(batch, HISTORY_SIZE, MODEL_ACTION_DIM)
     if isinstance(adapter, DINOWMAdapter):
         proprio = torch.randn(batch, HISTORY_SIZE, DINO_PROPRIO_DIM)
-        return (obs,), (latent, proprio, action)
+        embedding = adapter.assemble_embedding(latent, proprio, action)
+        return (obs,), (embedding,)
     return (obs,), (latent, action)
 
 

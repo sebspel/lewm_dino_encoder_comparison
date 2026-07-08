@@ -48,19 +48,25 @@ def benchmark(
     encoder = EngineRunner(engines["encoder"])
     predictor = EngineRunner(engines["predictor"])
     device = encoder.device
-    # The non-latent predict inputs (LeWM: action; DINO: proprio, action) are the fixed
-    # conditioning reused each step — this measures timing, not rollout correctness.
+    # predict_inputs[0] is the dim-preserving predictor STATE (LeWM: latent 192; DINO: the
+    # assembled 404 embedding) that `predict` returns unchanged in shape, so it re-feeds
+    # autoregressively. predict_inputs[1:] is the per-track fixed conditioning (LeWM: action;
+    # DINO: none) reused each step — this measures timing, not rollout correctness.
+    state0 = predict_inputs[0]
     conditioning = predict_inputs[1:]
 
     def _rollout() -> list[float]:
-        """One rollout: encode once, then HORIZON predictor steps feeding the latent
-        forward. Returns each predictor step's latency in ms (EngineRunner.run syncs its
-        stream, so perf_counter around it is an accurate per-step GPU wall-clock number)."""
-        latent = encoder.run(encode_inputs)
+        """One rollout: encode once (timed as the encoder cost), then HORIZON predictor
+        steps feeding the state forward. Returns each predictor step's latency in ms
+        (EngineRunner.run syncs its stream, so perf_counter around it is an accurate per-step
+        GPU wall-clock number). DINO's 384->404 assembly is a Python step outside the engine,
+        so the encoder output is not threaded directly into `predict` here."""
+        encoder.run(encode_inputs)
+        state = state0
         step_ms = []
         for _ in range(_ROLLOUT_HORIZON):
             t0 = perf_counter()
-            latent = predictor.run((latent, *conditioning))
+            state = predictor.run((state, *conditioning))
             step_ms.append((perf_counter() - t0) * 1000.0)
         return step_ms
 

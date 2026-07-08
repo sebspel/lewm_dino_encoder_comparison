@@ -4,17 +4,20 @@ One shared boundary — `encode(obs) -> latent`, `predict(latent, *conditioning)
 with two concrete implementations so the export/benchmark plumbing never branches:
 
     LeWMAdapter   single-token latent  (B, T, 192)        — action via AdaLN conditioning
-    DINOWMAdapter patch-grid latent    (B, T, 196, 384)   — proprio+action concat to 404
+    DINOWMAdapter patch-grid latent    (B, T, 196, 384)   — dim-preserving 404->404 predict
 
 Each adapter *wraps* the model's encoder + predictor (it calls those submodules; it does
 not reimplement the predictor/encoder internals — CLAUDE.md §8). The CEM rollout loop
-stays in Python outside the adapter; `predict` is a single autoregressive predictor step
-over the history window, exactly the unit TensorRT will optimize (SPEC §Interface
-Contracts). Every boundary is jaxtyping+beartype checked so a shape violation raises.
+stays in Python outside the adapter; `predict` is a single autoregressive predictor step,
+exactly the unit TensorRT will optimize (SPEC §Interface Contracts). Every boundary is
+jaxtyping+beartype checked so a shape violation raises.
 
-`predict` ingests the *model-facing* conditioning the trained modules expect — the frameskip
-action pack (`MODEL_ACTION_DIM=10`, not the env `ACTION_DIM=2` the CEM plans over) plus, for
-DINO-WM, the proprio extra — embedded by the real submodules this adapter binds. The
+The two tracks feed the action differently. LeWM `predict` ingests the *model-facing*
+frameskip action pack (`MODEL_ACTION_DIM=10`, not the env `ACTION_DIM=2` the CEM plans over)
+as an AdaLN-conditioning arg. DINO-WM `predict` mirrors `PreJEPA.predict` — a faithful,
+dim-preserving 404->404 step over the pre-assembled `(pixels 384 | proprio 10 | action 10)`
+embedding; the 384->404 assembly (`assemble_embedding`) and the per-step action-replacement
+live in the Python rollout/shim, NOT the compiled `predict` (SPEC §Interface Contracts). The
 env->model action packing lives in the CEM shim outside the adapter.
 """
 
@@ -68,7 +71,7 @@ class LeWMAdapter(nn.Module):
 
 
 class DINOWMAdapter(nn.Module):
-    """Wraps a DINOv3-WM model: register-slicing patch encoder + proprio/action-concat predictor."""
+    """Wraps a DINOv3-WM model: register-slicing patch encoder + dim-preserving 404 predictor."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
@@ -97,20 +100,36 @@ class DINOWMAdapter(nn.Module):
     @typed
     def predict(
         self,
+        embedding: Float[Tensor, "batch hist patch pred_dim"],
+    ) -> Float[Tensor, "batch hist patch pred_dim"]:
+        # Faithful mirror of PreJEPA.predict: run the dim-preserving causal predictor over
+        # the flattened (hist*patch) token axis, then reshape back. Output width == input
+        # width == DINO_PREDICTOR_DIM (404); the predicted proprio channels are KEPT (not
+        # sliced to 384) — they are load-bearing for the CEM criterion and the autoregressive
+        # carry (SPEC §Interface Contracts). The 384->404 assembly and the per-step
+        # action-replacement live in the Python rollout/shim (`assemble_embedding` /
+        # `replace_action_in_embedding`), never in this compiled step.
+        b, t, p, d = embedding.shape
+        assert d == DINO_PREDICTOR_DIM, (
+            f"predict input width {d} != {DINO_PREDICTOR_DIM}"
+        )
+        preds = self.predictor(embedding.reshape(b, t * p, d))
+        return preds.reshape(b, t, p, d)
+
+    @typed
+    def assemble_embedding(
+        self,
         latent: Float[Tensor, "batch hist patch latent"],
         proprio: Float[Tensor, "batch hist proprio"],
         action: Float[Tensor, "batch hist action"],
-    ) -> Float[Tensor, "batch hist patch latent"]:
-        # Reproduce PreJEPA.encode's extra assembly, then PreJEPA.predict. Each extra is
+    ) -> Float[Tensor, "batch hist patch pred_dim"]:
+        # Python-side (NOT compiled): mirror PreJEPA.encode's extra assembly. Each extra is
         # embedded by its Embedder, tiled across the patch axis, and concatenated onto the
-        # pixel latent on the feature axis to reach DINO_PREDICTOR_DIM (404). The predictor
-        # is dim-preserving, so the 384 pixel latent is sliced back out of its output —
-        # re-feedable as the next `latent` for the autoregressive rollout.
-        #
-        # Extras are concatenated in `extra_encoders` key order (the order the trained
-        # predictor learned); a wrong order is a plausible-but-wrong SR with NO error (SPEC
-        # §Impl Boundaries), so each input is matched to its encoder by name, not position.
-        b, t, p, d = latent.shape
+        # 384 pixel latent on the feature axis to reach DINO_PREDICTOR_DIM (404). Extras are
+        # concatenated in `extra_encoders` key order (the order the trained predictor
+        # learned); a wrong order is a plausible-but-wrong SR with NO error (SPEC §Impl
+        # Boundaries), so each input is matched to its encoder by name, not position.
+        b, t, p, _ = latent.shape
         extras = {"proprio": proprio, "action": action}
         embedding = latent
         for key in self.extra_encoders:
@@ -118,7 +137,6 @@ class DINOWMAdapter(nn.Module):
             extra_tiled = extra_embed.unsqueeze(2).expand(b, t, p, extra_embed.shape[-1])
             embedding = torch.cat([embedding, extra_tiled], dim=-1)  # (b, t, p, 404)
         assert embedding.shape[-1] == DINO_PREDICTOR_DIM, (
-            f"predictor input width {embedding.shape[-1]} != {DINO_PREDICTOR_DIM}"
+            f"assembled width {embedding.shape[-1]} != {DINO_PREDICTOR_DIM}"
         )
-        preds = self.predictor(embedding.reshape(b, t * p, DINO_PREDICTOR_DIM))
-        return preds.reshape(b, t, p, -1)[..., :d]
+        return embedding

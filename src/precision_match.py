@@ -39,20 +39,22 @@ def example_inputs(
     adapter: WMStepAdapter, cfg: ExportConfig, batch: int = _MATCH_BATCH
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
     """Build the SHARED example inputs both export-tracing and the reference consume:
-    `encode` gets an obs tensor; `predict` gets the *cached* latent (from one encode) plus
-    the per-track conditioning — the exact call pattern the CEM rollout drives (encode once,
-    predict many). DINO additionally carries proprio (its predict is `(latent, proprio,
-    action)`); LeWM carries only action.
+    `encode` gets an obs tensor; `predict` gets the predictor STATE (from one cached encode)
+    plus the per-track conditioning — the exact call pattern the CEM rollout drives (encode
+    once, predict many). LeWM's predict is `(latent, action)`; DINO's predict is a single
+    pre-assembled 404 embedding (`assemble_embedding` tiles proprio+action onto the 384
+    latent — a Python step outside the compiled predict).
     """
     from src.adapter import DINOWMAdapter
 
     obs = torch.randn(batch, cfg.hist, *cfg.obs_shape)
     with torch.no_grad():
         latent = adapter.encode(obs)  # cache the latent — predict reuses THIS tensor
-    action = torch.randn(batch, cfg.hist, cfg.action_dim)
-    if isinstance(adapter, DINOWMAdapter):
-        proprio = torch.randn(batch, cfg.hist, cfg.proprio_dim)
-        return (obs,), (latent, proprio, action)
+        action = torch.randn(batch, cfg.hist, cfg.action_dim)
+        if isinstance(adapter, DINOWMAdapter):
+            proprio = torch.randn(batch, cfg.hist, cfg.proprio_dim)
+            embedding = adapter.assemble_embedding(latent, proprio, action)
+            return (obs,), (embedding,)
     return (obs,), (latent, action)
 
 

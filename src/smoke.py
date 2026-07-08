@@ -94,7 +94,7 @@ def build_dummy_dino() -> nn.Module:
 
 
 def _run_track(
-    name: str, adapter, latent_shape_no_batch: tuple[int, ...], conditioning: tuple
+    name: str, adapter, latent_shape_no_batch: tuple[int, ...], make_predict_inputs
 ) -> None:
     b, t = 2, HISTORY_SIZE
     obs = torch.randn(b, t, 3, 224, 224)
@@ -102,11 +102,12 @@ def _run_track(
     latent = adapter.encode(obs)  # typed boundary
     assert latent.shape == (b, t, *latent_shape_no_batch), latent.shape
 
-    # predict on the cached latent + the per-track conditioning (LeWM: action; DINO:
-    # proprio, action) — the exact tuple export/benchmark trace and drive.
-    predict_inputs = (latent, *conditioning)
+    # Build the per-track predict inputs export/benchmark trace and drive (LeWM: the cached
+    # latent + action; DINO: the assembled 404 embedding). Both predicts are dim-preserving
+    # in their first (state) input, so `predict` returns that input's shape.
+    predict_inputs = make_predict_inputs(latent)
     nxt = adapter.predict(*predict_inputs)  # typed boundary
-    assert nxt.shape == latent.shape, nxt.shape
+    assert nxt.shape == predict_inputs[0].shape, nxt.shape
 
     cfg = ExportConfig()
     with tempfile.TemporaryDirectory() as d:
@@ -141,12 +142,20 @@ def main() -> None:
     b, t = 2, HISTORY_SIZE
     action = torch.randn(b, t, MODEL_ACTION_DIM)
     proprio = torch.randn(b, t, DINO_PROPRIO_DIM)
-    _run_track("lewm", LeWMAdapter(build_dummy_lewm()), (LATENT_DIM,), (action,))
+    dino = DINOWMAdapter(build_dummy_dino())
+    _run_track(
+        "lewm",
+        LeWMAdapter(build_dummy_lewm()),
+        (LATENT_DIM,),
+        lambda latent: (latent, action),
+    )
     _run_track(
         "dino",
-        DINOWMAdapter(build_dummy_dino()),
+        dino,
         (DINO_N_PATCHES, DINO_LATENT_DIM),
-        (proprio, action),
+        # DINO predict drives the assembled 404 embedding (assembly is Python-side, not
+        # compiled), so smoke exercises assemble_embedding -> predict end to end.
+        lambda latent: (dino.assemble_embedding(latent, proprio, action),),
     )
     print("smoke: PASS")
 
