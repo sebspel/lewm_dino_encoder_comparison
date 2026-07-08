@@ -127,7 +127,9 @@ def precision_match(
     abs/rel error; `passed` stays None until owner tolerances are set. Locally runnable.
     """
     ref = reference.detach().float()
-    out = engine_out.detach().float()
+    # Engine output lands on CUDA (EngineRunner allocates cuda buffers) while the PyTorch
+    # reference is a CPU tensor; harmonize onto the reference's device before comparing.
+    out = engine_out.detach().float().to(ref.device)
     diff = (ref - out).abs()
     max_abs = diff.max().item()
     max_rel = (diff / ref.abs().clamp_min(1e-12)).max().item()
