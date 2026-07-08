@@ -170,7 +170,10 @@ def build_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(0)  # TRT 10: explicit batch is implicit
     parser = trt.OnnxParser(network, logger)
-    if not parser.parse(onnx_path.read_bytes()):
+    # Pass the model path so TRT can resolve external-data sidecars (`<name>.onnx.data`);
+    # the dynamo exporter externalizes initializers, and a bare byte buffer loses the base
+    # dir needed to find them (would fail: "Failed to open file: encoder.onnx.data").
+    if not parser.parse(onnx_path.read_bytes(), str(onnx_path)):
         errs = "; ".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         raise RuntimeError(f"ONNX parse failed for {onnx_path}: {errs}")  # -> OWNER
 
