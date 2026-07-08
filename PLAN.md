@@ -214,16 +214,25 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   trained checkpoint via the platform `load_pretrained` (reuse the Phase-3 eval load path,
   not a hand-rolled `torch.load`) and wrap in `LeWM`/`DINOWMAdapter`. Fails loud.
 
-- [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, **FP32→FP16→INT8**, per model:
+- [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
   `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
   `dynamo=True` explicitly on torch 2.6), aiming a thin `nn.Module` forward-wrapper at each
   method — `encode` + `predict` traced separately → **4 ONNX graphs** total (2 methods × 2
-  models); precision multiplies TensorRT engines, not graphs. ONNX/TRT debugging, INT8
-  **calibration set + procedure**, and FP32/FP16/INT8 **precision matching** are
-  OWNER-ONLY — STOP and ask.
+  models); precision multiplies TensorRT engines, not graphs. **FP32 + FP16 build data-free
+  here; INT8 is deferred to the calibration step below** — its per-tensor scales require a
+  calibration pass, so the INT8 engine cannot exist until that set is built. ONNX/TRT
+  debugging and FP32/FP16/INT8 **precision matching** are OWNER-ONLY — STOP and ask.
+- [ ] 🔴 **INT8 calibration set + procedure (before the gate):** construct the calibration
+  dataset — a representative Push-T sample drawn **through the platform** (matched ImageNet
+  normalization), streamed through the real adapter so TensorRT observes `encode`/`predict`
+  activations and derives per-tensor INT8 scales — then build the INT8 engines
+  (`src.export … precision=int8`). Two streams (encoder obs; predictor cached-latent+action).
+  OWNER-ONLY silent-failure: owner sets the sample source/count and calibrator. Sequenced
+  **before** the precision-match gate so INT8 earns a drift row (its drift *is* the
+  calibration-quality signal), not just a downstream SR. ⏱️ capped with FP16-only fallback.
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
-  `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16
+  `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the
   rel-error metric (max vs percentile), set `PrecisionTolerance` `rtol`/`atol` (NaN →
   measured-not-gated until set). Engines trusted before the steps below build on them.
