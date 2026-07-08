@@ -24,7 +24,7 @@ from typing import Callable
 import torch
 from torch import Tensor
 
-from src.interfaces import ComponentProfile, WMStepAdapter
+from src.interfaces import ComponentProfile, WMStepAdapter, ACTION_DIM
 
 # CEM parity constants for the PLANNER micro-benchmark (docs/platform_api.md §3 — fixed,
 # do not vary between tracks): 300 candidates, 30 elites, horizon 5.
@@ -53,17 +53,17 @@ def _time_ms(
     return (perf_counter() - start) * 1000.0 / n_iters
 
 
-def _planner_step(
-    predict_inputs: tuple[Tensor, ...], device: torch.device
-) -> Callable[[], object]:
+def _planner_step(device: torch.device) -> Callable[[], object]:
     """Build the closure timed as PLANNER cost: one CEM iteration mirroring
     `stable_worldmodel.solver.cem.CEMSolver.solve` (sample -> force first candidate to the
     mean -> topk elites -> recompute mean/std) at `_CEM_BATCH=1` (the parity `batch_size=1`,
     docs/platform_api.md §3), with the model call excluded (docs/platform_api.md §5).
     `cost` stands in for `get_cost`'s entire output (model forward + MSE-to-goal criterion)
     since criterion cost scales with latent size and would otherwise leak the LeWM/DINO
-    token-count asymmetry into `planner_ms` (SPEC §Parity attribution)."""
-    action_dim = predict_inputs[1].shape[-1]
+    token-count asymmetry into `planner_ms` (SPEC §Parity attribution). The CEM optimizes the
+    env action (ACTION_DIM), not the model-facing frameskip pack, so candidates are that
+    width — and it barely affects timing (topk over 300 candidates dominates)."""
+    action_dim = ACTION_DIM
     mean = torch.zeros(_CEM_BATCH, _CEM_HORIZON, action_dim, device=device)
     std = torch.ones(_CEM_BATCH, _CEM_HORIZON, action_dim, device=device)
     cost = torch.randn(_CEM_BATCH, _CEM_NUM_SAMPLES, device=device)
@@ -102,7 +102,7 @@ def profile(
     """Time the encoder, predictor, and planner components of one planning cycle."""
     adapter.eval()
     device = encode_inputs[0].device
-    planner_step = _planner_step(predict_inputs, device)
+    planner_step = _planner_step(device)
     with torch.no_grad():
         encoder_ms = _time_ms(
             lambda: adapter.encode(*encode_inputs), n_iters, warmup, device

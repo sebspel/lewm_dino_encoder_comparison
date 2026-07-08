@@ -40,12 +40,19 @@ def example_inputs(
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
     """Build the SHARED example inputs both export-tracing and the reference consume:
     `encode` gets an obs tensor; `predict` gets the *cached* latent (from one encode) plus
-    an action — the exact call pattern the CEM rollout drives (encode once, predict many).
+    the per-track conditioning — the exact call pattern the CEM rollout drives (encode once,
+    predict many). DINO additionally carries proprio (its predict is `(latent, proprio,
+    action)`); LeWM carries only action.
     """
+    from src.adapter import DINOWMAdapter
+
     obs = torch.randn(batch, cfg.hist, *cfg.obs_shape)
     with torch.no_grad():
         latent = adapter.encode(obs)  # cache the latent — predict reuses THIS tensor
     action = torch.randn(batch, cfg.hist, cfg.action_dim)
+    if isinstance(adapter, DINOWMAdapter):
+        proprio = torch.randn(batch, cfg.hist, cfg.proprio_dim)
+        return (obs,), (latent, proprio, action)
     return (obs,), (latent, action)
 
 
@@ -117,19 +124,29 @@ def _print_table(rows: list[dict]) -> None:
         )
 
 
-def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
-    """Placeholder adapter source: dummy random weights (validates the export → runner →
-    compare chain against real TensorRT on the pod). Phase-5 swaps this for the real
-    checkpoint via the platform `load_pretrained` — drift numbers are only meaningful on
-    trained weights."""
-    from src.adapter import DINOWMAdapter, LeWMAdapter
-    from src.smoke import build_dummy_dino, build_dummy_lewm
+# Phase-2 checkpoints, addressed by the explicit epoch-10 .pt (the folder holds earlier
+# snapshots too, so a bare run name is ambiguous — load_pretrained format-1). Same names the
+# eval overlays will need for the SR-per-precision re-run.
+_CHECKPOINTS = {
+    "lewm": "lewm/weights_epoch_10.pt",
+    "dino": "dino/weights_epoch_10.pt",
+}
 
-    if track == "lewm":
-        return LeWMAdapter(build_dummy_lewm()), "lewm"
-    if track == "dino":
-        return DINOWMAdapter(build_dummy_dino()), "dino"
-    raise SystemExit(f"unknown track {track!r}; expected 'lewm' or 'dino'")
+
+def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
+    """Materialize the REAL trained checkpoint via the platform `load_pretrained` (reusing
+    the Phase-3 eval load path, not a hand-rolled `torch.load`) and wrap in the matching
+    adapter. Drift numbers are only meaningful on trained weights, so this runs on the pod
+    where the checkpoints + their DINOv3 backbone live. Fails loud."""
+    import stable_worldmodel as swm
+
+    from src.adapter import DINOWMAdapter, LeWMAdapter
+
+    if track not in _CHECKPOINTS:
+        raise SystemExit(f"unknown track {track!r}; expected 'lewm' or 'dino'")
+    model = swm.wm.utils.load_pretrained(_CHECKPOINTS[track])
+    adapter = LeWMAdapter(model) if track == "lewm" else DINOWMAdapter(model)
+    return adapter, track
 
 
 def main() -> None:

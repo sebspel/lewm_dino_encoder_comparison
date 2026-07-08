@@ -25,7 +25,8 @@ from src.interfaces import (
     DINO_N_PATCHES,
     DINO_LATENT_DIM,
     DINO_PREDICTOR_DIM,
-    ACTION_DIM,
+    MODEL_ACTION_DIM,
+    DINO_PROPRIO_DIM,
     HISTORY_SIZE,
     ExportConfig,
 )
@@ -69,31 +70,42 @@ def build_dummy_lewm() -> nn.Module:
     return SimpleNamespace(
         encoder=_PatchEncoder(LATENT_DIM, num_register_tokens=0),
         projector=nn.Linear(LATENT_DIM, LATENT_DIM),
-        action_encoder=nn.Linear(ACTION_DIM, LATENT_DIM),
+        action_encoder=nn.Linear(MODEL_ACTION_DIM, LATENT_DIM),  # 10-wide frameskip action
         predictor=DummyPredictor(),
         pred_proj=nn.Linear(LATENT_DIM, LATENT_DIM),
     )
 
 
 def build_dummy_dino() -> nn.Module:
-    """DINOv3-WM stand-in: register-slicing patch encoder + 404-wide concat predictor."""
+    """DINOv3-WM stand-in: register-slicing patch encoder + 404-wide concat predictor, with
+    the real ModuleDict of proprio/action extra-encoders (insertion order proprio→action, the
+    order the concat must follow to reach 404)."""
 
     return SimpleNamespace(
         backbone=_PatchEncoder(DINO_LATENT_DIM, num_register_tokens=4),
         predictor=nn.Linear(DINO_PREDICTOR_DIM, DINO_PREDICTOR_DIM),
-        action_encoder=nn.Linear(ACTION_DIM, _EXTRA_DIM),
+        extra_encoders=nn.ModuleDict(
+            {
+                "proprio": nn.Linear(DINO_PROPRIO_DIM, _EXTRA_DIM // 2),  # 4 -> 10
+                "action": nn.Linear(MODEL_ACTION_DIM, _EXTRA_DIM // 2),  # 10 -> 10
+            }
+        ),
     )
 
 
-def _run_track(name: str, adapter, latent_shape_no_batch: tuple[int, ...]) -> None:
+def _run_track(
+    name: str, adapter, latent_shape_no_batch: tuple[int, ...], conditioning: tuple
+) -> None:
     b, t = 2, HISTORY_SIZE
     obs = torch.randn(b, t, 3, 224, 224)
-    action = torch.randn(b, t, ACTION_DIM)
 
     latent = adapter.encode(obs)  # typed boundary
     assert latent.shape == (b, t, *latent_shape_no_batch), latent.shape
 
-    nxt = adapter.predict(latent, action)  # typed boundary, on the cached latent
+    # predict on the cached latent + the per-track conditioning (LeWM: action; DINO:
+    # proprio, action) — the exact tuple export/benchmark trace and drive.
+    predict_inputs = (latent, *conditioning)
+    nxt = adapter.predict(*predict_inputs)  # typed boundary
     assert nxt.shape == latent.shape, nxt.shape
 
     cfg = ExportConfig()
@@ -102,13 +114,13 @@ def _run_track(name: str, adapter, latent_shape_no_batch: tuple[int, ...]) -> No
             adapter,
             precision="fp32",
             encode_inputs=(obs,),
-            predict_inputs=(latent, action),
+            predict_inputs=predict_inputs,
             engine_dir=Path(d) / name,
         )
         result = benchmark(
             engines,
             encode_inputs=(obs,),
-            predict_inputs=(latent, action),
+            predict_inputs=predict_inputs,
             time_budget_s=cfg.time_budget_s,
             warmup=cfg.warmup,
         )
@@ -126,8 +138,16 @@ def _run_track(name: str, adapter, latent_shape_no_batch: tuple[int, ...]) -> No
 
 def main() -> None:
     torch.manual_seed(0)
-    _run_track("lewm", LeWMAdapter(build_dummy_lewm()), (LATENT_DIM,))
-    _run_track("dino", DINOWMAdapter(build_dummy_dino()), (DINO_N_PATCHES, DINO_LATENT_DIM))
+    b, t = 2, HISTORY_SIZE
+    action = torch.randn(b, t, MODEL_ACTION_DIM)
+    proprio = torch.randn(b, t, DINO_PROPRIO_DIM)
+    _run_track("lewm", LeWMAdapter(build_dummy_lewm()), (LATENT_DIM,), (action,))
+    _run_track(
+        "dino",
+        DINOWMAdapter(build_dummy_dino()),
+        (DINO_N_PATCHES, DINO_LATENT_DIM),
+        (proprio, action),
+    )
     print("smoke: PASS")
 
 

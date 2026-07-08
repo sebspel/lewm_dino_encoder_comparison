@@ -20,8 +20,16 @@ DINO_LATENT_DIM = 384  # DINOv3 hidden_size
 # latent; the CausalPredictor is dim-preserving so its output width is 404 too. A wrong
 # value mis-shapes the predictor engine SILENTLY — owner-confirmed against the source.
 DINO_PREDICTOR_DIM = 404
-ACTION_DIM = 2  # swm/PushT-v1 action_space Box(-1, 1, (2,))
+ACTION_DIM = 2  # swm/PushT-v1 action_space Box(-1, 1, (2,)) — env/planner-facing action
 HISTORY_SIZE = 3  # wm.history_size for both tracks
+# Model-facing action width: the CEM plans env ACTION_DIM (2) actions, but the world
+# models' action_encoder ingests the frameskip pack (5 × 2 = 10) — action_encoder is a
+# Conv1d(10, …) in BOTH tracks (owner-confirmed on the pod, 2026-07-08). Distinct from the
+# env ACTION_DIM; a wrong width mis-shapes the predictor engine SILENTLY.
+MODEL_ACTION_DIM = 10
+# DINO-WM proprio extra: extra_encoders['proprio'] is a Conv1d(4, 10) — proprio input is
+# 4-wide, embedded to 10 and concatenated (with action's 10) onto the 384 latent -> 404.
+DINO_PROPRIO_DIM = 4
 
 
 class WMStepAdapter(Protocol):
@@ -35,9 +43,12 @@ class WMStepAdapter(Protocol):
     plumbing knowing which:
         LeWMAdapter   -> Float[Tensor, "batch hist latent"]        (single token, D=192)
         DINOWMAdapter -> Float[Tensor, "batch hist patch latent"]  (patch grid, 196x384)
-    Action enters `predict` per-track (LeWM: separate AdaLN arg; DINO-WM: concatenated on
-    the feature axis inside the adapter). The CEM planner / rollout loop stays in Python
-    outside the adapter — the adapter is the unit TensorRT optimizes.
+    Conditioning enters `predict` per-track and with per-track *arity* (hence the variadic
+    `*conditioning`): LeWM takes a single action tensor (AdaLN-conditioning); DINO-WM takes
+    proprio AND action, embedded and concatenated onto the feature axis inside the adapter
+    (widening the predictor tokens to 404). The plumbing stays arity-agnostic by driving
+    `predict(*inputs)`. The CEM planner / rollout loop stays in Python outside the adapter —
+    the adapter is the unit TensorRT optimizes.
     """
 
     def encode(
@@ -48,7 +59,7 @@ class WMStepAdapter(Protocol):
     def predict(
         self,
         latent: Float[Tensor, "batch hist *latent"],
-        action: Float[Tensor, "batch hist action_dim"],
+        *conditioning: Float[Tensor, "batch hist cond"],
     ) -> Float[Tensor, "batch hist *latent"]: ...
 
 
@@ -111,7 +122,8 @@ class Profile(Protocol):
 class ExportConfig:
     hist: int = HISTORY_SIZE
     obs_shape: tuple[int, int, int] = (3, 224, 224)
-    action_dim: int = ACTION_DIM
+    action_dim: int = MODEL_ACTION_DIM  # model-facing action fed to predict (frameskip pack)
+    proprio_dim: int = DINO_PROPRIO_DIM  # DINO-WM proprio extra fed to predict
     precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
     warmup: int = 5
     time_budget_s: float = 10.0  # fixed wall-clock budget for the benchmark

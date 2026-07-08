@@ -48,7 +48,9 @@ def benchmark(
     encoder = EngineRunner(engines["encoder"])
     predictor = EngineRunner(engines["predictor"])
     device = encoder.device
-    _, action = predict_inputs  # the fixed action reused each step (timing, not correctness)
+    # The non-latent predict inputs (LeWM: action; DINO: proprio, action) are the fixed
+    # conditioning reused each step — this measures timing, not rollout correctness.
+    conditioning = predict_inputs[1:]
 
     def _rollout() -> list[float]:
         """One rollout: encode once, then HORIZON predictor steps feeding the latent
@@ -58,7 +60,7 @@ def benchmark(
         step_ms = []
         for _ in range(_ROLLOUT_HORIZON):
             t0 = perf_counter()
-            latent = predictor.run((latent, action))
+            latent = predictor.run((latent, *conditioning))
             step_ms.append((perf_counter() - t0) * 1000.0)
         return step_ms
 

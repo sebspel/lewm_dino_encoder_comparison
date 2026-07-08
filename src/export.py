@@ -22,7 +22,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -51,39 +50,19 @@ class _PredictModule(nn.Module):
         super().__init__()
         self.adapter = adapter
 
-    def forward(self, latent: Tensor, action: Tensor) -> Tensor:
-        return self.adapter.predict(latent, action)
+    def forward(self, *inputs: Tensor) -> Tensor:
+        # Arity-agnostic: LeWM drives (latent, action); DINO drives (latent, proprio,
+        # action). The per-track shapes come from the example inputs handed to the tracer.
+        return self.adapter.predict(*inputs)
 
 
-def _dynamic_shapes(method: Literal["encode", "predict"]):
-    """The `torch.export` dynamic_shapes spec handed to `torch.onnx.export(dynamo=True)`
-    for one method's trace — declaring which input axes vary at inference so the ONNX graph
-    (and the TensorRT optimization profile) accept a variable candidate batch.
-
-    Shape reference (from the wrapper `forward` signatures above):
-        encode.forward(obs)             obs    : (batch, hist, C, H, W)
-        predict.forward(latent, action) latent : (batch, hist, *latent)   # *latent per track
-                                        action : (batch, hist, action_dim)
-
-    The return value must match torch.export's format: a **tuple** with one entry per
-    positional forward arg, each entry a dict `{axis_index: Dim}` naming the dynamic axes
-    (omit an axis to keep it static). Use the module-level `Dim(...)` and
-    `_MAX_CANDIDATE_BATCH` (min=1). `encode` has one arg; `predict` has two.
-
-    """
-    batch = Dim(
-        "batch",
-        min=1,
-        max=_MAX_CANDIDATE_BATCH,
-    )
-    if method == "encode":
-        return ({0: batch},)
-
-    elif method == "predict":
-        return ({0: batch}, {0: batch})
-
-    else:
-        raise ValueError(f"unknown method {method!r}; expected 'encode' or 'predict'")
+def _batch_dynamic(n_inputs: int):
+    """The `torch.export` dynamic_shapes spec handed to `torch.onnx.export(dynamo=True)` —
+    one entry per positional forward arg, each declaring axis 0 (the CEM candidate batch) as
+    dynamic so the ONNX graph and the TensorRT optimization profile accept a variable batch.
+    Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 3 (DINO)."""
+    batch = Dim("batch", min=1, max=_MAX_CANDIDATE_BATCH)
+    return tuple({0: batch} for _ in range(n_inputs))
 
 
 def export_onnx(
@@ -228,11 +207,15 @@ def export(
     calibrator = _build_calibrator(calib_loader) if precision == "int8" else None
 
     specs = {
-        "encoder": (_EncodeModule(adapter), encode_inputs, _dynamic_shapes("encode")),
+        "encoder": (
+            _EncodeModule(adapter),
+            encode_inputs,
+            _batch_dynamic(len(encode_inputs)),
+        ),
         "predictor": (
             _PredictModule(adapter),
             predict_inputs,
-            _dynamic_shapes("predict"),
+            _batch_dynamic(len(predict_inputs)),
         ),
     }
     engines: dict[str, Path] = {}

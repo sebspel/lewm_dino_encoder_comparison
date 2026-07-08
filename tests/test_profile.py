@@ -9,14 +9,17 @@ import torch
 
 from src.adapter import LeWMAdapter, DINOWMAdapter
 from src.smoke import build_dummy_lewm, build_dummy_dino
-from src.interfaces import HISTORY_SIZE, ACTION_DIM
+from src.interfaces import HISTORY_SIZE, MODEL_ACTION_DIM, DINO_PROPRIO_DIM
 from src.profile import profile
 
 
 def _inputs(adapter, batch=2):
     obs = torch.randn(batch, HISTORY_SIZE, 3, 224, 224)
     latent = adapter.encode(obs)
-    action = torch.randn(batch, HISTORY_SIZE, ACTION_DIM)
+    action = torch.randn(batch, HISTORY_SIZE, MODEL_ACTION_DIM)
+    if isinstance(adapter, DINOWMAdapter):
+        proprio = torch.randn(batch, HISTORY_SIZE, DINO_PROPRIO_DIM)
+        return (obs,), (latent, proprio, action)
     return (obs,), (latent, action)
 
 

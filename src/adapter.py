@@ -1,10 +1,10 @@
 """Owned two-method adapters over the platform world models (Phase 4).
 
-One shared boundary — `encode(obs) -> latent`, `predict(latent, action) -> latent` —
+One shared boundary — `encode(obs) -> latent`, `predict(latent, *conditioning) -> latent` —
 with two concrete implementations so the export/benchmark plumbing never branches:
 
     LeWMAdapter   single-token latent  (B, T, 192)        — action via AdaLN conditioning
-    DINOWMAdapter patch-grid latent    (B, T, 196, 384)   — action concatenated to 404
+    DINOWMAdapter patch-grid latent    (B, T, 196, 384)   — proprio+action concat to 404
 
 Each adapter *wraps* the model's encoder + predictor (it calls those submodules; it does
 not reimplement the predictor/encoder internals — CLAUDE.md §8). The CEM rollout loop
@@ -12,9 +12,10 @@ stays in Python outside the adapter; `predict` is a single autoregressive predic
 over the history window, exactly the unit TensorRT will optimize (SPEC §Interface
 Contracts). Every boundary is jaxtyping+beartype checked so a shape violation raises.
 
-The action boundary is the env `ACTION_DIM` (SPEC constant); the models' frameskip action
-packing (5×2) and the proprio conditioning are folded into each adapter's action-embedding
-submodule here and wired to the real modules in Phase 5.
+`predict` ingests the *model-facing* conditioning the trained modules expect — the frameskip
+action pack (`MODEL_ACTION_DIM=10`, not the env `ACTION_DIM=2` the CEM plans over) plus, for
+DINO-WM, the proprio extra — embedded by the real submodules this adapter binds. The
+env->model action packing lives in the CEM shim outside the adapter.
 """
 
 import torch
@@ -43,10 +44,12 @@ class LeWMAdapter(nn.Module):
         self,
         obs: Float[Tensor, "batch hist channel height width"],
     ) -> Float[Tensor, "batch hist latent"]:
-        # CLS token -> projector, per LeWM.encode.
+        # CLS token -> projector, per LeWM.encode (which passes interpolate_pos_encoding=True
+        # so the from-scratch ViT-Tiny pos-embeddings match the 224px grid — omitting it
+        # shifts the CLS embedding and shows up as precision-match drift).
         b, t = obs.shape[:2]
         flat = obs.reshape(b * t, *obs.shape[2:])
-        cls = self.encoder(flat).last_hidden_state[:, 0]  # (b*t, D)
+        cls = self.encoder(flat, interpolate_pos_encoding=True).last_hidden_state[:, 0]
         emb = self.projector(cls)
         return emb.reshape(b, t, -1)
 
@@ -65,15 +68,17 @@ class LeWMAdapter(nn.Module):
 
 
 class DINOWMAdapter(nn.Module):
-    """Wraps a DINOv3-WM model: register-slicing patch encoder + concat-action predictor."""
+    """Wraps a DINOv3-WM model: register-slicing patch encoder + proprio/action-concat predictor."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
         self.backbone = model.backbone
         self.predictor = model.predictor
-        # Embeds the action (+ proprio, in Phase 5) into the 20-wide extras concatenated
-        # onto the 384 latent to reach the 404 predictor-input width.
-        self.action_encoder = model.action_encoder
+        # Real PreJEPA keeps the proprio + action embedders in a ModuleDict (NOT a bare
+        # `action_encoder`); each Embedder maps its extra to a 10-wide code that is tiled
+        # across patches and concatenated onto the 384 latent to reach the 404 predictor
+        # input. Order of the concat is the SILENTLY-failing boundary (SPEC §Impl Boundaries).
+        self.extra_encoders = model.extra_encoders  # ModuleDict{proprio: 4->10, action: 10->10}
         self.num_register_tokens = getattr(
             self.backbone.config, "num_register_tokens", 0
         )
@@ -93,17 +98,27 @@ class DINOWMAdapter(nn.Module):
     def predict(
         self,
         latent: Float[Tensor, "batch hist patch latent"],
-        action: Float[Tensor, "batch hist action_dim"],
+        proprio: Float[Tensor, "batch hist proprio"],
+        action: Float[Tensor, "batch hist action"],
     ) -> Float[Tensor, "batch hist patch latent"]:
-        # Tile the action embedding across patches and concatenate on the feature axis,
-        # widening tokens to DINO_PREDICTOR_DIM (404); the predictor is dim-preserving so
-        # we slice the pixel latent (384) back out, per PreJEPA.rollout/predict.
+        # Reproduce PreJEPA.encode's extra assembly, then PreJEPA.predict. Each extra is
+        # embedded by its Embedder, tiled across the patch axis, and concatenated onto the
+        # pixel latent on the feature axis to reach DINO_PREDICTOR_DIM (404). The predictor
+        # is dim-preserving, so the 384 pixel latent is sliced back out of its output —
+        # re-feedable as the next `latent` for the autoregressive rollout.
+        #
+        # Extras are concatenated in `extra_encoders` key order (the order the trained
+        # predictor learned); a wrong order is a plausible-but-wrong SR with NO error (SPEC
+        # §Impl Boundaries), so each input is matched to its encoder by name, not position.
         b, t, p, d = latent.shape
-        extras = self.action_encoder(action)  # (b, t, extra_dim)
-        extras_tiled = extras.unsqueeze(2).expand(b, t, p, extras.shape[-1])
-        tokens = torch.cat([latent, extras_tiled], dim=-1)  # (b, t, p, 404)
-        assert tokens.shape[-1] == DINO_PREDICTOR_DIM, (
-            f"predictor input width {tokens.shape[-1]} != {DINO_PREDICTOR_DIM}"
+        extras = {"proprio": proprio, "action": action}
+        embedding = latent
+        for key in self.extra_encoders:
+            extra_embed = self.extra_encoders[key](extras[key])  # (b, t, emb_dim)
+            extra_tiled = extra_embed.unsqueeze(2).expand(b, t, p, extra_embed.shape[-1])
+            embedding = torch.cat([embedding, extra_tiled], dim=-1)  # (b, t, p, 404)
+        assert embedding.shape[-1] == DINO_PREDICTOR_DIM, (
+            f"predictor input width {embedding.shape[-1]} != {DINO_PREDICTOR_DIM}"
         )
-        preds = self.predictor(tokens.reshape(b, t * p, tokens.shape[-1]))
+        preds = self.predictor(embedding.reshape(b, t * p, DINO_PREDICTOR_DIM))
         return preds.reshape(b, t, p, -1)[..., :d]
