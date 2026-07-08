@@ -208,6 +208,12 @@ wall-clock time budget**; compare **(a) per-step inference latency (p50/p95)** a
 CEM rollouts completed**. **Every speed number is paired with an SR** (Phase-3 eval per
 precision). (See SPEC §Parity, `src/interfaces.py`.)
 
+**Prerequisite (checkpoint loader — established here, not assumed):**
+
+- [ ] 🟢 **Checkpoint → adapter loader** (`_build_adapter` real path): materialize each
+  trained checkpoint via the platform `load_pretrained` (reuse the Phase-3 eval load path,
+  not a hand-rolled `torch.load`) and wrap in `LeWM`/`DINOWMAdapter`. Fails loud.
+
 - [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, **FP32→FP16→INT8**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
   `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
@@ -216,6 +222,11 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   models); precision multiplies TensorRT engines, not graphs. ONNX/TRT debugging, INT8
   **calibration set + procedure**, and FP32/FP16/INT8 **precision matching** are
   OWNER-ONLY — STOP and ask.
+- [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
+  `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16
+  engines → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the
+  rel-error metric (max vs percentile), set `PrecisionTolerance` `rtol`/`atol` (NaN →
+  measured-not-gated until set). Engines trusted before the steps below build on them.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
   per planning cycle, for both models × precisions (`src/profile.py` or a `benchmark`
   mode). Use the Phase-1 cycle decomposition.
@@ -235,9 +246,10 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
 **Interface note:** `src/interfaces.py` declares `BenchResult.rollouts_completed`, the
 fixed `time_budget_s` on `Benchmark` / `ExportConfig`, and `ComponentProfile` / `Profile`.
 
-**Verify:** engines built on the L40S (gitignored, regenerable); fixed-budget comparison
-(rollouts + p95 latency **+ SR per precision**, FP32-relative degradation quoted) and the
-encoder/predictor/planner profile tables produced and logged to W&B.
+**Verify:** engines built on the L40S (gitignored, regenerable); precision-match gate
+passed (drift within owner tolerances or documented) **before** benchmarking; fixed-budget
+comparison (rollouts + p95 latency **+ SR per precision**, FP32-relative degradation quoted)
+and the encoder/predictor/planner profile tables produced and logged to W&B.
 
 ---
 

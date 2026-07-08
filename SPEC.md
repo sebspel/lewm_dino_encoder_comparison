@@ -308,6 +308,12 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   adapter -> export stub -> benchmark stub end-to-end on random/dummy weights in the
   container, typed checks passing at every owned boundary. Sole pre-optimization
   integration check.
+- **Engine fidelity gate (before benchmarking):** exported FP32/FP16 engines are
+  precision-matched against the PyTorch reference on the **real checkpoints** before any
+  profiling/benchmark builds on them — the export-stage analogue of the tracer bullet, so a
+  silently-diverging quantized engine is caught before it poisons every downstream SR. Drift
+  (max abs/rel) is measured; the FP32/FP16/INT8 tolerance policy is owner-set (a
+  silent-failure boundary), so drift is logged-not-gated until sign-off.
 - **Speedup study:** both models exported PyTorch->ONNX->TensorRT (FP32->FP16->INT8),
   benchmarked on the L40S under a fixed wall-clock time budget (latency p50/p95,
   rollouts completed, throughput, peak GPU memory, **and SR per precision**), with
