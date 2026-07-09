@@ -33,12 +33,17 @@ from torch.nn.utils.fusion import fuse_linear_bn_eval
 
 from src.interfaces import Precision, EnginePaths, WMStepAdapter
 
-# The predictor engine must accept the CEM candidate fan-out: the solver expands one obs to
-# num_samples=300 candidates (docs/platform_api.md §3). Headroom for num_envs > 1.
-_MAX_CANDIDATE_BATCH = 512
+# The predictor engine must accept the CEM candidate fan-out. The solver loops envs in chunks
+# of batch_size and expands each to (batch_size, num_samples), so predict batch =
+# batch_size * num_samples = 1 * 300 = 300 under the parity config (batch_size=1, num_samples
+# =300; stable_worldmodel/solver/lagrangian.py, docs/platform_api.md §3). num_envs>1 does NOT
+# enlarge this axis (envs are looped, not batched). 300 is also the only feasible ceiling for
+# the DINO predictor: its (batch, 16, 588, 588) attention tensor exceeds TensorRT's 2^31
+# element-volume limit above batch 388.
+_MAX_CANDIDATE_BATCH = 300
 _WORKSPACE_BYTES = 16 << 30  # 16 GiB TensorRT build scratch (L40S has 48 GiB; TRT-10
 #                              default is full device memory — a 4 GiB cap under-cut valid
-#                              tactics, e.g. the batch-512 ViT reshape needing ~4.9 GiB)
+#                              large-batch ViT/predictor tactics, failing the build)
 
 
 # --- thin method wrappers: aim the tracer at ONE method each.
