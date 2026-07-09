@@ -58,26 +58,32 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Response Mode
+
+**Answer questions directly. Don't enter plan mode for explanation or "how do I run X" tasks**
+
+Simple explanation or "how do I run X" questions get a direct, concise answer — no plan mode, no plan file, no ExitPlanMode/AskUserQuestion.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## 5. Ground in the Plan
+## 6. Ground in the Plan
 
 At the start of each session or new phase, re-read `PLAN.md` before writing any code.
 - Don't implement a phase until the previous phase's verify step is confirmed.
 - If a task contradicts the plan, flag it before proceeding.
 - If the plan is ambiguous, ask — don't resolve silently.
 
-## 6. Hard Caps on Debugging Loops
+## 7. Hard Caps on Debugging Loops
 
 If you've attempted the same fix 3+ times without success: stop, summarize what you tried and why it failed, and ask. Don't keep iterating silently into a dead end.
 
-## 7. Log Before You Delete
+## 8. Log Before You Delete
 
 Before overwriting a run, model checkpoint, or config: confirm it's been logged to W&B or committed. Never silently discard an artifact that represents a completed phase.
 
-## 8. Implementation Boundaries
+## 9. Implementation Boundaries
 
 Before modifying files check, does it implement:
 - Core world model architecture (encoder, predictor, planner)
@@ -86,18 +92,18 @@ Before modifying files check, does it implement:
 
 If yes, stop and ask and see SPEC.md section Implementation Boundaries.
 
-## 9. Git
+## 10. Git
 Never run git. Don't stage, commit, or push. When a unit of work is complete,
 output the commit message in a code block using our convention
 (`type(scope): summary`) and stop. I run all git commands myself.
 
-## 10. Platform APIs
+## 11. Platform APIs
 stable-worldmodel / stable-pretraining are young, fast-moving libraries — your
 training-data knowledge of them may be stale. Read their real API from the installed
 source (.venv/...) and scripts/train/*.py before wiring to it. When unsure, read the
 source or ask — never call a platform method from memory.
 
-## 11. Plan vs Spec Separation
+## 12. Plan vs Spec Separation
 `PLAN.md` carries execution steps only — ordered checkboxes, commands, file paths, owner
 gates, and verify criteria. Rationale, justification, and design reasoning belong in
 `SPEC.md` (and `docs/`), never in `PLAN.md`. Keep PLAN steps terse; if a "why" is worth

@@ -19,6 +19,7 @@ Local vs pod: the torch->ONNX trace runs on any box (verified locally on dummy w
 
 from __future__ import annotations
 
+import copy
 import math
 import sys
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from pathlib import Path
 import torch
 from torch import Tensor, nn
 from torch.export import Dim
+from torch.nn.utils.fusion import fuse_linear_bn_eval
 
 from src.interfaces import Precision, EnginePaths, WMStepAdapter
 
@@ -88,6 +90,22 @@ def _batch_dynamic(n_inputs: int):
     return tuple({0: batch} for _ in range(n_inputs))
 
 
+def _fold_linear_bn_eval(module: nn.Module) -> nn.Module:
+    """Fold each `Linear -> BatchNorm1d` pair into a single equivalent Linear so the ONNX
+    trace never emits `_native_batch_norm_legit_no_training` — a 3-output aten node the
+    torch-2.6 `dynamo=True` exporter mishandles (`'tuple' object has no attribute 'dtype'`).
+    The fold is exact in eval mode (BN is a per-feature affine map) and is what TensorRT
+    fuses anyway. No-op for the DINO track (no BatchNorm). The LeWM `projector` / `pred_proj`
+    MLPs are the only pairs this touches."""
+    for seq in module.modules():
+        if isinstance(seq, nn.Sequential):
+            for i in range(len(seq) - 1):
+                a, b = seq[i], seq[i + 1]
+                if isinstance(a, nn.Linear) and isinstance(b, nn.BatchNorm1d):
+                    seq[i], seq[i + 1] = fuse_linear_bn_eval(a, b), nn.Identity()
+    return module
+
+
 def export_onnx(
     module: nn.Module,
     example_inputs: tuple[Tensor, ...],
@@ -97,7 +115,9 @@ def export_onnx(
     """Trace one method to ONNX via the TorchDynamo exporter (`dynamo=True`; the legacy
     TorchScript exporter is deprecated and on torch 2.6 dynamo is not yet the default, so
     it is passed explicitly). Locally runnable."""
-    module.eval()
+    # deepcopy first: the fold mutates submodules in place, and the encoder/predictor traces
+    # share the same underlying adapter object.
+    module = _fold_linear_bn_eval(copy.deepcopy(module).eval())
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
         torch.onnx.export(
