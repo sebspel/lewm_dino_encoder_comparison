@@ -210,21 +210,27 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
 
 **Prerequisite (checkpoint loader — established here, not assumed):**
 
-- [ ] 🟢 **Checkpoint → adapter loader** (`_build_adapter` real path): materialize each
+- [x] 🟢 **Checkpoint → adapter loader** (`_build_adapter` real path): materialize each
   trained checkpoint via the platform `load_pretrained` (reuse the Phase-3 eval load path,
   not a hand-rolled `torch.load`) and wrap in `LeWM`/`DINOWMAdapter`. Fails loud.
+  → `src/precision_match.py::_build_adapter` (pod-verify pending: needs real checkpoints).
 
-- [ ] 🔴 **DINO-WM `predict` — faithful `404 → 404` reconstruction:** revise
+- [x] 🔴 **DINO-WM `predict` — faithful `404 → 404` reconstruction:** revise
   `DINOWMAdapter.predict` to mirror `PreJEPA.predict` (dim-preserving; do **not** slice to
   384 — keep the predicted proprio). Move the extras embedding + initial `384 → 404` assembly
   and the per-step action-replacement + proprio-carry (`replace_action_in_embedding`) into
   the Python rollout/shim. Update `interfaces.py` predict I/O (`404 → 404`) + the `predict`
   example inputs (SPEC §Interface Contracts). → verify: predict output width == 404.
-- [ ] 🟢 **Adapter-fidelity gate (before export):** on the real checkpoint, assert the
+  → `src/adapter.py` (predict 404→404 + `assemble_embedding`), `src/shim.py`
+  (`_replace_action` + `dino_rollout`); example inputs updated; verified predict out == 404.
+- [x] 🟢 **Adapter-fidelity gate (before export):** on the real checkpoint, assert the
   adapter's `encode` + `predict` + shim rollout + criterion reproduces the platform's
   `rollout` / `get_cost` within tolerance — `predict` *reconstructs* the platform forward, so
   a wrong `404` assembly/carry passes engine precision-match yet corrupts SR. → verify: max
   abs drift vs `get_cost` within tolerance on real weights.
+  → `src/fidelity.py` (+ `tests/test_fidelity.py`): DINO-WM shim vs `DINOv3PreJEPA.rollout`,
+  bit-for-bit (max_abs 0.0) on a dummy `DINOv3PreJEPA`; pod runs `python -m src.fidelity` on
+  the real checkpoint. LeWM gate deferred — see SPEC/notes (temporal action Embedder).
 
 - [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
