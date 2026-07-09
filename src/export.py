@@ -35,7 +35,9 @@ from src.interfaces import Precision, EnginePaths, WMStepAdapter
 # The predictor engine must accept the CEM candidate fan-out: the solver expands one obs to
 # num_samples=300 candidates (docs/platform_api.md §3). Headroom for num_envs > 1.
 _MAX_CANDIDATE_BATCH = 512
-_WORKSPACE_BYTES = 4 << 30  # 4 GiB TensorRT build workspace
+_WORKSPACE_BYTES = 16 << 30  # 16 GiB TensorRT build scratch (L40S has 48 GiB; TRT-10
+#                              default is full device memory — a 4 GiB cap under-cut valid
+#                              tactics, e.g. the batch-512 ViT reshape needing ~4.9 GiB)
 
 
 # --- thin method wrappers: aim the tracer at ONE method each.
