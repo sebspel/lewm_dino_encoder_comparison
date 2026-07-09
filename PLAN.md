@@ -257,7 +257,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   **before** the precision-match gate so INT8 earns a drift row (its drift *is* the
   calibration-quality signal), not just a downstream SR. ⏱️ capped with FP16-only fallback.
   → `src/calibrate.py`: 🔴 OWNER decisions — **`IInt8MinMaxCalibrator`** (ViT activations),
-  **512 clips**, **strided across all episodes** of `pusht_expert_train.h5` (the eval set),
+  **512 clips**, **strided across all episodes** of `pusht_expert_train.lance` (the eval set),
   loaded through `swm.data.load_dataset` with the vendored `eval_wm.img_transform` reused
   verbatim (matched ImageNet norm). History-windows (`num_steps=3, frameskip=5`) yield the
   exact encode/predict input shapes; the predictor stream runs clips through the REAL adapter

@@ -3,9 +3,10 @@
 Builds the calibration dataset TensorRT observes to derive per-tensor INT8 scales, drawn
 **through the platform** so the activations match inference exactly:
 
-  * source — Push-T expert data (`pusht_expert_train.h5`, the same set the Phase-3 eval
-    replays), loaded via `swm.data.load_dataset` with the SAME ImageNet `img_transform`
-    the vendored `eval_wm` applies (single source of truth for normalization).
+  * source — Push-T expert data (`pusht_expert_train.lance`, the same set the Phase-3 eval
+    overlays replay — `conf/experiment/eval_*.yaml` override pusht.yaml's `.h5` default),
+    loaded via `swm.data.load_dataset` with the SAME ImageNet `img_transform` the vendored
+    `eval_wm` applies (single source of truth for normalization).
   * clips  — history-windows (`num_steps=HISTORY_SIZE`, `frameskip=CALIB_FRAMESKIP`), so each
     clip yields pixels `(hist, 3, 224, 224)`, proprio `(hist, 4)`, action `(hist, 10)` —
     exactly the encode / predict inputs the CEM rollout drives.
@@ -35,7 +36,7 @@ from src.interfaces import HISTORY_SIZE
 # Owner-set: the calibration set is the eval dataset (representative Push-T), history-windows
 # spaced by the frameskip/action_block (5) so obs history + the 10-wide action pack match the
 # rollout, and 512 clips strided across all episodes for even trajectory coverage.
-CALIB_DATASET = "pusht_expert_train.h5"
+CALIB_DATASET = "pusht_expert_train.lance"
 CALIB_FRAMESKIP = 5
 DEFAULT_N_CLIPS = 512
 _IMG_SIZE = 224
