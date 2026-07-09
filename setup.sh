@@ -10,22 +10,31 @@
 #   - the owned deps incl. torch (cu124) via `uv sync` from uv.lock
 #   - TensorRT (cu12, CUDA-12.4-compatible) via uv pip, OUTSIDE the lock, so it
 #     never drags a conflicting libnvinfer/CUDA stack into the project resolution.
-#   - the NVIDIA TensorRT Model Optimizer (nvidia-modelopt[onnx], the explicit-INT8
-#     Q/DQ tool), the same way — via uv pip, outside the lock — so its onnxruntime/CUDA
-#     stack stays matched to CUDA 12.4 and can't conflict with the TensorRT install.
+#   - the NVIDIA TensorRT Model Optimizer (nvidia-modelopt[onnx], the explicit-INT8 Q/DQ
+#     tool) and its onnxruntime-gpu, the same way — via uv pip, outside the lock — but
+#     pinned to CUDA-12 builds: onnxruntime-gpu's default PyPI wheel is now CUDA 13, which
+#     pulls nvidia-*-cu13 and cannot init cuDNN against the pod's 12.x driver, so it is
+#     installed from onnxruntime's dedicated CUDA-12 feed. The whole export stack thus stays
+#     on CUDA major 12, matching torch cu124 + TensorRT + the pod driver.
 #
 # A Docker image is composed only at the very end, for reproducibility (off-pod).
 #
-# NOTE: a bare `uv sync` run later prunes TensorRT + modelopt (not in the lock); re-run
-# this script (or the step 3 install) to restore them.
+# NOTE: a bare `uv sync` run later prunes TensorRT + onnxruntime-gpu + modelopt (not in the
+# lock); re-run this script (or the step 3 installs) to restore them.
 set -euo pipefail
 
 # Pin TensorRT so re-loading a pod reproduces the same engine toolchain. Must be a
 # cu12 build compatible with CUDA 12.4; override if the L40S needs another.
 TENSORRT_VERSION="${TENSORRT_VERSION:-10.7.0}"
 
-# Model Optimizer version; leave empty to install the latest compatible build. Pin
-# (export MODELOPT_VERSION=...) once confirmed against the TensorRT 10.7 / CUDA-12.4 stack.
+# The export toolchain must stay on CUDA major 12 (torch is locked to cu124 and the pod
+# driver tops out at 12.x — a CUDA-13 build cannot run here). onnxruntime-gpu's default PyPI
+# wheel is now CUDA 13, so it is pulled from onnxruntime's dedicated CUDA-12 feed instead;
+# that feed hosts ONLY cu12 builds, so even the unpinned latest there is cu12. Override the
+# feed if the URL moves. Leave the versions empty for the latest builds; pin both (export
+# ONNXRUNTIME_GPU_VERSION=... MODELOPT_VERSION=...) once a known-good pair is confirmed here.
+ONNXRUNTIME_CUDA12_INDEX="${ONNXRUNTIME_CUDA12_INDEX:-https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/}"
+ONNXRUNTIME_GPU_VERSION="${ONNXRUNTIME_GPU_VERSION:-}"
 MODELOPT_VERSION="${MODELOPT_VERSION:-}"
 
 # 0) uv cache — force to ephemeral /tmp so the 15GB archive-v0 never lands on the
@@ -41,24 +50,59 @@ export PATH="$HOME/.local/bin:$PATH"
 # 2) owned deps (torch cu124 + the rest), pinned by uv.lock
 uv sync
 
-# 3) TensorRT + Model Optimizer -- CUDA-12.x builds, into the project venv but outside
-#    the lock. modelopt[onnx] pulls its own onnxruntime; installing from pypi.nvidia.com
-#    keeps it matched to the CUDA-12.4 TensorRT stack.
+# 3) Export toolchain (TensorRT + onnxruntime-gpu + Model Optimizer) -- CUDA-12 builds, into
+#    the project venv but outside the lock. Order matters: pin the cu12 onnxruntime-gpu BEFORE
+#    modelopt so modelopt[onnx]'s unbounded onnxruntime-gpu dependency is already satisfied by
+#    a cu12 wheel and is not re-resolved to the cu13 PyPI default.
+
+#    TensorRT (cu12, pinned):
 uv pip install --upgrade \
   --extra-index-url https://pypi.nvidia.com \
   "tensorrt-cu12==${TENSORRT_VERSION}"
-uv pip install --upgrade \
+
+#    onnxruntime-gpu -- from onnxruntime's CUDA-12 feed as the PRIMARY index (--index-url) so
+#    the cu12 wheel wins over PyPI's cu13 default; PyPI is only the fallback for its pure-
+#    Python deps (numpy, protobuf, ...). uv's default first-index strategy takes onnxruntime-
+#    gpu from the primary feed, where only cu12 builds exist.
+uv pip install \
+  --index-url "${ONNXRUNTIME_CUDA12_INDEX}" \
+  --extra-index-url https://pypi.org/simple/ \
+  "onnxruntime-gpu${ONNXRUNTIME_GPU_VERSION:+==${ONNXRUNTIME_GPU_VERSION}}"
+
+#    Model Optimizer -- NO --upgrade, so it keeps the cu12 onnxruntime-gpu just installed
+#    instead of re-resolving it (which would pull the cu13 PyPI default back in).
+uv pip install \
   --extra-index-url https://pypi.nvidia.com \
   "nvidia-modelopt[onnx]${MODELOPT_VERSION:+==${MODELOPT_VERSION}}"
 
-# 4) sanity: versions + CUDA match
+# 4) sanity: versions + a REAL onnxruntime CUDA-EP session across the whole export toolchain.
+#    The old check only imported modelopt and asserted torch's CUDA — it passed even with a
+#    cu13 onnxruntime-gpu, which then failed cudnnCreate at INT8-export time. Opening a CUDA-EP
+#    session here (mirroring modelopt's own preload_dlls) makes a CUDA-major mismatch fail
+#    provisioning LOUDLY instead of silently later. Needs the pod GPU (this is a pod bootstrap).
 uv run python - <<'PY'
+import numpy as np, onnx, onnxruntime as ort
 import torch, tensorrt, modelopt
 from modelopt.onnx.quantization import quantize  # noqa: F401  (explicit-INT8 PTQ entrypoint)
+from onnx import helper, TensorProto
 print("torch", torch.__version__, "| torch.cuda", torch.version.cuda)
 print("tensorrt", tensorrt.__version__)
 print("modelopt", modelopt.__version__)
+print("onnxruntime-gpu", ort.__version__, "| providers", ort.get_available_providers())
 assert torch.version.cuda and torch.version.cuda.startswith("12."), torch.version.cuda
+assert "CUDAExecutionProvider" in ort.get_available_providers(), "onnxruntime-gpu has no CUDA EP"
+# modelopt loads the CUDA/cuDNN DLLs from the nvidia wheels this way; mirror it so the check
+# sees the same libraries the real INT8 quantization will.
+if hasattr(ort, "preload_dlls"):
+    ort.preload_dlls()
+g = helper.make_graph([helper.make_node("Relu", ["x"], ["y"])], "g",
+    [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4])],
+    [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])])
+onnx.save(helper.make_model(g, opset_imports=[helper.make_opsetid("", 19)]), "/tmp/_ort_cuda_check.onnx")
+ort.InferenceSession("/tmp/_ort_cuda_check.onnx",
+                     providers=[("CUDAExecutionProvider", {"device_id": 0})]).run(
+    None, {"x": np.ones((1, 4), np.float32)})
+print("onnxruntime CUDA EP: OK (cuDNN initialized on the CUDA-12 stack)")
 PY
 
 # 5) secrets: HF_TOKEN must be in the runtime env for gated DINOv3 downloads

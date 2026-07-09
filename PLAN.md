@@ -273,7 +273,10 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
       in the INT8 path; **drop** the `build_engine` INT8 branch (`int8_calibrator` +
       `set_calibration_profile`) — INT8 parses the quantized ONNX like FP32/FP16.
     - `interfaces.py`: re-document `Export.calib_loader` as the Model-Optimizer PTQ input.
-  → done: `setup.sh` installs `nvidia-modelopt[onnx]` (out of uv) + sanity-imports it;
+  → done: `setup.sh` installs `nvidia-modelopt[onnx]` + a **CUDA-12** `onnxruntime-gpu` (from
+    onnxruntime's cu12 feed, pinned before modelopt so its unbounded dep isn't re-resolved to
+    the cu13 PyPI default — which fails `cudnnCreate` on the 12.x driver), out of uv, and
+    sanity-opens a real ORT CUDA-EP session;
     `src/calibrate.py` keeps the clip draw/streams, `make_calibrator` → `make_calibration_dict`
     (numpy dict keyed off the base ONNX graph's real input names); `src/export.py` adds
     `quantize_onnx` (`modelopt.onnx.quantization.quantize`, `calibration_method="max"`,

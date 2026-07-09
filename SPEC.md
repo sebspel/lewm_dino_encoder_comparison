@@ -75,7 +75,10 @@ contribution is the optimization + QLoRA layer above.
   `tensorrt` in uv) so it can't pull a conflicting `libnvinfer`/CUDA stack. The **NVIDIA
   TensorRT Model Optimizer** (`nvidia-modelopt[onnx]`, the explicit-INT8 Q/DQ tool) is
   installed the same way — by `setup.sh`, out of uv — so its onnxruntime/CUDA stack stays
-  matched to CUDA 12.4 and can't conflict with the TensorRT install.
+  matched to CUDA 12.4 and can't conflict with the TensorRT install. Its `onnxruntime-gpu`
+  dependency must be pinned to a **CUDA-12** build (from onnxruntime's dedicated CUDA-12
+  feed): the default PyPI wheel is now CUDA 13, which pulls `nvidia-*-cu13` and cannot init
+  cuDNN against the pod's 12.x driver. The whole export stack stays on **CUDA major 12**.
 - Hydra (config — the platform uses it), Weights & Biases (logging)
 - jaxtyping + beartype (contracts for the owned export/QLoRA boundaries, runtime-checked)
 - onnx (export stage); TensorRT + NVIDIA TensorRT Model Optimizer (`modelopt`, explicit
