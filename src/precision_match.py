@@ -1,4 +1,4 @@
-"""Precision-match test (Phase 5) — engine-vs-PyTorch drift per method × precision.
+"""Precision-match test — engine-vs-PyTorch drift per method × precision.
 
 For one model track, this builds the shared example inputs, computes the PyTorch reference
 ONCE, then for each precision exports the two engines (`src.export`) and runs each against
@@ -126,7 +126,7 @@ def _print_table(rows: list[dict]) -> None:
         )
 
 
-# Phase-2 checkpoints, addressed by the explicit epoch-10 .pt (the folder holds earlier
+# Trained checkpoints, addressed by the explicit epoch-10 .pt (the folder holds earlier
 # snapshots too, so a bare run name is ambiguous — load_pretrained format-1). Same names the
 # eval overlays will need for the SR-per-precision re-run.
 _CHECKPOINTS = {
@@ -137,7 +137,7 @@ _CHECKPOINTS = {
 
 def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
     """Materialize the REAL trained checkpoint via the platform `load_pretrained` (reusing
-    the Phase-3 eval load path, not a hand-rolled `torch.load`) and wrap in the matching
+    the eval load path, not a hand-rolled `torch.load`) and wrap in the matching
     adapter. Drift numbers are only meaningful on trained weights, so this runs on the pod
     where the checkpoints + their DINOv3 backbone live. Fails loud."""
     import stable_worldmodel as swm

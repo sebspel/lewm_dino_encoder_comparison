@@ -1,6 +1,6 @@
-"""Real PyTorch -> ONNX -> TensorRT export (Phase 5, component 1).
+"""Real PyTorch -> ONNX -> TensorRT export.
 
-Owned PLUMBING (CLAUDE.md §8 / SPEC §Implementation Boundaries — fails LOUDLY):
+Owned PLUMBING (fails LOUDLY):
   - the `torch.onnx.export(dynamo=True)` trace call, aimed per-method via thin nn.Module
     wrappers so `encode` and `predict` become **separate** ONNX graphs (2 per model, 4
     across both tracks); precision multiplies TensorRT *engines*, not graphs.
@@ -36,7 +36,7 @@ _MAX_CANDIDATE_BATCH = 512
 _WORKSPACE_BYTES = 4 << 30  # 4 GiB TensorRT build workspace
 
 
-# --- thin method wrappers: aim the tracer at ONE method each (SPEC §Interface Contracts).
+# --- thin method wrappers: aim the tracer at ONE method each.
 class _EncodeModule(nn.Module):
     def __init__(self, adapter: WMStepAdapter):
         super().__init__()
@@ -96,7 +96,7 @@ def export_onnx(
 ) -> Path:
     """Trace one method to ONNX via the TorchDynamo exporter (`dynamo=True`; the legacy
     TorchScript exporter is deprecated and on torch 2.6 dynamo is not yet the default, so
-    it is passed explicitly — SPEC §Interface Contracts). Locally runnable."""
+    it is passed explicitly). Locally runnable."""
     module.eval()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with torch.no_grad():
@@ -112,8 +112,8 @@ def export_onnx(
 
 @dataclass(frozen=True)
 class PrecisionTolerance:
-    """OWNER-ONLY: FP32/FP16/INT8 precision-matching thresholds fail *silently* (SPEC
-    §Implementation Boundaries). Left NaN so pass/fail is **disabled** — error is measured
+    """OWNER-ONLY: FP32/FP16/INT8 precision-matching thresholds fail *silently*.
+    Left NaN so pass/fail is **disabled** — error is measured
     and logged but never silently gated — until owner sign-off on the L40S."""
 
     rtol: float = math.nan  # TODO(owner): set after seeing real engine error on the pod
@@ -142,14 +142,14 @@ def precision_match(
 
 
 class INT8Calibrator:
-    """OWNER-ONLY seam. The INT8 calibration set + procedure need owner sign-off (SPEC
-    §Implementation Boundaries) — a bad calib set silently degrades every INT8 number.
-    FP16 is the sanctioned fallback (PLAN Phase 5 cap) until then."""
+    """OWNER-ONLY seam. The INT8 calibration set + procedure need owner sign-off —
+    a bad calib set silently degrades every INT8 number.
+    FP16 is the sanctioned fallback until then."""
 
     def __init__(self, calib_loader):
         raise NotImplementedError(
             "INT8 calibration is OWNER-ONLY: STOP and ask for the calibration set + "
-            "procedure before building an INT8 engine. FP16 is the fallback (PLAN Phase 5)."
+            "procedure before building an INT8 engine. FP16 is the fallback."
         )
 
 
@@ -166,7 +166,7 @@ def build_engine(
 ) -> Path:
     """TensorRT-10.7 builder invocation (owned plumbing). FP32 default, FP16 flag; INT8
     needs an owner-provided calibrator. Parse/build failures raise loudly (the *judgement*
-    on how to fix them is OWNER — ONNX/TRT debugging). Runs ONLY on the L40S (`tensorrt`
+    on how to fix them is owner's — ONNX/TRT debugging). Runs ONLY on the L40S (`tensorrt`
     imported lazily so this module imports off-pod)."""
     import tensorrt as trt
 
@@ -222,7 +222,7 @@ def export(
     calib_loader=None,
 ) -> EnginePaths:
     """PyTorch -> ONNX -> TensorRT for both methods -> {encoder, predictor} engine paths.
-    `encode` and `predict` are traced and built SEPARATELY (SPEC §Interface Contracts).
+    `encode` and `predict` are traced and built SEPARATELY.
     """
     if precision == "int8" and calib_loader is None:
         raise ValueError("int8 export requires a calibration loader (owner-provided)")
@@ -266,7 +266,7 @@ _ENGINE_ROOT = Path("engines")
 
 def main() -> None:
     """CLI: build the encoder + predictor engines for one track at one precision on the
-    L40S. Reuses the Phase-5 real-checkpoint loader + shared example inputs so the traced
+    L40S. Reuses the real-checkpoint loader + shared example inputs so the traced
     graph is the exact `encode`/`predict` call pattern the benchmark drives. INT8 is gated —
     it needs the owner calibration set (deferred step), so it fails loud here.
 

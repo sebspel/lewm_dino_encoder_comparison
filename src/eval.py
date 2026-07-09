@@ -1,4 +1,4 @@
-"""Owned thin Phase-3 eval driver.
+"""Owned thin eval driver.
 
 Runs the byte-unmodified vendored eval entrypoint (``scripts.plan.eval_wm.run``) under its
 own Hydra composition, then logs the Push-T success rate and the CEM-solve latency median

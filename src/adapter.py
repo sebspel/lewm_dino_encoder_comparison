@@ -1,4 +1,4 @@
-"""Owned two-method adapters over the platform world models (Phase 4).
+"""Owned two-method adapters over the platform world models.
 
 One shared boundary — `encode(obs) -> latent`, `predict(latent, *conditioning) -> latent` —
 with two concrete implementations so the export/benchmark plumbing never branches:
@@ -7,9 +7,9 @@ with two concrete implementations so the export/benchmark plumbing never branche
     DINOWMAdapter patch-grid latent    (B, T, 196, 384)   — dim-preserving 404->404 predict
 
 Each adapter *wraps* the model's encoder + predictor (it calls those submodules; it does
-not reimplement the predictor/encoder internals — CLAUDE.md §8). The CEM rollout loop
+not reimplement the predictor/encoder internals). The CEM rollout loop
 stays in Python outside the adapter; `predict` is a single autoregressive predictor step,
-exactly the unit TensorRT will optimize (SPEC §Interface Contracts). Every boundary is
+exactly the unit TensorRT will optimize. Every boundary is
 jaxtyping+beartype checked so a shape violation raises.
 
 The two tracks feed the action differently. LeWM `predict` ingests the *model-facing*
@@ -17,7 +17,7 @@ frameskip action pack (`MODEL_ACTION_DIM=10`, not the env `ACTION_DIM=2` the CEM
 as an AdaLN-conditioning arg. DINO-WM `predict` mirrors `PreJEPA.predict` — a faithful,
 dim-preserving 404->404 step over the pre-assembled `(pixels 384 | proprio 10 | action 10)`
 embedding; the 384->404 assembly (`assemble_embedding`) and the per-step action-replacement
-live in the Python rollout/shim, NOT the compiled `predict` (SPEC §Interface Contracts). The
+live in the Python rollout/shim, NOT the compiled `predict`. The
 env->model action packing lives in the CEM shim outside the adapter.
 """
 
@@ -80,7 +80,7 @@ class DINOWMAdapter(nn.Module):
         # Real PreJEPA keeps the proprio + action embedders in a ModuleDict (NOT a bare
         # `action_encoder`); each Embedder maps its extra to a 10-wide code that is tiled
         # across patches and concatenated onto the 384 latent to reach the 404 predictor
-        # input. Order of the concat is the SILENTLY-failing boundary (SPEC §Impl Boundaries).
+        # input. Order of the concat is the SILENTLY-failing boundary.
         self.extra_encoders = model.extra_encoders  # ModuleDict{proprio: 4->10, action: 10->10}
         self.num_register_tokens = getattr(
             self.backbone.config, "num_register_tokens", 0
@@ -106,7 +106,7 @@ class DINOWMAdapter(nn.Module):
         # the flattened (hist*patch) token axis, then reshape back. Output width == input
         # width == DINO_PREDICTOR_DIM (404); the predicted proprio channels are KEPT (not
         # sliced to 384) — they are load-bearing for the CEM criterion and the autoregressive
-        # carry (SPEC §Interface Contracts). The 384->404 assembly and the per-step
+        # carry. The 384->404 assembly and the per-step
         # action-replacement live in the Python rollout/shim (`assemble_embedding` /
         # `replace_action_in_embedding`), never in this compiled step.
         b, t, p, d = embedding.shape
@@ -127,8 +127,8 @@ class DINOWMAdapter(nn.Module):
         # embedded by its Embedder, tiled across the patch axis, and concatenated onto the
         # 384 pixel latent on the feature axis to reach DINO_PREDICTOR_DIM (404). Extras are
         # concatenated in `extra_encoders` key order (the order the trained predictor
-        # learned); a wrong order is a plausible-but-wrong SR with NO error (SPEC §Impl
-        # Boundaries), so each input is matched to its encoder by name, not position.
+        # learned); a wrong order is a plausible-but-wrong SR with NO error, so each
+        # input is matched to its encoder by name, not position.
         b, t, p, _ = latent.shape
         extras = {"proprio": proprio, "action": action}
         embedding = latent

@@ -1,13 +1,12 @@
-"""Adapter-fidelity gate for DINO-WM (Phase 5, before export).
+"""Adapter-fidelity gate for DINO-WM (before export).
 
 The DINO-WM adapter's `predict` *reconstructs* `PreJEPA.predict` rather than calling it, and
 the Python shim (`src.shim.dino_rollout`) reconstructs `PreJEPA.rollout` around it. A wrong
 404 assembly, a wrong concat order, a dropped proprio channel, or a mis-wired action-carry
 would pass the engine precision-match (which only compares engine-vs-adapter) yet silently
-corrupt every SR (SPEC §Requirements: adapter-fidelity gate). This gate closes that hole
-BEFORE any engine is built: it asserts the adapter `encode` + `assemble_embedding` + `predict`
-+ shim rollout reproduce `DINOv3PreJEPA.rollout`'s predicted-embedding trajectory within
-tolerance.
+corrupt every SR. This gate closes that hole BEFORE any engine is built: it asserts the
+adapter `encode` + `assemble_embedding` + `predict` + shim rollout reproduce
+`DINOv3PreJEPA.rollout`'s predicted-embedding trajectory within tolerance.
 
 Because both the reference (`model.rollout`) and the shim drive the SAME submodules
 (same weights), a faithful shim matches bit-for-bit; the tolerance only absorbs float
@@ -149,7 +148,7 @@ def main() -> None:
         raise SystemExit(
             f"ADAPTER-FIDELITY GATE FAILED: shim diverges from PreJEPA.rollout "
             f"(max_abs={result['max_abs']:.3e}) — the 404 assembly/carry is wrong; do NOT "
-            f"export until this passes (SPEC §Requirements: adapter-fidelity gate)."
+            f"export until this passes."
         )
     print("adapter-fidelity: PASS")
 

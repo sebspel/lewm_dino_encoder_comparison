@@ -1,9 +1,9 @@
-"""Owned observation-only CEM-solve-latency callback (Phase 3).
+"""Owned observation-only CEM-solve-latency callback.
 
 Recast from the initial ``solver.solve`` monkeypatch (commit ``c91d49b``) to a
 ``CEMSolver.Callback`` subclass, injected through the platform's own config seam
 (``cfg.solver.callbacks``). The vendored eval entrypoint and the solver therefore stay
-byte-untouched — no monkeypatch, no class shadow (SPEC §Implementation Boundaries).
+byte-untouched — no monkeypatch, no class shadow.
 
 The base ``CEMSolver.solve`` calls ``reset()`` once at the start of the optimization body
 (after ``prepare_init_action`` / ``init_action_distrib``) and ``end_solve()`` once at the
@@ -15,7 +15,7 @@ so the metric is labelled *CEM-solve latency*.
 
 Parity-safe: the callback only reads a clock and (optionally) inserts a CUDA barrier; it
 never touches seeds, sample draws, or the plan. The per-CEM-step ``__call__`` hook is a
-no-op — perturbing anything there would cross into the eval/CEM parity gate (OWNER-ONLY).
+no-op — perturbing anything there would cross into the eval/CEM parity gate (owner-only).
 
 Records only — no W&B dependency here. Because the platform (not the driver) instantiates
 the callback from config, each instance registers itself in a module-level registry so the
@@ -79,7 +79,7 @@ class SolveLatencyRecorder(Callback):
     def summary(self):
         """Eager-baseline latency: median over the recorded solves (ms).
 
-        The rigorous p50/p95 rig is Phase 5; here we want one stable number per track.
+        The rigorous p50/p95 rig comes later; here we want one stable number per track.
         ``median_ms`` is ``None`` when nothing was recorded, so the caller can surface an
         empty run instead of dividing by zero.
         """
@@ -94,7 +94,7 @@ def pop_records():
     """Summary of the most recently constructed recorder; clears the registry.
 
     Raises if no recorder exists — i.e. the callback was never injected via
-    ``cfg.solver.callbacks`` (fails loud, SPEC §Implementation Boundaries — CLAUDE CODE).
+    ``cfg.solver.callbacks`` (fails loud).
     """
     if not _RECORDERS:
         raise RuntimeError(

@@ -1,8 +1,8 @@
-"""Per-component profiling (Phase 5) — encoder / predictor / planner timing.
+"""Per-component profiling — encoder / predictor / planner timing.
 
-Owned PLUMBING (fails LOUDLY; CLAUDE.md §8): attributes one CEM planning cycle to its three
-components, per the Phase-1 decomposition (docs/platform_api.md §5), so the LeWM↔DINOv3 gap
-can be pinned to the right place (SPEC §Parity):
+Owned PLUMBING (fails LOUDLY): attributes one CEM planning cycle to its three
+components, per the decomposition in docs/platform_api.md §5, so the LeWM↔DINOv3 gap
+can be pinned to the right place:
 
   - ENCODER  : ``adapter.encode`` — runs ~once per cycle (cached across candidates × iters)
   - PREDICTOR: ``adapter.predict`` — autoregressive over the horizon for all candidates
@@ -60,7 +60,7 @@ def _planner_step(device: torch.device) -> Callable[[], object]:
     docs/platform_api.md §3), with the model call excluded (docs/platform_api.md §5).
     `cost` stands in for `get_cost`'s entire output (model forward + MSE-to-goal criterion)
     since criterion cost scales with latent size and would otherwise leak the LeWM/DINO
-    token-count asymmetry into `planner_ms` (SPEC §Parity attribution). The CEM optimizes the
+    token-count asymmetry into `planner_ms`. The CEM optimizes the
     env action (ACTION_DIM), not the model-facing frameskip pack, so candidates are that
     width — and it barely affects timing (topk over 300 candidates dominates)."""
     action_dim = ACTION_DIM

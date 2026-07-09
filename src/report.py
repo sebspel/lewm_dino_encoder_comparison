@@ -1,7 +1,7 @@
-"""Headline table + plot runner (Phase 5) — owned PLUMBING (fails LOUDLY).
+"""Headline table + plot runner — owned PLUMBING (fails LOUDLY).
 
-Consumes the benchmark + profile results (per track × precision) and emits the SPEC
-§Requirements headline outputs:
+Consumes the benchmark + profile results (per track × precision) and emits the
+headline outputs:
   - LeWM-vs-DINOv3 **rollouts-in-budget ratio** + **p95-latency ratio** (per precision)
   - per-model **FP32→FP16→INT8 delta** in both **speed and SR**, degradation quoted vs FP32
   - **speed-vs-SR** scatter
@@ -9,7 +9,7 @@ Consumes the benchmark + profile results (per track × precision) and emits the 
 
 Pure data → tables/plots; runs anywhere (matplotlib Agg, no CUDA). SR may be NaN where the
 gated eval-shim re-run has not filled it yet — tables show "—" and plots skip those points.
-Optionally logs the tables + figures to an open W&B run (shared project, SPEC §W&B).
+Optionally logs the tables + figures to an open W&B run (shared project).
 
 Input shape: ``bench[track][precision] -> BenchResult`` and
 ``prof[track][precision] -> ComponentProfile`` (missing entries are skipped).
@@ -40,7 +40,7 @@ def _fmt(x, spec: str = ".3g") -> str:
 # --- ratios (the LeWM-vs-DINOv3 headlines) --------------------------------------------
 def rollouts_ratio(bench: dict, precision: str) -> float:
     """LeWM ÷ DINOv3 rollouts completed in the fixed budget — the headline speedup measure
-    (how many more rollouts LeWM fits, SPEC §Parity 'mechanistic')."""
+    (how many more rollouts LeWM fits)."""
     return (
         bench["lewm"][precision]["rollouts_completed"]
         / bench["dino"][precision]["rollouts_completed"]
@@ -56,8 +56,8 @@ def p95_ratio(bench: dict, precision: str) -> float:
 
 
 def fp32_relative(bench: dict, track: str) -> dict[str, dict]:
-    """Per precision: p95 speedup and SR delta **relative to FP32** for one track (SPEC
-    §Parity — a precision that is faster but degrades task quality must be visible)."""
+    """Per precision: p95 speedup and SR delta **relative to FP32** for one track — a
+    precision that is faster but degrades task quality must be visible."""
     base = bench[track]["fp32"]
     out: dict[str, dict] = {}
     for prec in _PRECISIONS:

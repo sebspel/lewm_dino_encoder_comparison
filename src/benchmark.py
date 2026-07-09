@@ -1,15 +1,15 @@
-"""Fixed-wall-clock-budget benchmark (Phase 5) — real timing harness.
+"""Fixed-wall-clock-budget benchmark — real timing harness.
 
-Owned PLUMBING (fails LOUDLY; CLAUDE.md §8 / SPEC §Interface Contracts): drives the two
+Owned PLUMBING (fails LOUDLY): drives the two
 TensorRT engines built by `src.export` through a Python CEM-style rollout — encode ONCE,
 then `predict` autoregressively over the horizon (the exact encoder-cached /
 predictor-dominates call pattern, docs/platform_api.md §5) — for a fixed wall-clock budget,
 and records per-step inference latency (p50/p95), rollouts completed, throughput, and peak
 GPU memory. Only the model runs in the engine; the rollout loop stays in Python.
 
-**SR is NOT produced here.** Every speed figure must carry its SR (SPEC §Parity), but the
-SR path is the Phase-3 eval driver re-run on the optimized model through a get_cost /
-get_action shim (OWNER-gated — needs the real checkpoint + adapter wiring). So `benchmark`
+**SR is NOT produced here.** Every speed figure must carry its SR, but the
+SR path is the eval driver re-run on the optimized model through a get_cost /
+get_action shim (owner-gated — needs the real checkpoint + adapter wiring). So `benchmark`
 returns real speed metrics and `success_rate=NaN`; the headline runner (`src.report`) joins
 in the SR per precision from that separate eval run.
 

@@ -1,12 +1,11 @@
-"""Tracer bullet (Phase 4) — the sole pre-optimization integration check.
+"""Tracer bullet — the sole pre-optimization integration check.
 
 Flows a dummy checkpoint through the owned layer end-to-end on random weights:
     dummy model -> adapter.encode -> adapter.predict (on the cached latent)
                 -> export stub (encoder + predictor engines) -> benchmark stub
 asserting the typed latent shapes at every owned boundary for both tracks. Run on CPU
 with tiny random modules — dims come from the encoder architecture (not training), so this
-is valid pre-checkpoint (SPEC §Requirements: tracer bullet on dummy weights, typed checks
-at every boundary).
+is valid pre-checkpoint.
 
 The dummy builders are shared with tests/. They are *stand-ins* with the platform module
 interfaces (`.encoder(x).last_hidden_state`, `.predictor(...)`, etc.) — not the real

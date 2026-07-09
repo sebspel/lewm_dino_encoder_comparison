@@ -1,12 +1,12 @@
-"""Python rollout/shim reproducing `PreJEPA.rollout` via the owned DINO-WM adapter (Phase 5).
+"""Python rollout/shim reproducing `PreJEPA.rollout` via the owned DINO-WM adapter.
 
 The DINO-WM adapter's `predict` *reconstructs* the platform forward (it is not the platform's
 own method), so the autoregressive orchestration around it — the 384->404 assembly, the
 per-step action-replacement, the proprio carry, and the history windowing — has to be
-reproduced in Python, NOT compiled into the engine (SPEC §Interface Contracts). This module
+reproduced in Python, NOT compiled into the engine. This module
 is that reproduction, expressed against the adapter's `encode` / `assemble_embedding` /
 `predict` so the SAME orchestration drives the PyTorch adapter (fidelity gate, `src.fidelity`)
-and, later, the exported engines (the Phase-5 benchmark SR shim).
+and, later, the exported engines (the benchmark SR shim).
 
 It is a faithful line-map of `stable_worldmodel.wm.prejepa.prejepa.PreJEPA.rollout` /
 `.replace_action_in_embedding`; the fidelity gate asserts it matches `DINOv3PreJEPA.rollout`
@@ -26,7 +26,7 @@ def _replace_action(extra_encoders: nn.ModuleDict, embedding: Tensor, act: Tenso
     the action, tile it across patches, and splice it back over ONLY the action channels —
     keeping the pixel and (predicted) proprio channels. The action block is located by summing
     the `emb_dim`s of the extras preceding 'action' in key order (the SILENTLY-failing concat
-    order, SPEC §Impl Boundaries)."""
+    order)."""
     n_patches = embedding.shape[3]
     B, N = act.shape[:2]
     act_flat = rearrange(act, "b n ... -> (b n) ...")

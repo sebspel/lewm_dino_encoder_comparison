@@ -1,9 +1,9 @@
-"""TensorRT engine runner (Phase 5 plumbing) — owned, fails LOUDLY (CLAUDE.md §8).
+"""TensorRT engine runner — owned plumbing, fails LOUDLY.
 
 Deserializes a `.plan` built by `src.export`, runs one method's engine on CUDA torch
 tensors, and returns torch tensors. This is the missing `engine_out` producer for
 `src.export.precision_match` (engine-vs-PyTorch drift) and the execution primitive the
-Phase-5 fixed-budget benchmark drives inside its Python CEM rollout loop.
+fixed-budget benchmark drives inside its Python CEM rollout loop.
 
 Runs ONLY on the L40S (`tensorrt` imported lazily + CUDA buffers). The precision-match
 POLICY (tolerances) stays OWNER-ONLY (`src.export.PrecisionTolerance`); this module only

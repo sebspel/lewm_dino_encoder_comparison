@@ -8,10 +8,9 @@ from jaxtyping import Float
 
 Precision = Literal["fp32", "fp16", "int8"]
 
-# --- Dims (Phase-1 values, owner-confirmed; the 🔴 adapter-dims gate, SPEC
-# §Implementation Boundaries). Defined ONCE here; the platform's own dims are read
-# from its config, never re-guessed. Read from the pinned installed source
-# (docs/platform_api.md §2).
+# --- Dims (owner-confirmed; the 🔴 adapter-dims gate). Defined ONCE here; the platform's
+# own dims are read from its config, never re-guessed. Read from the pinned installed
+# source (docs/platform_api.md §2).
 LATENT_DIM = 192  # LeWM single-token latent width (ViT-Tiny hidden_size)
 DINO_N_PATCHES = 196  # DINOv3 patch grid after CLS + 4 register slice ((224/16)²)
 DINO_LATENT_DIM = 384  # DINOv3 hidden_size
@@ -90,7 +89,7 @@ class BenchResult(TypedDict):
     rollouts_completed: int  # CEM rollouts finished within the fixed time budget
     throughput: float  # rollouts/sec
     peak_mem_mb: float
-    success_rate: float  # Push-T SR paired with this engine config (Phase-5 eval shim)
+    success_rate: float  # Push-T SR paired with this engine config (eval shim)
 
 
 class Benchmark(Protocol):

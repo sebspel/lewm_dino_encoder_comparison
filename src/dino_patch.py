@@ -1,4 +1,4 @@
-"""Register-aware encode override for the DINOv3-WM track (Phase 2).
+"""Register-aware encode override for the DINOv3-WM track.
 
 The platform's `PreJEPA._encode_image` drops only the CLS token
 (`last_hidden_state[:, 1:, :]`). DINOv3 prepends **CLS + N register tokens**, so that
@@ -12,7 +12,7 @@ yielding the true 196-patch grid. Everything else (predictor, prejepa losses, ro
 planning) is inherited unchanged. It is injected via Hydra `model._target_`
 (conf/experiment/dinov3.yaml) so the platform wheel is never edited, and it is imported
 by both the train and eval entrypoints so the predictor plans over the same grid it was
-trained on (PLAN Phase 2).
+trained on.
 """
 
 import torch

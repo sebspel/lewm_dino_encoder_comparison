@@ -4,7 +4,7 @@ Training logs to W&B through the platform's Lightning ``WandbLogger``, driven by
 ``wandb:`` block in ``conf/experiment/``. The non-training phases have no Lightning
 ``Trainer``, so they log through this helper — which reads the project (and entity) from
 that **same** ``wandb:`` block, so there is a single source of truth for the shared
-project name (SPEC §W&B logging discipline). Reused by Phases 5–6.
+project name.
 
 ``wandb`` is imported lazily inside the functions so the config-reading (`read_wandb_cfg`)
 stays importable without wandb installed.
