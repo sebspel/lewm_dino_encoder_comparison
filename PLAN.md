@@ -236,10 +236,12 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
   `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
   `dynamo=True` explicitly on torch 2.6), aiming a thin `nn.Module` forward-wrapper at each
-  method — `encode` + `predict` traced separately → **4 ONNX graphs** total (2 methods × 2
-  models); precision multiplies TensorRT engines, not graphs. **FP32 + FP16 build data-free
-  here; INT8 is deferred to the calibration step below** — its per-tensor scales require a
-  calibration pass, so the INT8 engine cannot exist until that set is built. ONNX/TRT
+  method — `encode` + `predict` traced separately → **4 base ONNX graphs** total (2 methods ×
+  2 models). FP32/FP16 share the base graph (FP16 = a build flag); **INT8 is a separate,
+  explicitly-quantized ONNX** from the Model Optimizer (step below), one Q/DQ graph per
+  method. **FP32 + FP16 build data-free here; INT8 is deferred to the explicit-quantization
+  step below** — the Model Optimizer inserts Q/DQ + derives scales from a calibration pass,
+  so the INT8 (quantized-ONNX) engine cannot exist until that runs. ONNX/Model-Optimizer/TRT
   debugging and FP32/FP16/INT8 **precision matching** are OWNER-ONLY — STOP and ask.
   → `src/export.py`: explicit-arity predict trace wrappers (`_Predict1Module` DINO /
   `_Predict2Module` LeWM, selected by predict arity) so torch.export sees real params (flat
@@ -248,28 +250,35 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `example_inputs`, writes to `engines/<track>/`). Verified locally: all 4 ONNX graphs trace
   with a dynamic batch axis; `pytest` green. TensorRT engine build + precision matching are
   pod-only (🔴 owner).
-- [x] 🔴 **INT8 calibration set + procedure (before the gate):** construct the calibration
-  dataset — a representative Push-T sample drawn **through the platform** (matched ImageNet
-  normalization), streamed through the real adapter so TensorRT observes `encode`/`predict`
-  activations and derives per-tensor INT8 scales — then build the INT8 engines
-  (`src.export … precision=int8`). Two streams (encoder obs; predictor `404` embedding).
-  OWNER-ONLY silent-failure: owner sets the sample source/count and calibrator. Sequenced
-  **before** the precision-match gate so INT8 earns a drift row (its drift *is* the
-  calibration-quality signal), not just a downstream SR. ⏱️ capped with FP16-only fallback.
-  → `src/calibrate.py`: 🔴 OWNER decisions — **`IInt8MinMaxCalibrator`** (ViT activations),
-  **512 clips**, **strided across all episodes** of `pusht_expert_train.lance` (the eval set),
-  loaded through `swm.data.load_dataset` with the vendored `eval_wm.img_transform` reused
-  verbatim (matched ImageNet norm). History-windows (`num_steps=3, frameskip=5`) yield the
-  exact encode/predict input shapes; the predictor stream runs clips through the REAL adapter
-  (`encode` [+ `assemble_embedding` for DINO]). `src/export.py` builds a **per-method**
-  calibrator (encoder obs / predictor per-track input) + sets the calibration profile for the
-  dynamic-shape INT8 build; CLI `precision=int8` draws the set. `interfaces.py` `Export.calib_loader`
-  retyped to `CalibrationData`. Verified off-pod: `tests/test_calibrate.py` (batch-shaping +
-  per-track predictor stream) + full `pytest` green. Engine build + scale derivation are
-  pod-only (needs dataset + `tensorrt`).
+- [ ] 🔴 **INT8 explicit quantization (Model Optimizer PTQ) + calibration set (before the
+  gate):** switch INT8 from the implicit TRT-calibrator path to **explicit Q/DQ** — base FP32
+  ONNX (dynamo, above) → **`modelopt.onnx.quantization`** inserts Q/DQ + derives per-tensor
+  scales from a calibration pass → quantized ONNX per method → `build_engine` (TensorRT honors
+  the baked-in Q/DQ; **no** `int8_calibrator`, no calibration profile). The calibration
+  **data** (representative Push-T through the platform, matched ImageNet norm; two streams —
+  encoder obs; predictor `404` via the real adapter) is reused; only its **consumer** changes
+  (numpy arrays keyed by ONNX input name for the Model Optimizer, not CUDA pointers for a TRT
+  calibrator). Sequenced **before** the precision-match gate so INT8 earns a drift row (its
+  drift *is* the PTQ/calibration-quality signal). OWNER-ONLY silent-failure: owner sets the
+  sample source/count **and the Model-Optimizer quant config** (calibration method —
+  MinMax→`max` is the direct analogue — Q/DQ format, per-channel-vs-tensor, op-type
+  exclusions). ⏱️ capped with FP16-only fallback.
+  → reopened from the implicit calibration implementation (commits `540a27b`, `b10b495`):
+    - `setup.sh`: add `nvidia-modelopt[onnx]` (alongside TensorRT, out of uv, CUDA-12.4).
+    - `src/calibrate.py`: **keep** the clip draw (`draw_calibration_clips`, 512 clips strided
+      across `pusht_expert_train.lance`, vendored `eval_wm.img_transform`) + the per-method
+      streams; **replace** `make_calibrator` (`IInt8MinMaxCalibrator`) with a per-method
+      numpy-dict producer keyed by ONNX input name for `modelopt`.
+    - `src/export.py`: add a `quantize_onnx` step (Model-Optimizer PTQ on the base FP32 ONNX)
+      in the INT8 path; **drop** the `build_engine` INT8 branch (`int8_calibrator` +
+      `set_calibration_profile`) — INT8 parses the quantized ONNX like FP32/FP16.
+    - `interfaces.py`: re-document `Export.calib_loader` as the Model-Optimizer PTQ input.
+  → verify: quantized ONNX carries QuantizeLinear nodes; INT8 engine builds from it;
+    `tests/test_calibrate.py` updated to the numpy-dict producer; `pytest` green off-pod.
+    Engine build + scale derivation pod-only (needs dataset + `tensorrt` + `modelopt`).
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
-  engines → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the
+  engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the
   rel-error metric (max vs percentile), set `PrecisionTolerance` `rtol`/`atol` (NaN →
   measured-not-gated until set). Engines trusted before the steps below build on them.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
@@ -286,8 +295,8 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
   (encoder/predictor/planner) bottleneck breakdown**.
-- [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / calibration); fallback = **FP16-only**.
-  3-attempt debugging cap (CLAUDE.md §6).
+- [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
+  **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 
 **Interface note:** `src/interfaces.py` declares `BenchResult.rollouts_completed`, the
 fixed `time_budget_s` on `Benchmark` / `ExportConfig`, and `ComponentProfile` / `Profile`.
@@ -318,8 +327,10 @@ W&B; adapter target modules confirmed real.
 
 - `src/interfaces.py` — typed contract (declares the fixed-budget benchmark +
   per-component profile; dim constants filled in Phase 4 from Phase-1 values).
-- `src/adapter.py`, `src/export.py`, `src/benchmark.py`, `src/profile.py`,
-  `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
+- `src/adapter.py`, `src/export.py` (incl. the Model-Optimizer INT8 Q/DQ step),
+  `src/calibrate.py` (calibration-data construction feeding the Model Optimizer),
+  `src/benchmark.py`, `src/profile.py`, `src/qlora.py`, `src/smoke.py` — the owned layer
+  (Phases 4–6).
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
 - `src/eval_latency.py` — owned observation-only CEM-solve-latency callback (`CEMSolver.Callback`
   subclass, injected via `cfg.solver.callbacks`; Phase 3).
@@ -340,8 +351,9 @@ W&B; adapter target modules confirmed real.
 
 ## Cross-cutting rules
 
-- **Owner gates:** anything 🔴 (export/INT8 debugging, precision matching, QLoRA
-  targeting, benchmark methodology, adapter dims, eval/CEM parity) → STOP and ask.
+- **Owner gates:** anything 🔴 (export/INT8/Model-Optimizer-PTQ debugging, precision
+  matching, QLoRA targeting, benchmark methodology, adapter dims, eval/CEM parity) → STOP
+  and ask.
 - **Git:** never run git. On completing a unit of work, output the files to stage and a
   `type(scope): summary` commit message; the owner runs git.
 - **Progress:** each `[x]` records artifact name; tick before advancing.

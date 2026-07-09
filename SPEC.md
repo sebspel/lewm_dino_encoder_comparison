@@ -16,10 +16,11 @@ trained on Push-T (224x224, pixels-only), and deliver the engineering layer the
 platform does **not** provide:
 
 1. **Inference-optimization study on an L40S:** export both models
-   PyTorch -> ONNX -> TensorRT (FP32 -> FP16 -> INT8) and benchmark planning latency,
-   throughput, and peak GPU memory. Headline: the **LeWM-vs-DINOv3 speedup ratio**
-   (reproduces/stresses the paper's ~48x claim) and the **per-model
-   FP32->FP16->INT8 optimization delta**.
+   PyTorch -> ONNX -> TensorRT, with INT8 quantized **explicitly** — the NVIDIA TensorRT
+   Model Optimizer inserts Q/DQ nodes (PyTorch -> ONNX -> Model Optimizer -> TensorRT) — and
+   benchmark planning latency, throughput, and peak GPU memory across FP32 -> FP16 -> INT8.
+   Headline: the **LeWM-vs-DINOv3 speedup ratio** (reproduces/stresses the paper's ~48x
+   claim) and the **per-model FP32->FP16->INT8 optimization delta**.
 2. **QLoRA delta on the DINOv3-WM backbone:** fine-tune the frozen DINOv3 backbone
    with QLoRA on Push-T, re-run the task-quality metric, and report the delta vs
    the frozen baseline.
@@ -71,10 +72,14 @@ contribution is the optimization + QLoRA layer above.
 - **uv** for dependency management — `pyproject.toml` + `uv.lock` committed. **torch**
   is uv-managed from the **cu124** wheel index (matches the pod's CUDA 12.4). **TensorRT**
   is installed by `setup.sh` (cu12, CUDA-12.4-matched) and kept OUT of uv (do not pin
-  `tensorrt` in uv) so it can't pull a conflicting `libnvinfer`/CUDA stack.
+  `tensorrt` in uv) so it can't pull a conflicting `libnvinfer`/CUDA stack. The **NVIDIA
+  TensorRT Model Optimizer** (`nvidia-modelopt[onnx]`, the explicit-INT8 Q/DQ tool) is
+  installed the same way — by `setup.sh`, out of uv — so its onnxruntime/CUDA stack stays
+  matched to CUDA 12.4 and can't conflict with the TensorRT install.
 - Hydra (config — the platform uses it), Weights & Biases (logging)
 - jaxtyping + beartype (contracts for the owned export/QLoRA boundaries, runtime-checked)
-- onnx (export stage); TensorRT installed by `setup.sh` (the export/benchmark stage)
+- onnx (export stage); TensorRT + NVIDIA TensorRT Model Optimizer (`modelopt`, explicit
+  INT8 Q/DQ) installed by `setup.sh` (the export/benchmark stage)
 - transformers / timm (DINOv3 + ViT-Tiny backbones), peft / bitsandbytes (QLoRA)
 - Docker + docker-compose — **reproducibility image composed at project end, off-pod;
   not part of the dev loop**
@@ -170,7 +175,8 @@ export/benchmark/QLoRA layer that sits on top of a trained platform model.
 Runtime-checked via jaxtyping + beartype with shared named axes.
 
 - `export(adapter, precision) -> {encoder, predictor} engine paths` — PyTorch -> ONNX ->
-  TensorRT. The adapter's `encode` and `predict` are traced and built **separately** (one
+  TensorRT, with INT8 routed through the NVIDIA TensorRT Model Optimizer (explicit Q/DQ).
+  The adapter's `encode` and `predict` are traced and built **separately** (one
   ONNX graph / TensorRT engine each), because the CEM rollout encodes once and calls
   predict many times over the cached latent — a single fused `obs -> latent` graph could
   not reproduce that call pattern (see the adapter bullet). ONNX/TensorRT does not require
@@ -179,9 +185,13 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   — the legacy TorchScript exporter is deprecated; on the pinned torch 2.6 `dynamo=True` is
   passed explicitly since it is not the default until 2.9), aimed at each method via a thin
   `nn.Module` whose `forward` calls it (shapes come from the example inputs + `dynamic_shapes`
-  for the variable candidate batch). Across both tracks this is **4 ONNX graphs** (encode +
-  predict × LeWM + DINO-WM); precision (FP32/FP16/INT8) is a TensorRT engine-build setting,
-  not additional graphs, so it multiplies engines, not ONNX. Only the **model** (encoder +
+  for the variable candidate batch). Across both tracks the base trace is **4 ONNX graphs**
+  (encode + predict × LeWM + DINO-WM). FP32 and FP16 share that base graph (FP16 is a
+  TensorRT build flag, no new graph); **INT8 is explicit quantization** — the NVIDIA TensorRT
+  **Model Optimizer** rewrites each base graph into a Q/DQ-annotated ONNX with per-tensor
+  scales baked in from a calibration pass, so INT8 adds **one quantized graph per method**
+  (4 base + up to 4 quantized = up to 8 ONNX across both tracks) and TensorRT honors the
+  embedded Q/DQ instead of calibrating at build time. Only the **model** (encoder +
   predictor) is exported; the CEM planner is not.
 - `benchmark(engine, time_budget) -> {latency_p50, latency_p95, rollouts_completed,
   throughput, peak_mem, success_rate}` — fixed wall-clock budget; rollouts is the
@@ -278,8 +288,11 @@ the instantiated predictor alongside the Phase-1 dims.
 
 **OWNER-ONLY** — fails *silently* (plausible wrong number). Claude Code must STOP
 and ask before touching:
-- ONNX / TensorRT export debugging (reading the failure output is the judgment-heavy part)
-- INT8 calibration set + procedure; the FP32/FP16/INT8 precision matching
+- ONNX / Model-Optimizer PTQ / TensorRT export debugging (reading the failure output is the
+  judgment-heavy part)
+- INT8 calibration set + **Model-Optimizer PTQ config** (calibration method, Q/DQ format,
+  per-channel-vs-per-tensor, op-type exclusions) + procedure; the FP32/FP16/INT8 precision
+  matching
 - QLoRA targeting (which DINOv3 modules, rank, what stays frozen — note the predictor
   is unfrozen and co-trained, so only backbone targeting is open)
 - the benchmark fairness conditions (matched precision, fixed time budget, env/goal)
@@ -302,8 +315,9 @@ and ask before touching:
   latency*). Perturbing seeds, sample counts, or the plan crosses into the eval/CEM parity
   gate above and is OWNER-ONLY.
 - the DINOv3 encoder config for `prejepa.py` (model string, dims read from config)
-- export-script and benchmark-harness *plumbing* (ONNX trace call, TensorRT builder
-  invocation, percentile timing, memory logging, the speedup-table runner)
+- export-script and benchmark-harness *plumbing* (ONNX trace call, the Model-Optimizer PTQ
+  invocation wiring — owner sets the quant config — TensorRT builder invocation, percentile
+  timing, memory logging, the speedup-table runner)
 - the QLoRA training-loop wiring (owner specifies the targeting config)
 - the tracer-bullet smoke script
 
@@ -331,11 +345,13 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   adapter) yet silently corrupts every SR — this gate catches it before any engine is built.
 - **Engine fidelity gate (before benchmarking):** exported FP32/FP16/INT8 engines are
   precision-matched against the PyTorch reference on the **real checkpoints** before any
-  profiling/benchmark builds on them (INT8 after its calibration set is built) — the export-stage analogue of the tracer bullet, so a
+  profiling/benchmark builds on them (INT8 after its Model-Optimizer Q/DQ graph is built from
+  the calibration set) — the export-stage analogue of the tracer bullet, so a
   silently-diverging quantized engine is caught before it poisons every downstream SR. Drift
   (max abs/rel) is measured; the FP32/FP16/INT8 tolerance policy is owner-set (a
   silent-failure boundary), so drift is logged-not-gated until sign-off.
-- **Speedup study:** both models exported PyTorch->ONNX->TensorRT (FP32->FP16->INT8),
+- **Speedup study:** both models exported PyTorch->ONNX->TensorRT with INT8 via the Model
+  Optimizer's explicit Q/DQ (FP32->FP16->INT8),
   benchmarked on the L40S under a fixed wall-clock time budget (latency p50/p95,
   rollouts completed, throughput, peak GPU memory, **and SR per precision**), with
   encoder/predictor/planner profiled separately to locate bottlenecks. Only the model
@@ -350,8 +366,9 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
 
 ## Execution Rules
 
-- **Hard caps.** The TensorRT/INT8 export (unsupported-op failures, fiddly calibration)
-  is time-capped with an explicit fallback (FP16-only); surface when approaching the cap
+- **Hard caps.** The TensorRT/INT8 export (unsupported-op failures, fiddly Model-Optimizer
+  PTQ / Q/DQ calibration) is time-capped with an explicit fallback (FP16-only); surface when
+  approaching the cap
   rather than iterating silently. Training is bounded by a fixed **epoch budget** (10 epochs
   for both tracks, batch size 128), not a wall-clock cap.
 - **Lean on the platform; don't reimplement it.** If a need looks like training,
