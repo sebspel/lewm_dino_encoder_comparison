@@ -232,7 +232,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   bit-for-bit (max_abs 0.0) on a dummy `DINOv3PreJEPA`; pod runs `python -m src.fidelity` on
   the real checkpoint. LeWM gate deferred — see SPEC/notes (temporal action Embedder).
 
-- [ ] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
+- [x] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
   `torch.onnx.export(dynamo=True)` (legacy TorchScript exporter deprecated; pass
   `dynamo=True` explicitly on torch 2.6), aiming a thin `nn.Module` forward-wrapper at each
@@ -241,6 +241,13 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   here; INT8 is deferred to the calibration step below** — its per-tensor scales require a
   calibration pass, so the INT8 engine cannot exist until that set is built. ONNX/TRT
   debugging and FP32/FP16/INT8 **precision matching** are OWNER-ONLY — STOP and ask.
+  → `src/export.py`: explicit-arity predict trace wrappers (`_Predict1Module` DINO /
+  `_Predict2Module` LeWM, selected by predict arity) so torch.export sees real params (flat
+  `dynamic_shapes`, named ONNX inputs) instead of a variadic `*inputs` pytree collapse;
+  added the `model=/precision=` CLI (reuses `precision_match` `_build_adapter` +
+  `example_inputs`, writes to `engines/<track>/`). Verified locally: all 4 ONNX graphs trace
+  with a dynamic batch axis; `pytest` green. TensorRT engine build + precision matching are
+  pod-only (🔴 owner).
 - [ ] 🔴 **INT8 calibration set + procedure (before the gate):** construct the calibration
   dataset — a representative Push-T sample drawn **through the platform** (matched ImageNet
   normalization), streamed through the real adapter so TensorRT observes `encode`/`predict`

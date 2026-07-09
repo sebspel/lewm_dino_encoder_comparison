@@ -20,6 +20,7 @@ Local vs pod: the torch->ONNX trace runs on any box (verified locally on dummy w
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,22 +46,44 @@ class _EncodeModule(nn.Module):
         return self.adapter.encode(obs)
 
 
-class _PredictModule(nn.Module):
+# `predict` has different arity per track, so it gets an explicit-signature wrapper per
+# arity (NOT one variadic `*inputs` wrapper): torch.export then sees real positional params,
+# giving a flat `dynamic_shapes` and named ONNX inputs — a variadic collapses every arg into
+# one pytree node, which mis-aligns with a flat dynamic_shapes spec and hides the input names.
+class _Predict2Module(nn.Module):
+    """Trace wrapper for the 2-arg LeWM predict: cached latent + AdaLN action."""
+
     def __init__(self, adapter: WMStepAdapter):
         super().__init__()
         self.adapter = adapter
 
-    def forward(self, *inputs: Tensor) -> Tensor:
-        # Arity-agnostic: LeWM drives (latent, action); DINO drives the single assembled 404
-        # embedding. The per-track shapes come from the example inputs handed to the tracer.
-        return self.adapter.predict(*inputs)
+    def forward(self, latent: Tensor, action: Tensor) -> Tensor:
+        return self.adapter.predict(latent, action)
+
+
+class _Predict1Module(nn.Module):
+    """Trace wrapper for the 1-arg DINO predict: the pre-assembled 404 embedding."""
+
+    def __init__(self, adapter: WMStepAdapter):
+        super().__init__()
+        self.adapter = adapter
+
+    def forward(self, embedding: Tensor) -> Tensor:
+        return self.adapter.predict(embedding)
+
+
+# Selected by predict arity (number of example predict inputs): DINO drives 1, LeWM drives 2.
+_PREDICT_WRAPPERS = {1: _Predict1Module, 2: _Predict2Module}
 
 
 def _batch_dynamic(n_inputs: int):
     """The `torch.export` dynamic_shapes spec handed to `torch.onnx.export(dynamo=True)` —
     one entry per positional forward arg, each declaring axis 0 (the CEM candidate batch) as
     dynamic so the ONNX graph and the TensorRT optimization profile accept a variable batch.
-    Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 1 (DINO)."""
+    Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 1 (DINO).
+
+    The spec is FLAT (one entry per positional forward arg) because every trace wrapper has
+    an explicit-arity `forward` — no variadic pytree collapse to nest around."""
     batch = Dim("batch", min=1, max=_MAX_CANDIDATE_BATCH)
     return tuple({0: batch} for _ in range(n_inputs))
 
@@ -206,6 +229,11 @@ def export(
     engine_dir.mkdir(parents=True, exist_ok=True)
     calibrator = _build_calibrator(calib_loader) if precision == "int8" else None
 
+    predict_arity = len(predict_inputs)
+    if predict_arity not in _PREDICT_WRAPPERS:
+        raise ValueError(
+            f"unsupported predict arity {predict_arity}; expected 1 (DINO) or 2 (LeWM)"
+        )
     specs = {
         "encoder": (
             _EncodeModule(adapter),
@@ -213,9 +241,9 @@ def export(
             _batch_dynamic(len(encode_inputs)),
         ),
         "predictor": (
-            _PredictModule(adapter),
+            _PREDICT_WRAPPERS[predict_arity](adapter),
             predict_inputs,
-            _batch_dynamic(len(predict_inputs)),
+            _batch_dynamic(predict_arity),
         ),
     }
     engines: dict[str, Path] = {}
@@ -229,3 +257,47 @@ def export(
             calibrator,
         )
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
+
+
+# Engines are large + device-specific, so they land in a repo-local, gitignored dir
+# (`*.plan`/`*.onnx` are ignored) — regenerable on the L40S, one subdir per track.
+_ENGINE_ROOT = Path("engines")
+
+
+def main() -> None:
+    """CLI: build the encoder + predictor engines for one track at one precision on the
+    L40S. Reuses the Phase-5 real-checkpoint loader + shared example inputs so the traced
+    graph is the exact `encode`/`predict` call pattern the benchmark drives. INT8 is gated —
+    it needs the owner calibration set (deferred step), so it fails loud here.
+
+        uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>
+    """
+    from src.interfaces import ExportConfig
+    from src.precision_match import _build_adapter, example_inputs
+
+    model = "lewm"
+    precision: Precision = "fp32"
+    for a in sys.argv[1:]:
+        if a.startswith("model="):
+            model = a.split("=", 1)[1]
+        elif a.startswith("precision="):
+            precision = a.split("=", 1)[1]  # type: ignore[assignment]
+
+    cfg = ExportConfig()
+    torch.manual_seed(cfg.seed)
+    adapter, name = _build_adapter(model)
+    encode_inputs, predict_inputs = example_inputs(adapter, cfg)
+
+    engines = export(
+        adapter,
+        precision=precision,
+        encode_inputs=encode_inputs,
+        predict_inputs=predict_inputs,
+        engine_dir=_ENGINE_ROOT / name,
+    )
+    for method, path in engines.items():
+        print(f"[{name}/{precision}] {method}: {path}")
+
+
+if __name__ == "__main__":
+    main()
