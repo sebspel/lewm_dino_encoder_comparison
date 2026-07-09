@@ -1,10 +1,14 @@
-from typing import Protocol, Literal, TypedDict
+from typing import Protocol, Literal, TypedDict, TYPE_CHECKING
 from pathlib import Path
 from dataclasses import dataclass
 
 from torch import Tensor
-from torch.utils.data import DataLoader
 from jaxtyping import Float
+
+if TYPE_CHECKING:
+    # The INT8 calibration set, drawn through the platform (src.calibrate). TYPE_CHECKING-only
+    # so this foundation module stays import-light and free of a runtime cycle.
+    from src.calibrate import CalibrationData
 
 Precision = Literal["fp32", "fp16", "int8"]
 
@@ -79,7 +83,7 @@ class Export(Protocol):
         # example predict inputs: LeWM (cached latent, action); DINO (assembled 404 embedding)
         predict_inputs: tuple[Tensor, ...],
         engine_dir: Path,
-        calib_loader: DataLoader | None = None,  # required iff precision == "int8"
+        calib_loader: "CalibrationData | None" = None,  # required iff precision == "int8"
     ) -> EnginePaths: ...
 
 

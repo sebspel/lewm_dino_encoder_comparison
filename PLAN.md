@@ -248,7 +248,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `example_inputs`, writes to `engines/<track>/`). Verified locally: all 4 ONNX graphs trace
   with a dynamic batch axis; `pytest` green. TensorRT engine build + precision matching are
   pod-only (🔴 owner).
-- [ ] 🔴 **INT8 calibration set + procedure (before the gate):** construct the calibration
+- [x] 🔴 **INT8 calibration set + procedure (before the gate):** construct the calibration
   dataset — a representative Push-T sample drawn **through the platform** (matched ImageNet
   normalization), streamed through the real adapter so TensorRT observes `encode`/`predict`
   activations and derives per-tensor INT8 scales — then build the INT8 engines
@@ -256,6 +256,17 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   OWNER-ONLY silent-failure: owner sets the sample source/count and calibrator. Sequenced
   **before** the precision-match gate so INT8 earns a drift row (its drift *is* the
   calibration-quality signal), not just a downstream SR. ⏱️ capped with FP16-only fallback.
+  → `src/calibrate.py`: 🔴 OWNER decisions — **`IInt8MinMaxCalibrator`** (ViT activations),
+  **512 clips**, **strided across all episodes** of `pusht_expert_train.h5` (the eval set),
+  loaded through `swm.data.load_dataset` with the vendored `eval_wm.img_transform` reused
+  verbatim (matched ImageNet norm). History-windows (`num_steps=3, frameskip=5`) yield the
+  exact encode/predict input shapes; the predictor stream runs clips through the REAL adapter
+  (`encode` [+ `assemble_embedding` for DINO]). `src/export.py` builds a **per-method**
+  calibrator (encoder obs / predictor per-track input) + sets the calibration profile for the
+  dynamic-shape INT8 build; CLI `precision=int8` draws the set. `interfaces.py` `Export.calib_loader`
+  retyped to `CalibrationData`. Verified off-pod: `tests/test_calibrate.py` (batch-shaping +
+  per-track predictor stream) + full `pytest` green. Engine build + scale derivation are
+  pod-only (needs dataset + `tensorrt`).
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the

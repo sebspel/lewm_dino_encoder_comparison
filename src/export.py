@@ -8,8 +8,11 @@ Owned PLUMBING (fails LOUDLY):
     optimization profile).
   - the engine-vs-PyTorch precision-match *mechanism* (max abs/rel error).
 
+INT8 calibration (OWNER-signed-off knobs) lives in `src.calibrate`: MinMax calibrator,
+512 clips strided across all episodes, drawn through the platform (matched ImageNet norm).
+`export` builds a per-method calibrator (encoder obs / predictor per-track input) from it.
+
 OWNER-ONLY seams left explicit (fail SILENTLY — STOP and ask before filling):
-  - INT8 calibration set + procedure  -> `INT8Calibrator` raises until owner-provided.
   - FP32/FP16/INT8 precision-match tolerances -> `PrecisionTolerance` NaN placeholders.
   - ONNX/TRT export debugging (parse/build failures surface loudly here, judgement is owner's).
 
@@ -209,22 +212,6 @@ def precision_match(
     return {"max_abs": max_abs, "max_rel": max_rel, "passed": passed}
 
 
-class INT8Calibrator:
-    """OWNER-ONLY seam. The INT8 calibration set + procedure need owner sign-off —
-    a bad calib set silently degrades every INT8 number.
-    FP16 is the sanctioned fallback until then."""
-
-    def __init__(self, calib_loader):
-        raise NotImplementedError(
-            "INT8 calibration is OWNER-ONLY: STOP and ask for the calibration set + "
-            "procedure before building an INT8 engine. FP16 is the fallback."
-        )
-
-
-def _build_calibrator(calib_loader):
-    return INT8Calibrator(calib_loader)
-
-
 def build_engine(
     onnx_path: Path,
     precision: Precision,
@@ -273,6 +260,12 @@ def build_engine(
         )
     config.add_optimization_profile(profile)
 
+    # A dynamic-shape INT8 build calibrates at a fixed shape, so TensorRT needs a calibration
+    # profile; reuse the optimization profile (calibration runs at its opt point, which is
+    # pinned to the example-input batch — the calibrator feeds that same batch).
+    if precision == "int8":
+        config.set_calibration_profile(profile)
+
     serialized = builder.build_serialized_network(network, config)
     if serialized is None:
         raise RuntimeError(f"TensorRT build returned None for {onnx_path}")  # -> OWNER
@@ -295,7 +288,26 @@ def export(
     if precision == "int8" and calib_loader is None:
         raise ValueError("int8 export requires a calibration loader (owner-provided)")
     engine_dir.mkdir(parents=True, exist_ok=True)
-    calibrator = _build_calibrator(calib_loader) if precision == "int8" else None
+
+    # Each engine gets its OWN calibrator over its OWN stream (encoder obs; predictor per-track
+    # predict input) — the two graphs see different activations, so one shared calibrator would
+    # mis-scale both. Built here (not in build_engine) because the predictor stream runs the
+    # clips through the adapter. The calibration batch must equal the profile opt (example) batch.
+    calibrators = {"encoder": None, "predictor": None}
+    if precision == "int8":
+        from src.calibrate import make_calibrator
+
+        if calib_loader.batch != encode_inputs[0].shape[0]:
+            raise ValueError(
+                f"calibration batch {calib_loader.batch} != example batch "
+                f"{encode_inputs[0].shape[0]} (must match the profile opt point)"
+            )
+        calibrators["encoder"] = make_calibrator(
+            calib_loader.encoder_batches(), engine_dir / "encoder.calib"
+        )
+        calibrators["predictor"] = make_calibrator(
+            calib_loader.predictor_batches(adapter), engine_dir / "predictor.calib"
+        )
 
     predict_arity = len(predict_inputs)
     if predict_arity not in _PREDICT_WRAPPERS:
@@ -322,7 +334,7 @@ def export(
             precision,
             engine_dir / f"{name}.{precision}.plan",
             inputs,
-            calibrator,
+            calibrators[name],
         )
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
 
@@ -356,12 +368,21 @@ def main() -> None:
     adapter, name = _build_adapter(model)
     encode_inputs, predict_inputs = example_inputs(adapter, cfg)
 
+    # INT8 draws the calibration set through the platform at the example (profile-opt) batch;
+    # FP32/FP16 build data-free.
+    calib_loader = None
+    if precision == "int8":
+        from src.calibrate import build_calibration_data
+
+        calib_loader = build_calibration_data(batch=encode_inputs[0].shape[0])
+
     engines = export(
         adapter,
         precision=precision,
         encode_inputs=encode_inputs,
         predict_inputs=predict_inputs,
         engine_dir=_ENGINE_ROOT / name,
+        calib_loader=calib_loader,
     )
     for method, path in engines.items():
         print(f"[{name}/{precision}] {method}: {path}")
