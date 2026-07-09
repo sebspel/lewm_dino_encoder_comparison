@@ -110,26 +110,40 @@ def _fold_linear_bn_eval(module: nn.Module) -> nn.Module:
 
 
 @contextlib.contextmanager
-def _chunk_as_slices():
-    """Trace-time shim: reimplement `Tensor.chunk` with `narrow` so the dynamo exporter
-    emits `Slice` instead of `SplitToSequence` — a sequence-typed ONNX op the TensorRT
-    parser rejects (UNSUPPORTED_NODE). The LeWM predictor's attention-QKV and AdaLN chunks
-    are both along the static feature axis, so slicing is numerically exact (verified 0.0
-    drift). No-op where the traced graph has no chunk (e.g. the ViT encoder)."""
-    orig = torch.Tensor.chunk
+def _slice_based_splits():
+    """Trace-time shim: reimplement `Tensor.chunk` and `Tensor.split` with `narrow` so the
+    dynamo exporter emits `Slice` instead of `SplitToSequence`/`SequenceAt` — sequence-typed
+    ONNX ops the TensorRT parser rejects (UNSUPPORTED_NODE). Both splits we hit are along a
+    static axis (LeWM attention-QKV/AdaLN on the feature axis; DINOv3 RoPE prefix-vs-patch on
+    the token axis), so slicing is numerically exact (verified 0.0 drift). No-op where the
+    traced graph has neither op."""
+    orig_chunk, orig_split = torch.Tensor.chunk, torch.Tensor.split
 
-    def _slices(self, chunks, dim=0):
+    def _chunk(self, chunks, dim=0):
         n = self.size(dim)
         step = (n + chunks - 1) // chunks  # torch.chunk's ceil-sized chunks
         return tuple(
             torch.narrow(self, dim, i, min(step, n - i)) for i in range(0, n, step)
         )
 
-    torch.Tensor.chunk = _slices
+    def _split(self, split_size_or_sections, dim=0):
+        n = self.size(dim)
+        if isinstance(split_size_or_sections, int):
+            s = split_size_or_sections
+            sections = [min(s, n - i) for i in range(0, n, s)]
+        else:
+            sections = list(split_size_or_sections)
+        out, start = [], 0
+        for sec in sections:
+            out.append(torch.narrow(self, dim, start, sec))
+            start += sec
+        return tuple(out)
+
+    torch.Tensor.chunk, torch.Tensor.split = _chunk, _split
     try:
         yield
     finally:
-        torch.Tensor.chunk = orig
+        torch.Tensor.chunk, torch.Tensor.split = orig_chunk, orig_split
 
 
 def export_onnx(
@@ -145,7 +159,7 @@ def export_onnx(
     # share the same underlying adapter object.
     module = _fold_linear_bn_eval(copy.deepcopy(module).eval())
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with torch.no_grad(), _chunk_as_slices():
+    with torch.no_grad(), _slice_based_splits():
         torch.onnx.export(
             module,
             example_inputs,
