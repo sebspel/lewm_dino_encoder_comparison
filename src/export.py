@@ -19,6 +19,7 @@ Local vs pod: the torch->ONNX trace runs on any box (verified locally on dummy w
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import math
 import sys
@@ -108,6 +109,29 @@ def _fold_linear_bn_eval(module: nn.Module) -> nn.Module:
     return module
 
 
+@contextlib.contextmanager
+def _chunk_as_slices():
+    """Trace-time shim: reimplement `Tensor.chunk` with `narrow` so the dynamo exporter
+    emits `Slice` instead of `SplitToSequence` — a sequence-typed ONNX op the TensorRT
+    parser rejects (UNSUPPORTED_NODE). The LeWM predictor's attention-QKV and AdaLN chunks
+    are both along the static feature axis, so slicing is numerically exact (verified 0.0
+    drift). No-op where the traced graph has no chunk (e.g. the ViT encoder)."""
+    orig = torch.Tensor.chunk
+
+    def _slices(self, chunks, dim=0):
+        n = self.size(dim)
+        step = (n + chunks - 1) // chunks  # torch.chunk's ceil-sized chunks
+        return tuple(
+            torch.narrow(self, dim, i, min(step, n - i)) for i in range(0, n, step)
+        )
+
+    torch.Tensor.chunk = _slices
+    try:
+        yield
+    finally:
+        torch.Tensor.chunk = orig
+
+
 def export_onnx(
     module: nn.Module,
     example_inputs: tuple[Tensor, ...],
@@ -121,7 +145,7 @@ def export_onnx(
     # share the same underlying adapter object.
     module = _fold_linear_bn_eval(copy.deepcopy(module).eval())
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with torch.no_grad():
+    with torch.no_grad(), _chunk_as_slices():
         torch.onnx.export(
             module,
             example_inputs,
