@@ -41,9 +41,12 @@ from src.interfaces import Precision, EnginePaths, WMStepAdapter
 # the DINO predictor: its (batch, 16, 588, 588) attention tensor exceeds TensorRT's 2^31
 # element-volume limit above batch 388.
 _MAX_CANDIDATE_BATCH = 300
-_WORKSPACE_BYTES = 16 << 30  # 16 GiB TensorRT build scratch (L40S has 48 GiB; TRT-10
-#                              default is full device memory — a 4 GiB cap under-cut valid
-#                              large-batch ViT/predictor tactics, failing the build)
+_WORKSPACE_BYTES = 24 << 30  # 24 GiB TensorRT per-tactic scratch CEILING (not a reservation;
+#                              runtime uses only what the selected tactics need). L40S has
+#                              48 GiB; a 16 GiB cap still pruned a ~19.5 GiB DINO-predictor
+#                              attention tactic, so widen the search to not handicap the
+#                              latency study. Uniform across tracks/precisions; govern real
+#                              footprint via measured peak GPU memory, not this knob.
 
 
 # --- thin method wrappers: aim the tracer at ONE method each.
