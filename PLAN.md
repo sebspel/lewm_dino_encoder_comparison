@@ -250,7 +250,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `example_inputs`, writes to `engines/<track>/`). Verified locally: all 4 ONNX graphs trace
   with a dynamic batch axis; `pytest` green. TensorRT engine build + precision matching are
   pod-only (🔴 owner).
-- [ ] 🔴 **INT8 explicit quantization (Model Optimizer PTQ) + calibration set (before the
+- [x] 🔴 **INT8 explicit quantization (Model Optimizer PTQ) + calibration set (before the
   gate):** switch INT8 from the implicit TRT-calibrator path to **explicit Q/DQ** — base FP32
   ONNX (dynamo, above) → **`modelopt.onnx.quantization`** inserts Q/DQ + derives per-tensor
   scales from a calibration pass → quantized ONNX per method → `build_engine` (TensorRT honors
@@ -273,9 +273,17 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
       in the INT8 path; **drop** the `build_engine` INT8 branch (`int8_calibrator` +
       `set_calibration_profile`) — INT8 parses the quantized ONNX like FP32/FP16.
     - `interfaces.py`: re-document `Export.calib_loader` as the Model-Optimizer PTQ input.
-  → verify: quantized ONNX carries QuantizeLinear nodes; INT8 engine builds from it;
-    `tests/test_calibrate.py` updated to the numpy-dict producer; `pytest` green off-pod.
-    Engine build + scale derivation pod-only (needs dataset + `tensorrt` + `modelopt`).
+  → done: `setup.sh` installs `nvidia-modelopt[onnx]` (out of uv) + sanity-imports it;
+    `src/calibrate.py` keeps the clip draw/streams, `make_calibrator` → `make_calibration_dict`
+    (numpy dict keyed off the base ONNX graph's real input names); `src/export.py` adds
+    `quantize_onnx` (`modelopt.onnx.quantization.quantize`, `calibration_method="max"`,
+    `use_external_data_format=True`) in the INT8 path and drops the `build_engine` calibrator +
+    calibration-profile branch (INT8 keeps only the INT8 flag, parses the quantized ONNX);
+    `interfaces.py` re-documents `calib_loader`. `pytest` green off-pod (28, incl. the
+    numpy-dict producer). 🔴 owner-confirm on pod: the non-`max` Model-Optimizer knobs
+    (Q/DQ format, per-channel-vs-tensor, op-exclusions) left at INT8 defaults; keeping the TRT
+    INT8 flag for a Q/DQ graph. Verify quantized ONNX carries QuantizeLinear + INT8 engine
+    builds — pod-only (needs dataset + `tensorrt` + `modelopt`).
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the

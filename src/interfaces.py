@@ -6,8 +6,9 @@ from torch import Tensor
 from jaxtyping import Float
 
 if TYPE_CHECKING:
-    # The INT8 calibration set, drawn through the platform (src.calibrate). TYPE_CHECKING-only
-    # so this foundation module stays import-light and free of a runtime cycle.
+    # The INT8 calibration set, drawn through the platform (src.calibrate); export turns it
+    # into the numpy dict the Model-Optimizer PTQ pass (explicit Q/DQ) consumes. TYPE_CHECKING
+    # -only so this foundation module stays import-light and free of a runtime cycle.
     from src.calibrate import CalibrationData
 
 Precision = Literal["fp32", "fp16", "int8"]
@@ -83,7 +84,10 @@ class Export(Protocol):
         # example predict inputs: LeWM (cached latent, action); DINO (assembled 404 embedding)
         predict_inputs: tuple[Tensor, ...],
         engine_dir: Path,
-        calib_loader: "CalibrationData | None" = None,  # required iff precision == "int8"
+        # required iff precision == "int8": the Model-Optimizer PTQ input (export builds a
+        # per-method numpy dict keyed by ONNX input name from it — explicit Q/DQ, not a TRT
+        # build-time calibrator).
+        calib_loader: "CalibrationData | None" = None,
     ) -> EnginePaths: ...
 
 

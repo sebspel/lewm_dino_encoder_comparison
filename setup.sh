@@ -10,16 +10,23 @@
 #   - the owned deps incl. torch (cu124) via `uv sync` from uv.lock
 #   - TensorRT (cu12, CUDA-12.4-compatible) via uv pip, OUTSIDE the lock, so it
 #     never drags a conflicting libnvinfer/CUDA stack into the project resolution.
+#   - the NVIDIA TensorRT Model Optimizer (nvidia-modelopt[onnx], the explicit-INT8
+#     Q/DQ tool), the same way — via uv pip, outside the lock — so its onnxruntime/CUDA
+#     stack stays matched to CUDA 12.4 and can't conflict with the TensorRT install.
 #
 # A Docker image is composed only at the very end, for reproducibility (off-pod).
 #
-# NOTE: a bare `uv sync` run later prunes TensorRT (it is not in the lock); re-run
-# this script (or the step 3 install) to restore it.
+# NOTE: a bare `uv sync` run later prunes TensorRT + modelopt (not in the lock); re-run
+# this script (or the step 3 install) to restore them.
 set -euo pipefail
 
 # Pin TensorRT so re-loading a pod reproduces the same engine toolchain. Must be a
 # cu12 build compatible with CUDA 12.4; override if the L40S needs another.
 TENSORRT_VERSION="${TENSORRT_VERSION:-10.7.0}"
+
+# Model Optimizer version; leave empty to install the latest compatible build. Pin
+# (export MODELOPT_VERSION=...) once confirmed against the TensorRT 10.7 / CUDA-12.4 stack.
+MODELOPT_VERSION="${MODELOPT_VERSION:-}"
 
 # 0) uv cache — force to ephemeral /tmp so the 15GB archive-v0 never lands on the
 #    network volume (/workspace). Safe to lose on restart (just cached wheels).
@@ -34,16 +41,23 @@ export PATH="$HOME/.local/bin:$PATH"
 # 2) owned deps (torch cu124 + the rest), pinned by uv.lock
 uv sync
 
-# 3) TensorRT -- CUDA-12.x build, into the project venv but outside the lock
+# 3) TensorRT + Model Optimizer -- CUDA-12.x builds, into the project venv but outside
+#    the lock. modelopt[onnx] pulls its own onnxruntime; installing from pypi.nvidia.com
+#    keeps it matched to the CUDA-12.4 TensorRT stack.
 uv pip install --upgrade \
   --extra-index-url https://pypi.nvidia.com \
   "tensorrt-cu12==${TENSORRT_VERSION}"
+uv pip install --upgrade \
+  --extra-index-url https://pypi.nvidia.com \
+  "nvidia-modelopt[onnx]${MODELOPT_VERSION:+==${MODELOPT_VERSION}}"
 
 # 4) sanity: versions + CUDA match
 uv run python - <<'PY'
-import torch, tensorrt
+import torch, tensorrt, modelopt
+from modelopt.onnx.quantization import quantize  # noqa: F401  (explicit-INT8 PTQ entrypoint)
 print("torch", torch.__version__, "| torch.cuda", torch.version.cuda)
 print("tensorrt", tensorrt.__version__)
+print("modelopt", modelopt.__version__)
 assert torch.version.cuda and torch.version.cuda.startswith("12."), torch.version.cuda
 PY
 

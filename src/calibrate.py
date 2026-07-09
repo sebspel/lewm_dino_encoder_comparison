@@ -1,7 +1,9 @@
 """INT8 calibration set + procedure (owner-signed-off knobs).
 
-Builds the calibration dataset TensorRT observes to derive per-tensor INT8 scales, drawn
-**through the platform** so the activations match inference exactly:
+Builds the calibration dataset the NVIDIA TensorRT **Model Optimizer** observes to derive
+per-tensor INT8 scales (explicit Q/DQ — it inserts QuantizeLinear/DequantizeLinear into the
+base ONNX and bakes the scales in), drawn **through the platform** so the activations match
+inference exactly:
 
   * source — Push-T expert data (`pusht_expert_train.lance`, the same set the Phase-3 eval
     overlays replay — `conf/experiment/eval_*.yaml` override pusht.yaml's `.h5` default),
@@ -15,12 +17,18 @@ Builds the calibration dataset TensorRT observes to derive per-tensor INT8 scale
     for DINO]) so it observes true predict activations, not synthetic ones.
 
 Owner sign-off (OWNER-ONLY silent-failure boundary — a bad calib set degrades every INT8
-number with NO error): calibrator = `IInt8MinMaxCalibrator` (min/max, suited to the ViT
-activations); 512 clips; strided evenly across all episodes.
+number with NO error): calibration method = `max` (the Model-Optimizer analogue of the old
+MinMax calibrator, suited to the ViT activations); 512 clips; strided evenly across all
+episodes. The remaining Model-Optimizer quant knobs (Q/DQ format, per-channel-vs-per-tensor,
+op-type exclusions) stay at the tool's INT8 defaults pending owner confirmation at the
+pod precision-match gate.
 
 The clip draw (`build_calibration_data`) needs the real dataset -> pod-only. The batching /
-adapter-streaming logic (`CalibrationData`) is pure torch and unit-tested off-pod. The
-`IInt8MinMaxCalibrator` subclass (`make_calibrator`) imports `tensorrt` lazily -> pod-only.
+adapter-streaming logic (`CalibrationData`) is pure torch and unit-tested off-pod.
+`make_calibration_dict` turns the per-method streams into the numpy dict (keyed by ONNX
+input name) the Model Optimizer consumes; it reads the ONNX input names via `onnx` (a uv
+dep, available off-pod), so it is unit-tested off-pod too. The Model-Optimizer PTQ call
+itself lives in `src.export.quantize_onnx` (imports `modelopt` lazily -> pod-only).
 """
 
 from __future__ import annotations
@@ -89,9 +97,11 @@ def draw_calibration_clips(
 
 
 class CalibrationData:
-    """Holds the drawn clips and produces the per-method calibration batches. Trims to a whole
-    multiple of `batch` so every calibration batch matches the calibrator's `get_batch_size`
-    (and the engine's optimization-profile opt point). Pure torch — unit-tested off-pod."""
+    """Holds the drawn clips and produces the per-method calibration streams. `batch` is only
+    an internal chunk that bounds the adapter forward-pass memory when building the predictor
+    stream (the Model Optimizer batches internally, so this is no longer tied to any engine
+    profile); the drawn clips are trimmed to a whole multiple of it. Pure torch — unit-tested
+    off-pod."""
 
     def __init__(self, obs: Tensor, proprio: Tensor, action: Tensor, batch: int):
         n = (len(obs) // batch) * batch
@@ -142,39 +152,30 @@ def build_calibration_data(
     return CalibrationData(obs, proprio, action, batch)
 
 
-def make_calibrator(batches: list[tuple[Tensor, ...]], cache_path: Path):
-    """Owner-chosen `IInt8MinMaxCalibrator` over pre-built calibration batches. Each
-    `get_batch` moves one batch to CUDA (holding it alive) and hands TensorRT the device
-    pointers, in the engine's input order; scales are cached to `cache_path` so a rebuild is
-    data-free. Imports `tensorrt` lazily -> pod-only. Fails loud."""
-    import tensorrt as trt
+def make_calibration_dict(onnx_path: Path, batches: list[tuple[Tensor, ...]]) -> dict:
+    """Turn a per-method stream into the numpy dict the Model Optimizer consumes: concatenate
+    the chunked batches into one array per method input, then key those arrays by the base
+    ONNX graph's real input names (read from the graph, initializers excluded) so the tool
+    binds each calibration array to the right activation. `batches` positional order matches
+    the traced `forward` signature (encoder `(obs,)`; LeWM predictor `(latent, action)`; DINO
+    predictor `(embedding,)`), which is also the graph's input order — so a positional zip is
+    correct. Uses `onnx` (a uv dep) -> off-pod. A miskeyed dict silently mis-scales, so the
+    input-count mismatch fails loud."""
+    import numpy as np
+    import onnx
 
-    cache_path = Path(cache_path)
+    n_inputs = len(batches[0])
+    arrays = [
+        torch.cat([b[i] for b in batches]).cpu().numpy().astype(np.float32)
+        for i in range(n_inputs)
+    ]
 
-    class _MinMaxCalibrator(trt.IInt8MinMaxCalibrator):
-        def __init__(self):
-            super().__init__()
-            self._batches = batches
-            self._i = 0
-            self._held: list[Tensor] = []  # keep CUDA buffers alive during the build step
-            self._batch_size = int(batches[0][0].shape[0])
-
-        def get_batch_size(self):
-            return self._batch_size
-
-        def get_batch(self, names):
-            if self._i >= len(self._batches):
-                return None
-            batch = self._batches[self._i]
-            self._i += 1
-            # Engine bindings are FP32 (build sets no tensor dtypes); feed float on CUDA.
-            self._held = [t.to("cuda").contiguous().float() for t in batch]
-            return [int(t.data_ptr()) for t in self._held]
-
-        def read_calibration_cache(self):
-            return cache_path.read_bytes() if cache_path.exists() else None
-
-        def write_calibration_cache(self, cache):
-            cache_path.write_bytes(cache)
-
-    return _MinMaxCalibrator()
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    init = {t.name for t in model.graph.initializer}
+    names = [i.name for i in model.graph.input if i.name not in init]
+    if len(names) != n_inputs:
+        raise ValueError(
+            f"ONNX {onnx_path} declares {len(names)} inputs {names} but the calibration "
+            f"stream has {n_inputs} arrays"
+        )
+    return dict(zip(names, arrays))

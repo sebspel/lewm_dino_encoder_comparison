@@ -1,15 +1,19 @@
-"""INT8 calibration data-shaping tests (pure torch, off-pod).
+"""INT8 calibration data-shaping tests (pure torch + onnx, off-pod).
 
-The clip draw (`build_calibration_data`) and the `IInt8MinMaxCalibrator` subclass need the
-real dataset + `tensorrt` (pod-only); the batching / adapter-streaming logic is exercised
-here on synthetic clips + the dummy adapters — the part that could silently mis-shape a
-calibration batch and poison every INT8 scale.
+The clip draw (`build_calibration_data`) needs the real dataset and the Model-Optimizer PTQ
+call (`src.export.quantize_onnx`) needs `modelopt` (both pod-only); the batching /
+adapter-streaming logic AND the numpy-dict producer keyed by ONNX input name are exercised
+here on synthetic clips + the dummy adapters — the parts that could silently mis-shape a
+calibration array or mis-key it and poison every INT8 scale.
 """
 
+import numpy as np
+import onnx
 import pytest
 import torch
+from onnx import TensorProto, helper
 
-from src.calibrate import CalibrationData
+from src.calibrate import CalibrationData, make_calibration_dict
 from src.interfaces import (
     HISTORY_SIZE,
     DINO_N_PATCHES,
@@ -29,6 +33,21 @@ def _clips(n=N):
     proprio = torch.randn(n, T, DINO_PROPRIO_DIM)
     action = torch.randn(n, T, MODEL_ACTION_DIM)
     return CalibrationData(obs, proprio, action, BATCH)
+
+
+def _tiny_onnx(tmp_path, input_names):
+    """A minimal ONNX whose graph.input carries `input_names` (in order) — enough for
+    `make_calibration_dict` to read the real names off the graph, as it will off the base
+    export ONNX on the pod."""
+    inputs = [
+        helper.make_tensor_value_info(n, TensorProto.FLOAT, [None, 1]) for n in input_names
+    ]
+    out = helper.make_tensor_value_info("out", TensorProto.FLOAT, [None, 1])
+    node = helper.make_node("Identity", [input_names[0]], ["out"])
+    graph = helper.make_graph([node], "g", inputs, [out])
+    path = tmp_path / "m.onnx"
+    onnx.save(helper.make_model(graph), str(path))
+    return path
 
 
 def test_trims_to_whole_batches():
@@ -66,3 +85,39 @@ def test_dino_predictor_stream_is_404_embedding():
     assert len(batches) == 2
     (embedding,) = batches[0]  # DINO predict is a single assembled 404 embedding
     assert embedding.shape == (BATCH, T, DINO_N_PATCHES, DINO_PREDICTOR_DIM)
+
+
+def test_encoder_calib_dict_keyed_by_onnx_input(tmp_path):
+    data = _clips()
+    onnx_path = _tiny_onnx(tmp_path, ["obs"])  # encoder graph has one input
+    d = make_calibration_dict(onnx_path, data.encoder_batches())
+    assert list(d) == ["obs"]
+    assert d["obs"].dtype == np.float32
+    # batches concatenated over the whole (trimmed) clip set -> leading axis = 16
+    assert d["obs"].shape == (16, T, 3, 224, 224)
+
+
+def test_lewm_predictor_calib_dict_keyed_and_ordered(tmp_path):
+    data = _clips()
+    adapter = LeWMAdapter(build_dummy_lewm())
+    onnx_path = _tiny_onnx(tmp_path, ["latent", "action"])  # LeWM predict is 2-arity
+    d = make_calibration_dict(onnx_path, data.predictor_batches(adapter))
+    assert list(d) == ["latent", "action"]  # positional zip preserves order
+    assert d["latent"].shape == (16, T, LATENT_DIM)
+    assert d["action"].shape == (16, T, MODEL_ACTION_DIM)
+
+
+def test_dino_predictor_calib_dict_is_404(tmp_path):
+    data = _clips()
+    adapter = DINOWMAdapter(build_dummy_dino())
+    onnx_path = _tiny_onnx(tmp_path, ["embedding"])
+    d = make_calibration_dict(onnx_path, data.predictor_batches(adapter))
+    assert list(d) == ["embedding"]
+    assert d["embedding"].shape == (16, T, DINO_N_PATCHES, DINO_PREDICTOR_DIM)
+
+
+def test_calib_dict_input_count_mismatch_raises(tmp_path):
+    data = _clips()
+    onnx_path = _tiny_onnx(tmp_path, ["latent", "action"])  # 2 inputs
+    with pytest.raises(ValueError):  # encoder stream has 1 array -> mismatch, fails loud
+        make_calibration_dict(onnx_path, data.encoder_batches())
