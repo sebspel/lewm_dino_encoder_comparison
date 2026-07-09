@@ -28,14 +28,18 @@ set -euo pipefail
 TENSORRT_VERSION="${TENSORRT_VERSION:-10.7.0}"
 
 # The export toolchain must stay on CUDA major 12 (torch is locked to cu124 and the pod
-# driver tops out at 12.x — a CUDA-13 build cannot run here). onnxruntime-gpu's default PyPI
-# wheel is now CUDA 13, so it is pulled from onnxruntime's dedicated CUDA-12 feed instead;
-# that feed hosts ONLY cu12 builds, so even the unpinned latest there is cu12. Override the
-# feed if the URL moves. Leave the versions empty for the latest builds; pin both (export
-# ONNXRUNTIME_GPU_VERSION=... MODELOPT_VERSION=...) once a known-good pair is confirmed here.
+# driver tops out at 12.x — a CUDA-13 build cannot run here). Two cu13 vectors are blocked:
+#   - onnxruntime-gpu's default PyPI wheel is now CUDA 13, so it is pulled from onnxruntime's
+#     dedicated CUDA-12 feed instead (that feed hosts ONLY cu12 builds).
+#   - the LATEST nvidia-modelopt (0.45) requires torch 2.13 — a cu13 build. modelopt 0.43.0 is
+#     the newest build that does NOT (it works with the locked torch 2.6); it pins
+#     onnxruntime-gpu==1.24.4 (hence the ORT pin below) and onnx==1.19.1. Step 3 also pins
+#     torch to the installed cu124 build so any modelopt still wanting a newer torch fails
+#     LOUDLY rather than silently swapping cu124 -> cu13.
+# Confirmed torch-2.6-compatible pair (2026-07-09 pod resolve); override the feed/pins to re-pin.
 ONNXRUNTIME_CUDA12_INDEX="${ONNXRUNTIME_CUDA12_INDEX:-https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/}"
-ONNXRUNTIME_GPU_VERSION="${ONNXRUNTIME_GPU_VERSION:-}"
-MODELOPT_VERSION="${MODELOPT_VERSION:-}"
+ONNXRUNTIME_GPU_VERSION="${ONNXRUNTIME_GPU_VERSION:-1.24.4}"
+MODELOPT_VERSION="${MODELOPT_VERSION:-0.43.0}"
 
 # 0) uv cache — force to ephemeral /tmp so the 15GB archive-v0 never lands on the
 #    network volume (/workspace). Safe to lose on restart (just cached wheels).
@@ -69,11 +73,18 @@ uv pip install \
   --extra-index-url https://pypi.org/simple/ \
   "onnxruntime-gpu${ONNXRUNTIME_GPU_VERSION:+==${ONNXRUNTIME_GPU_VERSION}}"
 
-#    Model Optimizer -- NO --upgrade, so it keeps the cu12 onnxruntime-gpu just installed
-#    instead of re-resolving it (which would pull the cu13 PyPI default back in).
+#    Model Optimizer -- torch pinned to the installed cu124 build so modelopt cannot upgrade
+#    torch into the cu13 stack (0.45+ requires torch 2.13 = cu13); that turns a bad modelopt
+#    pin into a loud dependency conflict here instead of a silent cu124->cu13 torch swap. NO
+#    --upgrade, so the cu12 onnxruntime-gpu just installed is kept (modelopt 0.43.0 pins it to
+#    ==1.24.4, matched above). The cu124 torch index is added so the local-version torch pin
+#    resolves against the already-installed wheel. (modelopt also downgrades onnx to 1.19.1.)
+TORCH_PIN="$(uv run python -c 'import torch; print(torch.__version__)')"
 uv pip install \
   --extra-index-url https://pypi.nvidia.com \
-  "nvidia-modelopt[onnx]${MODELOPT_VERSION:+==${MODELOPT_VERSION}}"
+  --extra-index-url https://download.pytorch.org/whl/cu124 \
+  "nvidia-modelopt[onnx]==${MODELOPT_VERSION}" \
+  "torch==${TORCH_PIN}"
 
 # 4) sanity: versions + a REAL onnxruntime CUDA-EP session across the whole export toolchain.
 #    The old check only imported modelopt and asserted torch's CUDA — it passed even with a

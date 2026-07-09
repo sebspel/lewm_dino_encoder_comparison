@@ -17,7 +17,11 @@ dependencies = [
     "wandb",
     "jaxtyping",
     "beartype",
-    "onnx",
+    # Pinned to 1.19.1 to match nvidia-modelopt (0.43.0, the newest cu124-torch-compatible
+    # build; installed out-of-lock by setup.sh), which caps onnx==1.19.1. Harmonizing the lock
+    # keeps `uv run` from re-syncing onnx to a version modelopt rejects. onnx is export-only
+    # (unused in training), so the pin is low-risk.
+    "onnx==1.19.1",
     "transformers",
     "timm",
     "peft",
