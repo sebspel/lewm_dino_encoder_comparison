@@ -284,17 +284,19 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
     `src/calibrate.py` keeps the clip draw/streams, `make_calibrator` → `make_calibration_dict`
     (numpy dict keyed off the base ONNX graph's real input names); `src/export.py` adds
     `quantize_onnx` (`modelopt.onnx.quantization.quantize`, `calibration_method="max"`,
-    `calibration_eps=["cuda:0","cpu"]` when `torch.cuda.is_available()` else `["cpu"]` — the
-    calibration pass runs on the **GPU (CUDA EP) if available**, CPU fallback; EP order affects
-    calibration speed only, not the scales, so it is plumbing not a quant knob,
     `use_external_data_format=True`) in the INT8 path and drops the `build_engine` calibrator +
     calibration-profile branch (INT8 keeps only the INT8 flag, parses the quantized ONNX);
     `interfaces.py` re-documents `calib_loader`. `pytest` green off-pod (28, incl. the
     numpy-dict producer). 🔴 owner-confirm on pod: the non-`max` Model-Optimizer knobs
     (Q/DQ format, per-channel-vs-tensor, op-exclusions) left at INT8 defaults; keeping the TRT
-    INT8 flag for a Q/DQ graph. Verify quantized ONNX carries QuantizeLinear + INT8 engine
-    builds, and that the calibration pass binds the **CUDA EP** (not CPU) on the pod — pod-only
-    (needs dataset + `tensorrt` + `modelopt`).
+    INT8 flag for a Q/DQ graph.
+  → **calibration EP split (fix, 2026-07-10):** encoder calibrates on the **GPU (CUDA EP)**,
+    predictor on the **CPU EP** (`quantize_onnx(force_cpu_calibration=name=="predictor")`). The
+    `onnxruntime-gpu` CUDA EP miscomputes the predictor's dynamic-batch reshape and crashes
+    modelopt's MHA probe (`Reshape` wants `{192,3,16,64}` from `{8,3,1024}`); CPU EP is correct.
+    EP affects calibration speed only, not scales (rationale in SPEC). Verify: quantized ONNX
+    carries QuantizeLinear + INT8 engine builds; encoder calibration binds CUDA EP, predictor
+    binds CPU EP — pod-only (needs dataset + `tensorrt` + `modelopt`).
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the

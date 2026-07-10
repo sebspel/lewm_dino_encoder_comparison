@@ -229,6 +229,7 @@ def quantize_onnx(
     out_path: Path,
     calibration_method: str = "max",
     calibration_shapes: str | None = None,
+    force_cpu_calibration: bool = False,
 ) -> Path:
     """NVIDIA TensorRT **Model Optimizer** PTQ invocation (owned plumbing; owner sets the
     quant config). Rewrites the base FP32 ONNX into a Q/DQ-annotated ONNX with per-tensor
@@ -239,10 +240,18 @@ def quantize_onnx(
     the quantizer must read/rewrite. Runs ONLY on the L40S (`modelopt` imported lazily so
     this module imports off-pod). Quantize failures raise loudly (judgement is owner's).
 
-    The calibration range-collection pass runs on the **GPU (CUDA EP) when one is available**,
-    CPU otherwise — modelopt's own default EP order lists `cpu` first, so this reorders it to
-    prefer CUDA (the `setup.sh` CUDA-12 `onnxruntime-gpu` provides the EP). The EP only affects
-    how fast the pass runs, not the derived scales, so it is plumbing, not a quant-config knob.
+    The calibration pass runs on the **GPU (CUDA EP) when one is available**, CPU otherwise —
+    modelopt's own default EP order lists `cpu` first, so this reorders it to prefer CUDA (the
+    `setup.sh` CUDA-12 `onnxruntime-gpu` provides the EP) — UNLESS `force_cpu_calibration` is
+    set, which pins it to CPU. The predictor path sets it: the `onnxruntime-gpu` CUDA EP
+    miscomputes the predictor's dynamic-batch reshape chain (`Squeeze(Shape(latent))` feeding a
+    head-split `Reshape`) — at batch 8 it fabricates a reshape target of 192 (=8x8x3) instead
+    of 8 and crashes modelopt's MHA-exclusion probe, whereas the CPU EP (and native TensorRT,
+    and the CUDA EP with graph-opt disabled) computes it correctly. The encoder graph lacks that
+    pattern, so it keeps the faster CUDA EP. The EP only affects how fast the pass runs, not the
+    derived scales (per-tensor, EP-independent), so this split is plumbing, not a quant-config
+    knob. (The TensorRT EP would also be correct but is unusable here: its ORT `.so` needs the
+    out-of-venv TRT libs on `LD_LIBRARY_PATH`, which the pod does not provide.)
 
     `calibration_shapes` pins the concrete per-input shape modelopt feeds its **ORT** sessions
     (the MHA-exclusion probe + the range pass). It is required for the LeWM predictor: that
@@ -257,8 +266,12 @@ def quantize_onnx(
     from modelopt.onnx.quantization import quantize
 
     # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
-    # off-pod / when no GPU is present ("run on GPU if available").
-    calibration_eps = ["cuda:0", "cpu"] if torch.cuda.is_available() else ["cpu"]
+    # off-pod / when no GPU is present ("run on GPU if available"). The predictor forces CPU
+    # (`force_cpu_calibration`) to dodge the CUDA-EP dynamic-reshape miscompute described above.
+    if force_cpu_calibration or not torch.cuda.is_available():
+        calibration_eps = ["cpu"]
+    else:
+        calibration_eps = ["cuda:0", "cpu"]
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     quantize(
@@ -402,6 +415,10 @@ def export(
                 calib_dict,
                 engine_dir / f"{name}.int8.onnx",
                 calibration_shapes=shapes,
+                # The predictor's dynamic-batch reshape trips an onnxruntime-gpu CUDA-EP
+                # miscompute in modelopt's MHA probe; calibrate it on CPU. The encoder graph
+                # lacks that pattern, so it keeps the faster GPU (CUDA EP) calibration.
+                force_cpu_calibration=(name == "predictor"),
             )
         engines[name] = build_engine(
             onnx_path,

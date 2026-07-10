@@ -80,8 +80,12 @@ contribution is the optimization + QLoRA layer above.
   **CUDA-12** feed (the default PyPI wheel is now CUDA 13, which pulls `nvidia-*-cu13` and
   can't init cuDNN against the pod's 12.x driver) — this CUDA-12 `onnxruntime-gpu` is also what
   lets the Model-Optimizer **calibration pass run on the GPU (CUDA EP)**, which the export
-  prefers over CPU whenever a GPU is present (EP order only affects calibration speed, not the
-  derived scales); (2) `nvidia-modelopt` itself is pinned to
+  prefers over CPU whenever a GPU is present for the **encoder**, but pins the **predictor** to
+  the CPU EP: the CUDA EP miscomputes the predictor's dynamic-batch reshape
+  (`Squeeze(Shape(latent))` → head-split `Reshape`), fabricating a target of 192 (=8x8x3) at
+  batch 8 and crashing modelopt's MHA-exclusion probe, while the CPU EP (and native TensorRT)
+  computes it correctly. EP choice only affects calibration speed, not the derived (per-tensor)
+  scales, so the split is plumbing; (2) `nvidia-modelopt` itself is pinned to
   a build compatible with the locked cu124 torch — its **latest requires a CUDA-13 torch
   (2.13)**, so `setup.sh` pins torch to the installed cu124 build (upgrade fails loudly) and
   requires a compatible `MODELOPT_VERSION`. The whole export stack stays on **CUDA major 12**.
