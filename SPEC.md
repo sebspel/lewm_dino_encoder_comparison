@@ -202,6 +202,16 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   (4 base + up to 4 quantized = up to 8 ONNX across both tracks) and TensorRT honors the
   embedded Q/DQ instead of calibrating at build time. Only the **model** (encoder +
   predictor) is exported; the CEM planner is not.
+  - **"INT8" means INT8+FP16.** The Model Optimizer quantizes only the heavy layers
+    (MatMul/Gemm/Conv/…) to INT8 and casts the non-quantized remainder to FP16 (its default
+    high-precision dtype), so the quantized ONNX is a mixed graph. `build_engine` therefore
+    sets the FP16 flag alongside INT8 (TRT rejects an FP16-typed layer otherwise). This is
+    the realistic TRT INT8 deployment — non-quantized layers always run in a higher precision
+    — and it makes the INT8-vs-FP16 delta the marginal benefit of pushing the heavy layers to
+    INT8 on the same FP16 backbone. Trade-off owner-accepted: the FP16 cast of the remainder
+    can under/overflow a few initializers (modelopt warns), so the INT8 numbers are read
+    against the precision-match drift; keeping the remainder FP32 (`high_precision_dtype`) is
+    the documented fallback if that drift proves unacceptable.
 - `benchmark(engine, time_budget) -> {latency_p50, latency_p95, rollouts_completed,
   throughput, peak_mem, success_rate}` — fixed wall-clock budget; rollouts is the
   headline speed measure, and **every speed result carries the SR for that engine

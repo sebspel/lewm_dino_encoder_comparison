@@ -269,9 +269,11 @@ def build_engine(
     example_inputs: tuple[Tensor, ...],
 ) -> Path:
     """TensorRT-10.7 builder invocation (owned plumbing). FP32 default, FP16 flag; INT8 sets
-    the INT8 flag and parses the **already-quantized** Q/DQ ONNX (no calibrator, no
-    calibration profile — the scales are baked into the graph by `quantize_onnx`). Parse/build
-    failures raise loudly (the *judgement* on how to fix them is owner's — ONNX/TRT debugging).
+    the INT8 **and** FP16 flags and parses the **already-quantized** Q/DQ ONNX (no calibrator,
+    no calibration profile — the scales are baked into the graph by `quantize_onnx`). FP16 is
+    required alongside INT8 because the Model Optimizer casts the non-quantized remainder to
+    FP16, so "INT8" is really INT8+FP16 (see the int8 branch below). Parse/build failures raise
+    loudly (the *judgement* on how to fix them is owner's — ONNX/TRT debugging).
     Runs ONLY on the L40S (`tensorrt` imported lazily so this module imports off-pod)."""
     import tensorrt as trt
 
@@ -291,9 +293,16 @@ def build_engine(
     if precision == "fp16":
         config.set_flag(trt.BuilderFlag.FP16)
     elif precision == "int8":
-        # Explicit Q/DQ: the quantized ONNX carries the scales; the flag only lets TRT pick
-        # INT8 tactics for the Q/DQ layers. No int8_calibrator / calibration profile.
+        # Explicit Q/DQ: the quantized ONNX carries the scales; the INT8 flag only lets TRT
+        # pick INT8 tactics for the Q/DQ layers. No int8_calibrator / calibration profile.
+        # FP16 is set TOO because the Model Optimizer emits a MIXED graph: it quantizes the
+        # heavy MatMul/Gemm/etc. to INT8 and casts everything it did NOT quantize to FP16 (its
+        # default high-precision dtype). TRT rejects an FP16-typed layer unless the FP16 flag
+        # is on ("fp16 precision has been set ... but fp16 is not configured"), so both flags
+        # are required. The engine is thus INT8 on the quantized layers + FP16 on the rest —
+        # the realistic TRT INT8 deployment (SPEC: "INT8" == INT8+FP16).
         config.set_flag(trt.BuilderFlag.INT8)
+        config.set_flag(trt.BuilderFlag.FP16)
 
     # Optimization profile for the dynamic candidate-batch axis (axis 0): min 1, opt at the
     # example batch, max the CEM candidate count. Non-batch axes stay at the example shape.
