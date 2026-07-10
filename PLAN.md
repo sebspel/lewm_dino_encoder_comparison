@@ -297,13 +297,24 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
     EP affects calibration speed only, not scales (rationale in SPEC). Verify: quantized ONNX
     carries QuantizeLinear + INT8 engine builds; encoder calibration binds CUDA EP, predictor
     binds CPU EP — pod-only (needs dataset + `tensorrt` + `modelopt`).
-- [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
+- [x] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER
   sign-off: inspect drift, decide the rel-error metric (max vs percentile), and judge the
   drift by eye. **No coded pass/fail** — `precision_match` reports drift only; the gate is the
   owner's sign-off on the drift table, not a tolerance object (the `PrecisionTolerance`
   dataclass was removed). Engines trusted before the steps below build on them.
+  → **OWNER SIGN-OFF (2026-07-10):** both tracks run on real checkpoints; drift judged on
+  **abs** only — the `max_rel` column is a near-zero-denominator artifact (explodes with
+  element count / batch; FP32-faithful engines show 1e2–1e7 rel) and is **disregarded**, not
+  gated. Structural check PASS: FP32 engines faithful (lewm enc_abs ≤7e-3, dino ≤5.6e-2) off
+  the shared base ONNX → export/assembly/register-slice/reshape sound, so FP16/INT8 drift is
+  genuine quantization loss, **not an export break** (monotone fp32<fp16<int8, bounded/finite).
+  Per-precision sign-off: **FP32 trusted**; **FP16 trusted-provisional** (pending SR); **INT8
+  recorded-but-flagged degraded** — lewm borderline (enc_abs ~0.6–1.0), dino large (enc_abs
+  ~3–4, per-tensor INT8 vs DINOv3 outlier channels) → **INT8 is the FP16-only-fallback
+  candidate**, SR-per-precision is the arbiter (Phase-5 benchmark). All rows kept for the
+  FP32→FP16→INT8 delta + speed-vs-SR study.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
   per planning cycle, for both models × precisions (`src/profile.py` or a `benchmark`
   mode). Use the Phase-1 cycle decomposition.
