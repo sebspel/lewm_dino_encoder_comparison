@@ -10,7 +10,8 @@ Owned PLUMBING (fails LOUDLY):
 
 INT8 is **explicit Q/DQ** via the NVIDIA TensorRT Model Optimizer, not a build-time TRT
 calibrator: `quantize_onnx` rewrites the base FP32 ONNX into a Q/DQ-annotated ONNX with
-per-tensor scales baked in from the calibration pass, and `build_engine` then parses that
+per-tensor scales baked in from the calibration pass (run on the GPU / CUDA EP when
+available), and `build_engine` then parses that
 quantized graph like FP32/FP16 (TRT honors the embedded Q/DQ — no `int8_calibrator`, no
 calibration profile). The calibration set (OWNER-signed-off knobs: `max` method, 512 clips
 strided across all episodes, drawn through the platform at matched ImageNet norm) lives in
@@ -235,14 +236,24 @@ def quantize_onnx(
     (owner-confirmed at the pod precision-match gate). `use_external_data_format=True`: the
     dynamo exporter externalizes initializers, so the base ONNX has a `.onnx.data` sidecar
     the quantizer must read/rewrite. Runs ONLY on the L40S (`modelopt` imported lazily so
-    this module imports off-pod). Quantize failures raise loudly (judgement is owner's)."""
+    this module imports off-pod). Quantize failures raise loudly (judgement is owner's).
+
+    The calibration range-collection pass runs on the **GPU (CUDA EP) when one is available**,
+    CPU otherwise — modelopt's own default EP order lists `cpu` first, so this reorders it to
+    prefer CUDA (the `setup.sh` CUDA-12 `onnxruntime-gpu` provides the EP). The EP only affects
+    how fast the pass runs, not the derived scales, so it is plumbing, not a quant-config knob."""
     from modelopt.onnx.quantization import quantize
+
+    # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
+    # off-pod / when no GPU is present ("run on GPU if available").
+    calibration_eps = ["cuda:0", "cpu"] if torch.cuda.is_available() else ["cpu"]
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     quantize(
         onnx_path=str(onnx_path),
         calibration_data=calibration_dict,
         calibration_method=calibration_method,
+        calibration_eps=calibration_eps,
         output_path=str(out_path),
         use_external_data_format=True,
     )
