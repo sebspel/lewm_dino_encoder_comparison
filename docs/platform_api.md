@@ -178,5 +178,5 @@ ever added (making a model `Actionable`) this would need revisiting — no phase
 2. **Dims to hard-code in Phase 4** (after one-shot pod confirmation of `hidden_size`,
    `num_reg`, `vit_hf(tiny)` dim, PushT action space): `LATENT_DIM=192` (LeWM),
    DINO-WM patch grid `(N_patches, D) = (196, 384)`, `ACTION_DIM=2`.
-3. **DINOv3 size → stay on `dinov3_small`** (ViT-S/16, 384-d). Asymmetry vs LeWM
-   ViT-Tiny is smaller than the paper's ~48×; accepted for now.
+3. **DINOv3 size → stay on `dinov3_small`** (ViT-S/16, 384-d). Encoder-compute
+   asymmetry vs LeWM ViT-Tiny is modest at this backbone size; accepted for now.

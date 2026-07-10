@@ -317,10 +317,16 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   FP32→FP16→INT8 delta + speed-vs-SR study.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
   per planning cycle, for both models × precisions (`src/profile.py` or a `benchmark`
-  mode). Use the Phase-1 cycle decomposition.
+  mode). Use the Phase-1 cycle decomposition. Slices must be **mutually exclusive +
+  additive** (`planner_ms` = pure CEM/Python overhead, encode/predict time subtracted;
+  sum ≈ cycle within the sync barrier). Record the **FP32 baseline per-component time
+  shares** + the derived **optimizable fraction** `(enc+pred)/total`, per model (SPEC
+  §Speedup study — dilution disclosure).
 - [ ] 🖥️ **Fixed-time-budget benchmark** on the L40S: per model × precision, record
   **rollouts completed**, **per-step latency p50/p95**, throughput (rollouts/sec), **peak
-  GPU memory**, **and SR** — the Phase-3 eval driver re-run on the optimized model, which
+  GPU memory** (sample via `cudaMemGetInfo`/nvidia-smi — **not** the torch allocator; TRT
+  engine + context device allocations bypass it, SPEC §Interface Contracts), **and SR** —
+  the Phase-3 eval driver re-run on the optimized model, which
   slots into `CEMSolver(model=...)` through a thin Python `get_cost`/`get_action` shim over
   the engine's `encode`/`predict` (SPEC §Interface Contracts). The DINO shim reproduces
   `PreJEPA.rollout` (full `404` carry, per-step action-replace, proprio+pixels cost). Same
@@ -328,7 +334,10 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
-  (encoder/predictor/planner) bottleneck breakdown**.
+  (encoder/predictor/planner) bottleneck breakdown**. Per model × precision, report
+  **both** the *model-only* and the *realized* wall-clock speedup (gap = planner floor,
+  ≈ Amdahl from the baseline shares), alongside the optimizable fraction (SPEC §Speedup
+  study — dilution disclosure).
 - [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 

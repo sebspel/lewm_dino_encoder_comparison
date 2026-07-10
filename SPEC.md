@@ -19,8 +19,8 @@ platform does **not** provide:
    PyTorch -> ONNX -> TensorRT, with INT8 quantized **explicitly** — the NVIDIA TensorRT
    Model Optimizer inserts Q/DQ nodes (PyTorch -> ONNX -> Model Optimizer -> TensorRT) — and
    benchmark planning latency, throughput, and peak GPU memory across FP32 -> FP16 -> INT8.
-   Headline: the **LeWM-vs-DINOv3 speedup ratio** (reproduces/stresses the paper's ~48x
-   claim) and the **per-model FP32->FP16->INT8 optimization delta**.
+   Headline: the **LeWM-vs-DINOv3 speedup ratio** and the **per-model
+   FP32->FP16->INT8 optimization delta**.
 2. **QLoRA delta on the DINOv3-WM backbone:** fine-tune the frozen DINOv3 backbone
    with QLoRA on Push-T, re-run the task-quality metric, and report the delta vs
    the frozen baseline.
@@ -219,9 +219,18 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
 - `benchmark(engine, time_budget) -> {latency_p50, latency_p95, rollouts_completed,
   throughput, peak_mem, success_rate}` — fixed wall-clock budget; rollouts is the
   headline speed measure, and **every speed result carries the SR for that engine
-  config** (no speed number without its task-quality counterpart).
+  config** (no speed number without its task-quality counterpart). `peak_mem` is
+  sampled from the driver/runtime (`cudaMemGetInfo` or nvidia-smi), **not** the torch
+  caching allocator: TensorRT's engine + execution-context device allocations do not
+  pass through torch's allocator, so `torch.cuda.max_memory_allocated` would
+  systematically undercount exactly the optimized path.
 - `profile(adapter, ...) -> {encoder_ms, predictor_ms, planner_ms}` — per-component
-  breakdown to locate the bottleneck (encoder vs predictor vs CEM planner)
+  breakdown to locate the bottleneck (encoder vs predictor vs CEM planner). The three
+  slices are **mutually exclusive and additive**: `planner_ms` is the pure CEM/Python
+  overhead (sampling, elite selection, cost reduction) with the encode/predict call
+  time subtracted, so the slices sum to the measured cycle within the `cuda.synchronize`
+  barrier. Only then are the FP32 baseline **time shares** meaningful — and they are
+  load-bearing for reading the precision study (below).
 - `plan_latency(model, obs, goal) -> seconds` — one CEM planning cycle, timed
 - A thin adapter exposing each platform model behind a common **two-method**
   `encode` / `predict` signature — **not** a single fused `__call__(obs, action) -> latent`
@@ -383,6 +392,18 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   is TRT-optimized; the CEM planner stays in Python around it. Headline: LeWM-vs-DINOv3
   rollouts-in-budget + p95-latency ratio + per-model FP32->FP16->INT8 delta in **both
   speed and SR** (degradation quoted vs FP32; speed plotted against SR).
+  - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and
+    the Python planner is precision-invariant, the per-precision **wall-clock** delta is
+    capped by the model's share of the cycle. Reporting per-component *relative* speedup
+    alone hides this. So the study also reports, per model: the **FP32 baseline
+    per-component time shares** and the derived **optimizable fraction**
+    `(encoder+predictor)/total` (the Amdahl ceiling on end-to-end gain), and — per
+    precision — **both** the *model-only* speedup (planner treated as free) **and** the
+    *realized* wall-clock speedup (rollouts-in-budget); their gap is the planner floor
+    and should match the Amdahl prediction from the shares. The optimizable fraction is
+    itself model-dependent (LeWM's single token is planner/launch-latency-bound, DINO's
+    196-token grid is model-bound), which is what explains why the same precision helps
+    the two tracks' wall-clock differently — a result, not bookkeeping.
 - **QLoRA delta:** the task-quality metric re-run on a QLoRA-tuned DINOv3 backbone
   (backbone QLoRA-adapted, **predictor unfrozen and co-trained**), reported as a delta
   against the frozen baseline (adapters confirmed to target real modules).
