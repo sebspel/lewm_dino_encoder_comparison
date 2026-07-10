@@ -371,8 +371,10 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   profiling/benchmark builds on them (INT8 after its Model-Optimizer Q/DQ graph is built from
   the calibration set) — the export-stage analogue of the tracer bullet, so a
   silently-diverging quantized engine is caught before it poisons every downstream SR. Drift
-  (max abs/rel) is measured; the FP32/FP16/INT8 tolerance policy is owner-set (a
-  silent-failure boundary), so drift is logged-not-gated until sign-off.
+  (max abs/rel) is measured and reported only; the pass/fail is an **owner sign-off on the
+  measured drift** (a silent-failure boundary), deliberately **not coded** into a tolerance
+  object or automated gate — so the gate is a judgement on the drift table, never logged-and-
+  auto-gated.
 - **Speedup study:** both models exported PyTorch->ONNX->TensorRT with INT8 via the Model
   Optimizer's explicit Q/DQ (FP32->FP16->INT8),
   benchmarked on the L40S under a fixed wall-clock time budget (latency p50/p95,

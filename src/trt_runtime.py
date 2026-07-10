@@ -6,8 +6,8 @@ tensors, and returns torch tensors. This is the missing `engine_out` producer fo
 fixed-budget benchmark drives inside its Python CEM rollout loop.
 
 Runs ONLY on the L40S (`tensorrt` imported lazily + CUDA buffers). The precision-match
-POLICY (tolerances) stays OWNER-ONLY (`src.export.PrecisionTolerance`); this module only
-produces the numbers to judge.
+POLICY (pass/fail) stays OWNER-ONLY — a sign-off on the drift, not coded here; this module
+only produces the numbers to judge.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from src.export import PrecisionTolerance, precision_match
+from src.export import precision_match
 
 
 def _torch_dtype(trt_dtype) -> torch.dtype:
@@ -112,12 +112,12 @@ def engine_vs_reference(
     plan_path: Path,
     reference: Tensor,
     inputs: tuple[Tensor, ...],
-    tol: PrecisionTolerance = PrecisionTolerance(),
 ) -> dict:
     """Run one engine on `inputs` and compare a single output against the PyTorch
-    `reference` via `src.export.precision_match` (max abs/rel error; `passed` stays None
-    until the owner sets tolerances). Convenience for the precision-match test loop."""
+    `reference` via `src.export.precision_match` (max abs/rel drift only — the pass/fail
+    gate is an owner sign-off on the drift, not coded). Convenience for the precision-match
+    driver."""
     engine_out = EngineRunner(plan_path).run(inputs)
     if isinstance(engine_out, tuple):
         raise ValueError("engine has multiple outputs; compare them explicitly")
-    return precision_match(reference, engine_out, tol)
+    return precision_match(reference, engine_out)

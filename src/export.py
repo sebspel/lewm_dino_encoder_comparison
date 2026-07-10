@@ -19,7 +19,8 @@ strided across all episodes, drawn through the platform at matched ImageNet norm
 input) keyed by ONNX input name and hands it to `quantize_onnx`.
 
 OWNER-ONLY seams left explicit (fail SILENTLY — STOP and ask before filling):
-  - FP32/FP16/INT8 precision-match tolerances -> `PrecisionTolerance` NaN placeholders.
+  - FP32/FP16/INT8 precision matching: `precision_match` reports drift only; the gate is an
+    owner sign-off on the measured drift, deliberately NOT coded into a pass/fail here.
   - the Model-Optimizer quant config beyond the `max` method (Q/DQ format,
     per-channel-vs-per-tensor, op-type exclusions) — left at the tool's INT8 defaults,
     owner-confirmed against measured drift at the pod precision-match gate.
@@ -35,9 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import math
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -192,23 +191,11 @@ def export_onnx(
     return out_path
 
 
-@dataclass(frozen=True)
-class PrecisionTolerance:
-    """OWNER-ONLY: FP32/FP16/INT8 precision-matching thresholds fail *silently*.
-    Left NaN so pass/fail is **disabled** — error is measured
-    and logged but never silently gated — until owner sign-off on the L40S."""
-
-    rtol: float = math.nan  # TODO(owner): set after seeing real engine error on the pod
-    atol: float = math.nan  # TODO(owner)
-
-
-def precision_match(
-    reference: Tensor,
-    engine_out: Tensor,
-    tol: PrecisionTolerance = PrecisionTolerance(),
-) -> dict:
-    """Engine-vs-PyTorch precision-match MECHANISM (owner sets the policy). Returns max
-    abs/rel error; `passed` stays None until owner tolerances are set. Locally runnable.
+def precision_match(reference: Tensor, engine_out: Tensor) -> dict:
+    """Engine-vs-PyTorch precision-match MEASUREMENT (owner-only policy is NOT coded).
+    Returns max abs/rel drift only; the precision-match gate is an owner sign-off on this
+    measured drift (SPEC §Requirements), deliberately not wired into a pass/fail here.
+    Locally runnable.
     """
     ref = reference.detach().float()
     # Engine output lands on CUDA (EngineRunner allocates cuda buffers) while the PyTorch
@@ -217,10 +204,7 @@ def precision_match(
     diff = (ref - out).abs()
     max_abs = diff.max().item()
     max_rel = (diff / ref.abs().clamp_min(1e-12)).max().item()
-    passed = None
-    if not (math.isnan(tol.rtol) or math.isnan(tol.atol)):
-        passed = bool((diff <= tol.atol + tol.rtol * ref.abs()).all())
-    return {"max_abs": max_abs, "max_rel": max_rel, "passed": passed}
+    return {"max_abs": max_abs, "max_rel": max_rel}
 
 
 def quantize_onnx(

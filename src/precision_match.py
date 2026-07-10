@@ -5,9 +5,10 @@ ONCE, then for each precision exports the two engines (`src.export`) and runs ea
 its reference (`src.trt_runtime.engine_vs_reference`), reporting max abs/rel drift.
 
 Owned PLUMBING (fails LOUDLY): input construction, the export/compare loop, the table.
-OWNER-ONLY (fails SILENTLY, STOP and ask): the pass/fail TOLERANCES stay unset
-(`src.export.PrecisionTolerance` — NaN), so drift is measured and printed but never gated
-until owner sign-off on the L40S. INT8 routes through the owner-approved calibration set
+OWNER-ONLY (fails SILENTLY, STOP and ask): the pass/fail decision is NOT coded — drift is
+measured and printed, and the precision-match gate is an owner sign-off on that drift on the
+L40S (no tolerance object, no automated gating). INT8 routes through the owner-approved
+calibration set
 (`src.calibrate.build_calibration_data`) + Model-Optimizer Q/DQ, so its drift row IS the
 PTQ/calibration-quality signal the owner inspects here.
 

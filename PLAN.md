@@ -299,9 +299,11 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
     binds CPU EP — pod-only (needs dataset + `tensorrt` + `modelopt`).
 - [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
-  engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER sign-off: inspect drift, decide the
-  rel-error metric (max vs percentile), set `PrecisionTolerance` `rtol`/`atol` (NaN →
-  measured-not-gated until set). Engines trusted before the steps below build on them.
+  engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER
+  sign-off: inspect drift, decide the rel-error metric (max vs percentile), and judge the
+  drift by eye. **No coded pass/fail** — `precision_match` reports drift only; the gate is the
+  owner's sign-off on the drift table, not a tolerance object (the `PrecisionTolerance`
+  dataclass was removed). Engines trusted before the steps below build on them.
 - [ ] 🖥️ **Per-component profiling** — encoder, predictor, and planner (CEM) separately,
   per planning cycle, for both models × precisions (`src/profile.py` or a `benchmark`
   mode). Use the Phase-1 cycle decomposition.
@@ -323,7 +325,7 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
 fixed `time_budget_s` on `Benchmark` / `ExportConfig`, and `ComponentProfile` / `Profile`.
 
 **Verify:** engines built on the L40S (gitignored, regenerable); precision-match gate
-passed (drift within owner tolerances or documented) **before** benchmarking; fixed-budget
+passed (drift owner-signed-off on the drift table, or documented) **before** benchmarking; fixed-budget
 comparison (rollouts + p95 latency **+ SR per precision**, FP32-relative degradation quoted)
 and the encoder/predictor/planner profile tables produced and logged to W&B.
 
