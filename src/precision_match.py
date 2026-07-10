@@ -7,8 +7,9 @@ its reference (`src.trt_runtime.engine_vs_reference`), reporting max abs/rel dri
 Owned PLUMBING (fails LOUDLY): input construction, the export/compare loop, the table.
 OWNER-ONLY (fails SILENTLY, STOP and ask): the pass/fail TOLERANCES stay unset
 (`src.export.PrecisionTolerance` — NaN), so drift is measured and printed but never gated
-until owner sign-off on the L40S. INT8 needs the owner calibration set first (FP32/FP16
-runnable now).
+until owner sign-off on the L40S. INT8 routes through the owner-approved calibration set
+(`src.calibrate.build_calibration_data`) + Model-Optimizer Q/DQ, so its drift row IS the
+PTQ/calibration-quality signal the owner inspects here.
 
 Runs on the L40S: `export` + engine execution need `tensorrt` + CUDA. `example_inputs`
 and `reference_outputs` are pure torch and run anywhere.
@@ -99,6 +100,17 @@ def precision_match_track(
     reference device (the engine already carries the same weights)."""
     # Trace + build every precision from the CPU opt-batch inputs (unchanged trace behavior).
     opt_encode, opt_predict = example_inputs(adapter, cfg, batch=_MATCH_BATCH)
+
+    # INT8 needs the owner-approved calibration set (drawn ONCE from the real Push-T data and
+    # streamed through this adapter for the predictor). Built here — before `adapter.to(device)`
+    # below — so the calibration encode runs on the same CPU graph the trace/build use, matching
+    # the `src.export` CLI path. FP32/FP16 build data-free (`calib_loader=None`).
+    calib_loader = None
+    if "int8" in precisions:
+        from src.calibrate import build_calibration_data
+
+        calib_loader = build_calibration_data(batch=_MATCH_BATCH)
+
     engines_by_precision = {
         precision: export(
             adapter,
@@ -106,6 +118,7 @@ def precision_match_track(
             encode_inputs=opt_encode,
             predict_inputs=opt_predict,
             engine_dir=engine_dir / precision,
+            calib_loader=calib_loader if precision == "int8" else None,
         )
         for precision in precisions
     }
@@ -179,10 +192,7 @@ def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
 
 def main() -> None:
     track = "lewm"
-    precisions: tuple[str, ...] = (
-        "fp32",
-        "fp16",
-    )  # int8 needs the owner calibration set
+    precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
     for a in sys.argv[1:]:
         if a.startswith("track="):
             track = a.split("=", 1)[1]
