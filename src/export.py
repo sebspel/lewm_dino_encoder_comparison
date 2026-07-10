@@ -228,6 +228,7 @@ def quantize_onnx(
     calibration_dict: dict,
     out_path: Path,
     calibration_method: str = "max",
+    calibration_shapes: str | None = None,
 ) -> Path:
     """NVIDIA TensorRT **Model Optimizer** PTQ invocation (owned plumbing; owner sets the
     quant config). Rewrites the base FP32 ONNX into a Q/DQ-annotated ONNX with per-tensor
@@ -241,7 +242,18 @@ def quantize_onnx(
     The calibration range-collection pass runs on the **GPU (CUDA EP) when one is available**,
     CPU otherwise — modelopt's own default EP order lists `cpu` first, so this reorders it to
     prefer CUDA (the `setup.sh` CUDA-12 `onnxruntime-gpu` provides the EP). The EP only affects
-    how fast the pass runs, not the derived scales, so it is plumbing, not a quant-config knob."""
+    how fast the pass runs, not the derived scales, so it is plumbing, not a quant-config knob.
+
+    `calibration_shapes` pins the concrete per-input shape modelopt feeds its **ORT** sessions
+    (the MHA-exclusion probe + the range pass). It is required for the LeWM predictor: that
+    graph's batch axis is a `torch.export`-specialized symbol (an ignored `s == trace_batch`
+    guard), which ORT's constant-folding collapses to the trace batch, so ORT executes the
+    predictor as if batch were fixed. Left unset, modelopt fills the dynamic axis with 1 and
+    feeds a batch-1 sample, which mismatches the folded batch and crashes a reshape. Pinning
+    the batch to the trace batch makes the feed agree with the fold. This does NOT touch the
+    scales (per-tensor, batch-independent) and TRT keeps the axis dynamic when it later parses
+    the quantized graph (verified: the FP32 engine off the same graph runs at batch 1/8/300) —
+    so it is feed plumbing, not a quant-config knob."""
     from modelopt.onnx.quantization import quantize
 
     # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
@@ -254,6 +266,7 @@ def quantize_onnx(
         calibration_data=calibration_dict,
         calibration_method=calibration_method,
         calibration_eps=calibration_eps,
+        calibration_shapes=calibration_shapes,
         output_path=str(out_path),
         use_external_data_format=True,
     )
@@ -376,8 +389,19 @@ def export(
                 else calib_loader.predictor_batches(adapter)
             )
             calib_dict = make_calibration_dict(onnx_path, batches)
+            # Pin each input's calibration shape to the traced example shape so modelopt's
+            # ORT probe is fed the batch its constant-folding assumes (the trace batch), not
+            # the dynamic-axis default of 1. `calib_dict` keys are the ONNX inputs in graph
+            # order, which make_calibration_dict aligns 1:1 with `inputs` (forward order).
+            shapes = ",".join(
+                f"{n}:" + "x".join(str(int(d)) for d in t.shape)
+                for n, t in zip(calib_dict, inputs)
+            )
             onnx_path = quantize_onnx(
-                onnx_path, calib_dict, engine_dir / f"{name}.int8.onnx"
+                onnx_path,
+                calib_dict,
+                engine_dir / f"{name}.int8.onnx",
+                calibration_shapes=shapes,
             )
         engines[name] = build_engine(
             onnx_path,

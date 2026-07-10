@@ -29,30 +29,39 @@ from src.export import export
 from src.interfaces import ExportConfig, WMStepAdapter
 from src.trt_runtime import engine_vs_reference
 
-# Precision-match batch: exercise the engine at a representative candidate fan-out, not
-# batch=1 — TensorRT tunes at the optimization profile's `opt` point, which `build_engine`
-# pins to the example-input batch (docs/platform_api.md §3: CEM num_samples=300).
+# Precision-match batches: exercise the engine at the optimization profile's min / opt / max
+# — TensorRT tunes at the `opt` point, which `build_engine` pins to the example-input batch
+# (docs/platform_api.md §3: CEM num_samples=300 is the max candidate fan-out). Validating a
+# batch != the trace batch is load-bearing: the predictor's batch axis is a torch.export-
+# specialized symbol some consumers fold to the trace batch, so a single opt-batch check
+# would pass even a batch-frozen engine (TRT keeps the axis dynamic; these off-opt batches
+# prove it end-to-end).
 _MATCH_BATCH = 8
+_MATCH_BATCHES = (1, _MATCH_BATCH, 300)
 
 
 def example_inputs(
-    adapter: WMStepAdapter, cfg: ExportConfig, batch: int = _MATCH_BATCH
+    adapter: WMStepAdapter,
+    cfg: ExportConfig,
+    batch: int = _MATCH_BATCH,
+    device: str | torch.device = "cpu",
 ) -> tuple[tuple[Tensor, ...], tuple[Tensor, ...]]:
     """Build the SHARED example inputs both export-tracing and the reference consume:
     `encode` gets an obs tensor; `predict` gets the predictor STATE (from one cached encode)
     plus the per-track conditioning — the exact call pattern the CEM rollout drives (encode
     once, predict many). LeWM's predict is `(latent, action)`; DINO's predict is a single
     pre-assembled 404 embedding (`assemble_embedding` tiles proprio+action onto the 384
-    latent — a Python step outside the compiled predict).
+    latent — a Python step outside the compiled predict). `device` places the tensors on the
+    adapter's device (CPU for tracing off-pod; CUDA for the pod reference at large batch).
     """
     from src.adapter import DINOWMAdapter
 
-    obs = torch.randn(batch, cfg.hist, *cfg.obs_shape)
+    obs = torch.randn(batch, cfg.hist, *cfg.obs_shape, device=device)
     with torch.no_grad():
         latent = adapter.encode(obs)  # cache the latent — predict reuses THIS tensor
-        action = torch.randn(batch, cfg.hist, cfg.action_dim)
+        action = torch.randn(batch, cfg.hist, cfg.action_dim, device=device)
         if isinstance(adapter, DINOWMAdapter):
-            proprio = torch.randn(batch, cfg.hist, cfg.proprio_dim)
+            proprio = torch.randn(batch, cfg.hist, cfg.proprio_dim, device=device)
             embedding = adapter.assemble_embedding(latent, proprio, action)
             return (obs,), (embedding,)
     return (obs,), (latent, action)
@@ -83,44 +92,61 @@ def precision_match_track(
     cfg: ExportConfig,
     engine_dir: Path,
 ) -> list[dict]:
-    """Export each precision and measure engine-vs-PyTorch drift for both methods.
-    Inputs + reference are built ONCE and shared across all precisions."""
-    encode_inputs, predict_inputs = example_inputs(adapter, cfg)
-    ref = reference_outputs(adapter, encode_inputs, predict_inputs)
+    """Export each precision (traced ONCE at the profile opt batch) and measure engine-vs-
+    PyTorch drift for both methods at each of `_MATCH_BATCHES` (profile min/opt/max). The
+    reference runs on CUDA when available so the max-batch check is feasible for both tracks;
+    engines are built on the CPU-traced graph first, then the adapter is moved to the
+    reference device (the engine already carries the same weights)."""
+    # Trace + build every precision from the CPU opt-batch inputs (unchanged trace behavior).
+    opt_encode, opt_predict = example_inputs(adapter, cfg, batch=_MATCH_BATCH)
+    engines_by_precision = {
+        precision: export(
+            adapter,
+            precision=precision,
+            encode_inputs=opt_encode,
+            predict_inputs=opt_predict,
+            engine_dir=engine_dir / precision,
+        )
+        for precision in precisions
+    }
+
+    # Now validate drift at min/opt/max on the reference device (GPU if present).
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    adapter.to(device)
 
     rows: list[dict] = []
     for precision in precisions:
-        engines = export(
-            adapter,
-            precision=precision,
-            encode_inputs=encode_inputs,
-            predict_inputs=predict_inputs,
-            engine_dir=engine_dir / precision,
-        )
-        enc = engine_vs_reference(engines["encoder"], ref["encoder"], encode_inputs)
-        pred = engine_vs_reference(
-            engines["predictor"], ref["predictor"], predict_inputs
-        )
-        rows.append(
-            {
-                "model": name,
-                "precision": precision,
-                "encode_max_abs": enc["max_abs"],
-                "encode_max_rel": enc["max_rel"],
-                "predict_max_abs": pred["max_abs"],
-                "predict_max_rel": pred["max_rel"],
-            }
-        )
+        engines = engines_by_precision[precision]
+        for batch in _MATCH_BATCHES:
+            encode_inputs, predict_inputs = example_inputs(
+                adapter, cfg, batch=batch, device=device
+            )
+            ref = reference_outputs(adapter, encode_inputs, predict_inputs)
+            enc = engine_vs_reference(engines["encoder"], ref["encoder"], encode_inputs)
+            pred = engine_vs_reference(
+                engines["predictor"], ref["predictor"], predict_inputs
+            )
+            rows.append(
+                {
+                    "model": name,
+                    "precision": precision,
+                    "batch": batch,
+                    "encode_max_abs": enc["max_abs"],
+                    "encode_max_rel": enc["max_rel"],
+                    "predict_max_abs": pred["max_abs"],
+                    "predict_max_rel": pred["max_rel"],
+                }
+            )
     return rows
 
 
 def _print_table(rows: list[dict]) -> None:
-    hdr = f"{'model':>6} {'prec':>5} {'enc_abs':>10} {'enc_rel':>10} {'pred_abs':>10} {'pred_rel':>10}"
+    hdr = f"{'model':>6} {'prec':>5} {'batch':>6} {'enc_abs':>10} {'enc_rel':>10} {'pred_abs':>10} {'pred_rel':>10}"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(
-            f"{r['model']:>6} {r['precision']:>5} "
+            f"{r['model']:>6} {r['precision']:>5} {r['batch']:>6} "
             f"{r['encode_max_abs']:>10.3e} {r['encode_max_rel']:>10.3e} "
             f"{r['predict_max_abs']:>10.3e} {r['predict_max_rel']:>10.3e}"
         )
