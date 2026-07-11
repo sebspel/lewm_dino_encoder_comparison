@@ -57,6 +57,10 @@ from src.interfaces import DINO_PREDICTOR_DIM, MODEL_ACTION_DIM, EnginePaths, Ex
 # DINOv3PreJEPA._encode_image. (B, T, P, 404) -> (B, T, P, 404): the dim-preserving predictor.
 EncodeFn = Callable[[Tensor], Tensor]
 PredictFn = Callable[[Tensor], Tensor]
+# LeWM predict engine boundary: (emb (B,T,192), RAW action (B,T,10)) -> (B,T,192). The engine
+# runs the per-frame action_encoder + predictor + pred_proj internally (Design A), so it ingests
+# the raw action, NOT a pre-encoded act_emb — distinct from DINO's single-tensor PredictFn.
+LeWMPredictFn = Callable[[Tensor, Tensor], Tensor]
 
 
 class DINOWMSRShim(DINOv3PreJEPA):
@@ -111,25 +115,35 @@ class DINOWMSRShim(DINOv3PreJEPA):
 
 
 class LeWMSRShim(LeWM):
-    """LeWM whose pixel-encode path routes through an injected ``encode_fn`` (the exported
-    encoder engine on the pod, or the adapter's torch ``encode`` in the parity check).
+    """LeWM whose pixel-encode AND predict paths route through injected callables (the exported
+    encoder + predictor engines on the pod, or the adapter's torch ``encode`` / ``predict`` in
+    the parity check), so the SR reflects the SAME quantized engines the benchmark times — the
+    predictor's FP16/INT8 drift enters the cost, exactly as it does for DINO.
 
-    **Why this needs its own check, unlike DINO.** DINO's shim overrides the narrow
+    **Why ``encode`` needs its own check, unlike DINO.** DINO's shim overrides the narrow
     ``_encode_image`` seam and inherits ``encode`` untouched, so parity holds *by construction*.
     ``LeWM.encode`` has **no such seam** — it fuses the backbone call (``encoder -> cls ->
     projector``) with the info-dict bookkeeping *and* the ``action_encoder`` branch in one
     method that returns the mutated dict. So this override **re-implements ``encode``'s body**;
     it is NOT inherited, and a wrong key/dtype/shape would silently corrupt every LeWM SR (the
-    inherited ``rollout`` / ``get_cost`` consume ``info['emb']`` / ``info['act_emb']``). That is
-    exactly what ``sr_cost_parity_lewm`` validates: the override must reproduce
-    ``LeWM.get_cost`` bit-for-bit.
+    inherited ``rollout`` / ``get_cost`` consume ``info['emb']``). That is exactly what
+    ``sr_cost_parity_lewm`` validates: the override must reproduce ``LeWM.get_cost`` bit-for-bit.
 
-    ``predict`` is left **native** on purpose. Routing it through an engine raises the
-    action-encoder boundary question — ``LeWM.rollout`` encodes the *whole* action sequence once
-    and passes ``LeWM.predict`` a pre-encoded ``act_emb``, whereas ``LeWMAdapter.predict``
-    re-encodes the *raw* action per step inside the engine. Whether those agree depends on
-    whether ``action_encoder`` is temporal; resolving it is the deferred, owner-gated step (the
-    LeWM adapter-fidelity gate). This shim/check deliberately covers only the ``encode`` seam.
+    **Predict routes through the engine (Design A — ``action_encoder`` lives INSIDE the engine).**
+    The exported LeWM predict engine (``LeWMAdapter.predict``) ingests a **raw** action and runs
+    ``action_encoder -> predictor -> pred_proj`` internally — the boundary the per-frame guard
+    (``src.fidelity.lewm_action_encoder_per_frame``, owner-signed-off) exists to justify. But the
+    inherited ``LeWM.rollout`` pre-encodes the *whole* action sequence once
+    (``all_act_emb = self.action_encoder(...)``) and hands ``predict`` a pre-encoded ``act_emb``.
+    To feed the engine RAW actions while inheriting ``rollout`` byte-unchanged, the shim replaces
+    its ``action_encoder`` with an **Identity passthrough**: ``rollout`` then windows the raw
+    actions straight into ``predict``, and the engine's own per-frame ``action_encoder`` does the
+    encode. Because the encoder is per-frame, the windowed per-step encode equals the
+    whole-sequence encode bit-for-bit (same guard), so this reproduces ``LeWM.predict``'s cost
+    contribution exactly on the adapter path and carries the predictor engine's quantization drift
+    on the pod. (This mirrors DINO, where the small ``extra_encoders`` stay native in ``rollout``
+    and only the core predictor is compiled — here the small ``action_encoder`` sits in the
+    engine and ``rollout`` is neutralized to a passthrough instead.)
 
     Non-``Actionable`` (``LeWM`` has no ``get_action``) -> the CEM warm-start zero-pads, matching
     the Phase-3 baseline. NOTE: ``LeWM.get_cost`` (pinned swm 0.1.1) only supports a **single
@@ -138,32 +152,56 @@ class LeWMSRShim(LeWM):
     pins ``batch_size=1``, so this is the real contract — the check runs at ``B=1``.
     """
 
-    def __init__(self, model: LeWM, encode_fn: EncodeFn):
+    def __init__(self, model: LeWM, encode_fn: EncodeFn, predict_fn: LeWMPredictFn):
         nn.Module.__init__(self)
         self.encoder = model.encoder
         self.projector = model.projector
-        self.action_encoder = model.action_encoder
-        self.predictor = model.predictor
+        # action_encoder lives INSIDE the predict engine (Design A / per-frame guard), so the
+        # inherited rollout must NOT pre-encode: an Identity passthrough makes rollout window the
+        # RAW actions straight into `predict`, whose engine does the per-frame-exact encode.
+        self.action_encoder = nn.Identity()
+        self.predictor = model.predictor  # kept for rollout's `getattr(predictor, 'num_frames')`
         self.pred_proj = model.pred_proj
         self._encode_fn = encode_fn
+        self._predict_fn = predict_fn
 
     def encode(self, info: dict) -> dict:
         # Wholesale override of LeWM.encode (no _encode_image seam). Mirror the source EXACTLY
         # except the engine replaces encoder->cls->projector: set info['emb'] from encode_fn,
-        # run the action-encode branch, return the mutated dict. `encode_fn` (adapter/engine)
-        # returns (b, t, D) — the same shape LeWM.encode's `rearrange('(b t) d -> b t d')`
-        # produces — so the info-dict contract the inherited rollout consumes is preserved.
+        # run the (now passthrough) action-encode branch, return the mutated dict. `encode_fn`
+        # (adapter/engine) returns (b, t, D) — the same shape LeWM.encode's
+        # `rearrange('(b t) d -> b t d')` produces — so the info-dict contract the inherited
+        # rollout consumes is preserved. `info['act_emb']` (raw action here, since action_encoder
+        # is Identity) is dead: rollout recomputes act_emb from action_sequence and the goal
+        # encode pops 'action' — kept only to mirror the source's branch faithfully.
         info["emb"] = self._encode_fn(info["pixels"])
         if "action" in info:
             info["act_emb"] = self.action_encoder(info["action"])
         return info
 
+    def predict(self, emb: Tensor, act: Tensor) -> Tensor:
+        # Inherited `rollout` calls this with (emb (BS,HS,192), act) where — because
+        # action_encoder is an Identity passthrough — `act` is the RAW windowed action (width
+        # MODEL_ACTION_DIM), exactly what the engine ingests. Assert the raw width so a forgotten
+        # passthrough (pre-encoded 192-wide act_emb) is a loud error, not a silent wrong SR.
+        assert act.shape[-1] == MODEL_ACTION_DIM, (
+            f"predict action width {act.shape[-1]} != {MODEL_ACTION_DIM}: the inherited rollout "
+            "must pass RAW actions to the engine (action_encoder is an Identity passthrough)"
+        )
+        return self._predict_fn(emb, act)
+
     @classmethod
     def from_adapter(cls, model: LeWM, adapter) -> "LeWMSRShim":
-        """Check path: route the pixel encode through the adapter's pure-torch `encode` — the
-        exact function the encoder engine reconstructs — so the shim's cost equals
-        `LeWM.get_cost` bit-for-bit (isolating the `encode`-override risk)."""
-        return cls(model, adapter.encode)
+        """Check path: route encode/predict through the adapter's pure-torch methods — the exact
+        functions the engines reconstruct — so the shim's cost equals `LeWM.get_cost` bit-for-bit
+        (proving the encode override + predict-engine boundary preserve the inherited cost path)."""
+        return cls(model, adapter.encode, adapter.predict)
+
+    @classmethod
+    def from_engines(cls, model: LeWM, engines: EnginePaths) -> "LeWMSRShim":
+        """Pod path: build the shim over the two TensorRT engines `src.export` produced."""
+        encode_fn, predict_fn = build_lewm_engine_fns(engines)
+        return cls(model, encode_fn, predict_fn)
 
 
 def _hist_adapt(encode: EncodeFn, enc_hist: int) -> EncodeFn:
@@ -224,6 +262,28 @@ def build_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, PredictFn]:
 
     def predict_fn(embedding: Tensor) -> Tensor:
         return predictor.run((embedding,))
+
+    return encode_fn, predict_fn
+
+
+def build_lewm_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, LeWMPredictFn]:
+    """Wrap the LeWM encoder + predictor engines as ``encode`` / ``predict`` callables.
+
+    Same static-hist encoder handling as ``build_engine_fns`` (the inherited ``get_cost`` encodes
+    the init at ``n_obs`` frames and the goal at ``1`` -> ``_hist_adapt`` repeat-pad/slices,
+    exact because the encoder is per-frame). The predictor callable differs from DINO's: the LeWM
+    predict engine is **two-input** — ``(emb, RAW action)`` — because ``action_encoder`` lives
+    inside it (Design A), so ``predict_fn`` binds both tensors."""
+    from src.trt_runtime import EngineRunner
+
+    encoder = EngineRunner(engines["encoder"])
+    predictor = EngineRunner(engines["predictor"])
+
+    enc_hist = int(encoder.engine.get_tensor_shape(encoder.input_names[0])[1])
+    encode_fn = _hist_adapt(lambda pixels: encoder.run((pixels,)), enc_hist)
+
+    def predict_fn(emb: Tensor, act: Tensor) -> Tensor:
+        return predictor.run((emb, act))
 
     return encode_fn, predict_fn
 
@@ -315,15 +375,18 @@ def sr_cost_parity(
 def sr_cost_parity_lewm(
     model: LeWM,
     encode_fn: EncodeFn,
+    predict_fn: LeWMPredictFn,
     cfg: ExportConfig,
     candidates: int = 4,
     n_obs: int | None = None,
     pred_steps: int = 2,
 ) -> dict:
-    """Compare ``LeWMSRShim.get_cost`` (pixel-encode via ``encode_fn``, ``predict`` native)
+    """Compare ``LeWMSRShim.get_cost`` (pixel-encode via ``encode_fn``, predict via ``predict_fn``)
     against ``LeWM.get_cost`` on identical inputs, returning the max abs/rel drift on the
-    ``(1, candidates)`` cost. Bit-for-bit (drift 0) when ``encode_fn`` is the adapter's
-    ``encode`` — proving the wholesale ``encode`` override reproduces the source's cost path.
+    ``(1, candidates)`` cost. Bit-for-bit (drift 0) when the fns are the adapter's pure-torch
+    ``encode`` / ``predict`` — proving the wholesale ``encode`` override AND the raw-action
+    predict-engine boundary reproduce the source's cost path; the drift row is the quantization
+    signal when they are engines.
 
     Runs at ``B=1`` (single env): the vendored CEM pins ``batch_size=1`` and ``LeWM.criterion``
     only supports ``B=1`` (it broadcasts the single-env goal over the candidate axis)."""
@@ -337,7 +400,7 @@ def sr_cost_parity_lewm(
         if hasattr(model, attr):
             delattr(model, attr)
 
-    shim = LeWMSRShim(model, encode_fn)
+    shim = LeWMSRShim(model, encode_fn, predict_fn)
     shim.eval()
 
     def r(*shape):
@@ -419,17 +482,19 @@ def _run_lewm_parity() -> None:
     model = swm.wm.utils.load_pretrained("lewm/weights_epoch_10.pt")
     adapter = LeWMAdapter(model)
     torch.manual_seed(0)
-    result = sr_cost_parity_lewm(model, adapter.encode, ExportConfig())
+    result = sr_cost_parity_lewm(model, adapter.encode, adapter.predict, ExportConfig())
     print(
         f"[lewm] SR-cost parity (shim.get_cost vs LeWM.get_cost) {result['shape']}: "
         f"max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
     )
-    # The encode override re-implements LeWM.encode's body; nonzero drift means that
-    # re-implementation diverges (a silent-SR bug) and must be fixed before any LeWM engine run.
+    # The encode override re-implements LeWM.encode's body and predict routes through the engine
+    # boundary (raw action -> per-frame action_encoder); nonzero drift means one of those diverges
+    # (a silent-SR bug) and must be fixed before any LeWM engine run.
     if result["max_abs"] > 1e-4:
         raise SystemExit(
             f"LeWM SR-COST PARITY FAILED: shim.get_cost diverges from LeWM.get_cost "
-            f"(max_abs={result['max_abs']:.3e}) — the encode override changed the cost path."
+            f"(max_abs={result['max_abs']:.3e}) — the encode override or predict boundary "
+            "changed the cost path."
         )
     print("[lewm] sr-cost parity: PASS")
 

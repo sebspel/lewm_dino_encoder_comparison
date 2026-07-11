@@ -365,20 +365,25 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   callable with `_hist_adapt` (repeat-pad the frame axis up to the traced hist, encode, slice
   back) — exact because the encoder is temporally independent (per-frame), keeping the
   precision-match-gated engine byte-for-byte; `tests/test_sr_shim.py` covers it off-pod.
-  → **LeWM `encode`-override check landed:** `src/sr_shim.py::LeWMSRShim` subclasses `LeWM` and
-  overrides `encode` (no `_encode_image` seam — `LeWM.encode` fuses backbone + info-dict
-  bookkeeping + the `action_encoder` branch, so the override RE-IMPLEMENTS its body and is not
-  inherited-by-construction); `predict` stays **native**. Gate `sr_cost_parity_lewm`
+  → **LeWM encode+predict shim landed (engine-backed, Design A):** `src/sr_shim.py::LeWMSRShim`
+  subclasses `LeWM` and routes BOTH `encode` and `predict` through injected engine/adapter
+  callables, so the SR reflects the same quantized encoder+predictor engines the benchmark times
+  (predictor FP16/INT8 drift enters the cost, as for DINO). `encode` has no `_encode_image` seam
+  (`LeWM.encode` fuses backbone + info-dict bookkeeping + the `action_encoder` branch), so the
+  override RE-IMPLEMENTS its body. **Predict — Design A (owner-chosen): `action_encoder` lives
+  INSIDE the engine** (the boundary the per-frame guard justifies); the exported engine ingests a
+  RAW action. Since inherited `LeWM.rollout` pre-encodes the whole action sequence, the shim sets
+  its `action_encoder` to an **Identity passthrough** so rollout windows raw actions straight into
+  `predict` and the engine's own per-frame `action_encoder` does the encode — bit-for-bit equal to
+  the source's whole-sequence pre-encode (per-frame guard). `build_lewm_engine_fns` builds the
+  two-input predict engine callable; `from_engines` wires the pod path. Gate `sr_cost_parity_lewm`
   (+ `tests/test_sr_shim.py`, `build_dummy_lewm_model`): shim.get_cost vs `LeWM.get_cost`
-  **bit-for-bit** (max_abs 0.0, n_obs∈{1,3}). Run at **B=1**: vendored CEM pins `batch_size=1`
-  and `LeWM.criterion` (pinned swm 0.1.1) only supports one env per solve (broadcasts the
-  single-env goal over candidates, errors for B>1 — the checkout removed these methods).
-  LeWM **action-encoder engine boundary resolved (design):** `action_encoder` is per-frame
-  (`Embedder` `Conv1d(k=1)`), so per-step `LeWMAdapter.predict` is numerically identical to
-  `LeWM.rollout`'s whole-sequence act-encode and the encoder can sit inside the per-step
-  predict engine (SPEC §Interface Contracts). Still 🔴 pending: owner sign-off + the
-  self-guarding assert (`src/fidelity.py`), then the LeWM predict engine + adapter-fidelity
-  gate can build.
+  **bit-for-bit** (max_abs 0.0, n_obs∈{1,3}) with encode AND predict via the adapter's torch
+  methods. Run at **B=1**: vendored CEM pins `batch_size=1` and `LeWM.criterion` (pinned swm
+  0.1.1) only supports one env per solve (broadcasts the single-env goal over candidates, errors
+  for B>1 — the checkout removed these methods). Per-frame boundary owner-signed-off 2026-07-11
+  (`src/fidelity.py::lewm_action_encoder_per_frame`); the LeWM predict engine + adapter-fidelity
+  gate can now build.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component

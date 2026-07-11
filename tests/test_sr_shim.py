@@ -85,13 +85,16 @@ def test_sr_shim_is_non_actionable():
 
 
 def test_lewm_sr_shim_encode_override_matches_platform():
-    # LeWM.encode has no _encode_image seam, so LeWMSRShim RE-IMPLEMENTS encode's body. Routing
-    # the pixel path through the adapter's torch encode must reproduce LeWM.get_cost bit-for-bit
-    # -> the wholesale override preserves the inherited cost path (no silent SR corruption).
+    # LeWM.encode has no _encode_image seam, so LeWMSRShim RE-IMPLEMENTS encode's body, AND
+    # predict routes through the engine boundary (raw action -> per-frame action_encoder inside).
+    # Routing both through the adapter's torch encode/predict must reproduce LeWM.get_cost
+    # bit-for-bit -> the override + predict boundary preserve the inherited cost path (no silent
+    # SR corruption). The per-frame action_encoder is what makes the Identity-passthrough rollout
+    # (raw actions windowed into predict) exactly equal the source's whole-sequence pre-encode.
     torch.manual_seed(0)
     model = build_dummy_lewm_model()
     adapter = LeWMAdapter(model)
-    result = sr_cost_parity_lewm(model, adapter.encode, ExportConfig())
+    result = sr_cost_parity_lewm(model, adapter.encode, adapter.predict, ExportConfig())
     assert result["max_abs"] < 1e-4, result
     assert result["shape"] == (1, 4)  # B=1 (batch_size=1 contract) x candidates
 
