@@ -338,6 +338,12 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   **both** the *model-only* and the *realized* wall-clock speedup (gap = planner floor,
   ≈ Amdahl from the baseline shares), alongside the optimizable fraction (SPEC §Speedup
   study — dilution disclosure).
+  → **table runner (landed, pod-run pending):** `src/study.py` (`uv run python -m src.study
+  [track=<lewm|dino>] [wandb=<eval overlay>]`) orchestrates the three boxes above per
+  track×precision — profiles the PyTorch adapter (FP32 baseline shares), loads the engines
+  `src.export` built (`engines/<track>/{encoder,predictor}.<prec>.plan`), benchmarks each
+  built precision, and calls `src.report`. Missing engines → precision skipped (FP16-only
+  fallback); SR left NaN for the gated eval-shim join. `tests/test_study.py`.
 - [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 
