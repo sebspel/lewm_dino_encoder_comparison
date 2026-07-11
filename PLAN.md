@@ -367,6 +367,14 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   unpaired-SR row is flagged **SR-PENDING** (a speed number without its SR is not a validated
   win); `sr=<json>` / `report(sr_overrides=)` joins the gated eval-shim SR back in without
   code edits. `tests/test_report.py`.
+  → **persist headline artifacts to network storage (pending):** write the tables
+    (serialized to `.txt`) **and** plots (`.png`) under `$STABLEWM_HOME/reports/phase5/`
+    (not the repo-local `reports/phase5` default) so a completed study survives pod teardown;
+    W&B logging stays additive (SPEC §Speedup study — Headline-artifact durability).
+    Requires: `src/report.py` serialize each table to a file (currently stdout + W&B HTML
+    only); `src/study.py` default `out_dir` under `$STABLEWM_HOME` (env-derived, repo-local
+    fallback). Verify: after a study run the three table `.txt` files + four plot `.png`
+    files exist under `$STABLEWM_HOME/reports/phase5/`.
 - [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 

@@ -115,6 +115,9 @@ contribution is the optimization + QLoRA layer above.
   (`save_pretrained`). It defaults to `~/.stable_worldmodel` on the **ephemeral** container
   fs, so it MUST be set to the network volume (e.g. `STABLEWM_HOME=/workspace/.stablewm`)
   or a multi-hour run's checkpoints are lost on pod restart. `setup.sh` validates it.
+  The owned layer follows the same convention: the Phase-5 study writes its headline
+  artifacts (tables + plots) under `$STABLEWM_HOME/reports/`, so they persist with the
+  checkpoints rather than on the ephemeral container fs.
 - **Datasets:** the official Push-T data is loaded via the platform; it can stream
   from HF object storage (no local download needed) or cache under `$STABLEWM_HOME/datasets`.
 - **Secrets / runtime env** (`WANDB_API_KEY`, `HF_TOKEN` if needed, `STABLEWM_HOME`) passed at runtime via env.
@@ -392,6 +395,12 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
   is TRT-optimized; the CEM planner stays in Python around it. Headline: LeWM-vs-DINOv3
   rollouts-in-budget + p95-latency ratio + per-model FP32->FP16->INT8 delta in **both
   speed and SR** (degradation quoted vs FP32; speed plotted against SR).
+  - **Headline-artifact durability.** The headline outputs — the tables (serialized to
+    text) **and** the plots (PNG) — are persisted to the **persistent network volume**
+    (`$STABLEWM_HOME/reports/phase5/`), the same durability contract as checkpoints and
+    engines, so a completed study survives pod teardown. W&B logging (tables as HTML,
+    plots as images) is **additive, never the sole copy** — stdout and a W&B run alone
+    leave no durable on-disk record of the results (CLAUDE.md §8, log-before-delete).
   - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and
     the Python planner is precision-invariant, the per-precision **wall-clock** delta is
     capped by the model's share of the cycle. Reporting per-component *relative* speedup
