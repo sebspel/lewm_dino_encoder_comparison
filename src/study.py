@@ -9,6 +9,12 @@ dicts to `src.report` for the headline tables + plots.
     uv run python -m src.study track=lewm       # one track
     uv run python -m src.study wandb=eval_lewm  # also log the headline artifacts to that
                                                 # overlay's (shared) W&B project
+    uv run python -m src.study out=/some/dir    # override the output dir
+
+The headline tables (`.txt`) + plots (`.png`) are persisted to `$STABLEWM_HOME/reports/phase5/`
+by default — the persistent network volume, so a completed study survives pod teardown (SPEC
+§Headline-artifact durability); off-pod (no `STABLEWM_HOME`) it falls back to repo-local
+`reports/phase5`. W&B logging stays additive.
 
 Engines are NOT built here — run `uv run python -m src.export model=<t> precision=<p>` first
 (after the precision-match gate). A precision whose
@@ -24,6 +30,7 @@ SR}}) without touching code. Runs on the L40S (benchmark + profile need CUDA / T
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -37,6 +44,15 @@ from src.precision_match import _build_adapter, example_inputs
 from src.report import report
 
 _TRACKS = ("lewm", "dino")
+
+
+def default_out_dir() -> Path:
+    """Where the headline artifacts land by default: `$STABLEWM_HOME/reports/phase5/` — the
+    persistent network volume, same durability contract as checkpoints + engines, so a
+    completed study survives pod teardown (SPEC §Headline-artifact durability). Falls back to
+    the repo-local `reports/phase5` off-pod where `STABLEWM_HOME` is unset."""
+    home = os.environ.get("STABLEWM_HOME")
+    return Path(home) / "reports" / "phase5" if home else Path("reports/phase5")
 
 
 def engine_paths(
@@ -100,7 +116,7 @@ def run_track(
 def main() -> None:
     tracks = _TRACKS
     wandb_experiment = None
-    out_dir = Path("reports/phase5")
+    out_dir = default_out_dir()  # $STABLEWM_HOME/reports/phase5 (repo-local fallback); out= overrides
     sr_overrides = None
     for a in sys.argv[1:]:
         if a.startswith("track="):

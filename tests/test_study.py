@@ -15,6 +15,19 @@ from src.interfaces import ExportConfig
 from src.smoke import build_dummy_lewm
 
 
+def test_default_out_dir_uses_stablewm_home(monkeypatch, tmp_path):
+    """Durability (SPEC §Headline-artifact durability): the study writes under
+    `$STABLEWM_HOME/reports/phase5/` (persistent network volume) so it survives pod teardown,
+    falling back to repo-local `reports/phase5` off-pod."""
+    monkeypatch.setenv("STABLEWM_HOME", str(tmp_path))
+    assert study.default_out_dir() == tmp_path / "reports" / "phase5"
+
+    monkeypatch.delenv("STABLEWM_HOME", raising=False)
+    from pathlib import Path
+
+    assert study.default_out_dir() == Path("reports/phase5")
+
+
 def test_engine_paths_convention(tmp_path):
     p = study.engine_paths("dino", "fp16", engine_root=tmp_path)
     assert p["encoder"] == tmp_path / "dino" / "encoder.fp16.plan"
