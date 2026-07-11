@@ -10,6 +10,7 @@ random backbone — no DINOv3 download); the pod runs the same check on the real
 cost change; the engines' quantization drift is the only source of SR divergence on the pod.
 """
 
+import pytest
 import torch
 
 from stable_worldmodel.protocols import Actionable
@@ -20,10 +21,45 @@ from src.interfaces import ExportConfig
 from src.sr_shim import (
     DINOWMSRShim,
     LeWMSRShim,
+    _hist_adapt,
     build_dummy_lewm_model,
     sr_cost_parity,
     sr_cost_parity_lewm,
 )
+
+
+def _per_frame_encode(pixels):
+    # A temporally-independent stand-in for the encoder engine: each frame maps to an embedding
+    # depending ONLY on that frame (folds (b t), per-frame op) — the exact property _hist_adapt's
+    # pad/slice relies on. Returns (b, t, 8).
+    b, t = pixels.shape[:2]
+    return (pixels.reshape(b * t, -1)[:, :8] * 2.0).reshape(b, t, 8)
+
+
+def test_hist_adapt_short_hist_matches_native_encode():
+    # The static-hist engine would raise on the goal encode (T=1). _hist_adapt repeat-pads T up
+    # to the traced hist and slices back; because the encoder is temporally independent, the
+    # result must equal a native T=1 encode bit-for-bit (the padded frames don't touch frame 0).
+    torch.manual_seed(0)
+    adapted = _hist_adapt(_per_frame_encode, enc_hist=3)
+    px1 = torch.randn(2, 1, 3, 4, 4)  # T=1, goal-style
+    assert torch.equal(adapted(px1), _per_frame_encode(px1))
+    assert adapted(px1).shape[1] == 1
+
+
+def test_hist_adapt_full_hist_passes_through():
+    torch.manual_seed(0)
+    adapted = _hist_adapt(_per_frame_encode, enc_hist=3)
+    px3 = torch.randn(2, 3, 3, 4, 4)  # T == hist, init-style
+    assert torch.equal(adapted(px3), _per_frame_encode(px3))
+
+
+def test_hist_adapt_rejects_longer_hist():
+    # T > enc_hist can't occur in the CEM cost path (init=hist, goal=1) and the static engine
+    # cannot serve it -> loud error, never a silent wrong SR.
+    adapted = _hist_adapt(_per_frame_encode, enc_hist=3)
+    with pytest.raises(ValueError):
+        adapted(torch.randn(1, 4, 3, 4, 4))
 
 
 def test_sr_shim_get_cost_matches_platform():

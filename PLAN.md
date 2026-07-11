@@ -355,9 +355,12 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `build_engine_fns(engines)` = pod EngineRunner callables; `.from_adapter` = torch path for
   the gate. Gate `src/sr_shim.py::sr_cost_parity` (+ `tests/test_sr_shim.py`): shim.get_cost
   vs `PreJEPA.get_cost` **bit-for-bit** (max_abs 0.0 on dummy `DINOv3PreJEPA`, n_obs∈{1,3});
-  pod runs `python -m src.sr_shim` on the real checkpoint. **Open (owner/pod):** encoder engine
-  traces a **static hist axis**; goal-encode calls it at hist=1 vs init at n_obs — export the
-  encoder with a dynamic hist axis (or confirm eval n_obs/goal frame counts) before the SR run.
+  pod runs `python -m src.sr_shim` on the real checkpoint. **Static-hist (resolved shim-side,
+  no re-export):** the encoder engine traces a **static hist axis** while the inherited
+  goal-encode calls it at T=1 vs init at n_obs=hist. `build_engine_fns` wraps the encoder
+  callable with `_hist_adapt` (repeat-pad the frame axis up to the traced hist, encode, slice
+  back) — exact because the encoder is temporally independent (per-frame), keeping the
+  precision-match-gated engine byte-for-byte; `tests/test_sr_shim.py` covers it off-pod.
   → **LeWM `encode`-override check landed:** `src/sr_shim.py::LeWMSRShim` subclasses `LeWM` and
   overrides `encode` (no `_encode_image` seam — `LeWM.encode` fuses backbone + info-dict
   bookkeeping + the `action_encoder` branch, so the override RE-IMPLEMENTS its body and is not

@@ -166,28 +166,61 @@ class LeWMSRShim(LeWM):
         return cls(model, adapter.encode)
 
 
+def _hist_adapt(encode: EncodeFn, enc_hist: int) -> EncodeFn:
+    """Make a fixed-hist encoder callable ``(B, T, C, H, W) -> (B, T, …)`` T-agnostic.
+
+    The exported encoder engine traces a **static hist axis** (``ExportConfig.hist``) — only
+    the batch axis is dynamic (``src.export._batch_dynamic``). But the inherited ``get_cost``
+    encodes the initial state at ``n_obs`` (= ``history_size`` = the traced hist) AND the goal
+    at a single frame (``info['goal'][:, 0]`` -> T=1; ``_encode_image`` does NOT pad — only
+    ``_encode_video`` does), so the engine is also asked for T=1 and would raise a TensorRT
+    shape error.
+
+    The encoder is **temporally independent**: ``_encode_image`` / the adapter fold
+    ``(b t) -> (b·t)`` and run the backbone per-frame, so a frame's embedding does not depend
+    on any other frame (temporal mixing happens only in the predictor). A ``T < enc_hist`` call
+    is therefore served EXACTLY by repeat-padding the frame axis up to ``enc_hist`` (the
+    platform's own ``_encode_video`` padding idiom), encoding, and slicing the first ``T``
+    frames back — the padded frames are copies that leave the real frames' embeddings
+    unchanged. ``T > enc_hist`` cannot occur in the CEM cost path (init = hist, goal = 1) and
+    is a loud error. This keeps the precision-match-gated engine byte-for-byte (no re-export)."""
+
+    def adapted(pixels: Tensor) -> Tensor:
+        t = pixels.shape[1]
+        if t == enc_hist:
+            return encode(pixels)
+        if t > enc_hist:
+            raise ValueError(
+                f"encode hist {t} > engine hist {enc_hist}: the static-hist encoder engine "
+                "cannot serve more frames than it was traced for (re-export with a larger hist)"
+            )
+        pad = pixels[:, -1:].repeat(1, enc_hist - t, *([1] * (pixels.ndim - 2)))
+        return encode(torch.cat([pixels, pad], dim=1))[:, :t]
+
+    return adapted
+
+
 def build_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, PredictFn]:
     """Wrap the encoder + predictor engines as ``encode`` / ``predict`` callables.
 
     Pod-only: ``EngineRunner`` lazy-imports ``tensorrt`` and allocates CUDA buffers, so this
     is imported lazily to keep ``src.sr_shim`` importable off-pod (tests use the adapter path).
 
-    NOTE (encoder hist axis — pod/owner export dependency): the engines are traced with a
-    dynamic batch axis but a **static hist axis** (``ExportConfig.hist``). The inherited
-    ``get_cost`` calls the encoder twice with different frame counts — the initial state at
-    ``n_obs`` frames and the goal at ``1`` frame — so the encoder engine must accept both.
-    These callables feed the engine the ``(B, T, …)`` tensor as-is; a frame count that differs
-    from the traced hist raises a loud TensorRT shape error (never a silent wrong SR). Exporting
-    the encoder with a dynamic hist axis is the owner-gated follow-up if the eval's real
-    ``n_obs`` / goal frame counts differ from the traced value.
-    """
+    Encoder hist axis: the engine traces a dynamic batch axis but a **static hist axis**, while
+    the inherited ``get_cost`` calls the encoder at ``n_obs`` frames (init) AND ``1`` frame
+    (goal). The encoder callable is wrapped with ``_hist_adapt`` so a ``T != enc_hist`` call is
+    served by repeat-pad/slice — exact (the encoder is temporally independent) and leaving the
+    precision-match-gated engine untouched. The traced hist is read from the engine's own input
+    binding (the single source of truth for what ``T`` it accepts)."""
     from src.trt_runtime import EngineRunner
 
     encoder = EngineRunner(engines["encoder"])
     predictor = EngineRunner(engines["predictor"])
 
-    def encode_fn(pixels: Tensor) -> Tensor:
-        return encoder.run((pixels,))
+    # Read the static hist off the encoder's input binding (axis 1 of (batch, hist, C, H, W);
+    # axis 0 is dynamic -> -1, hist is concrete). Wrap so the goal encode (T=1) reuses it.
+    enc_hist = int(encoder.engine.get_tensor_shape(encoder.input_names[0])[1])
+    encode_fn = _hist_adapt(lambda pixels: encoder.run((pixels,)), enc_hist)
 
     def predict_fn(embedding: Tensor) -> Tensor:
         return predictor.run((embedding,))
