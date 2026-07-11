@@ -15,10 +15,11 @@ Engines are NOT built here — run `uv run python -m src.export model=<t> precis
 `engines/<track>/{encoder,predictor}.<p>.plan` is missing is skipped with a note, which is
 exactly the FP16-only fallback (SPEC §Caps / PLAN §Phase-5 cap).
 
-SR is NOT produced here: every bench row carries `success_rate=NaN`; the SR-per-precision
-join is the separate, owner-gated eval-shim re-run (`get_cost`/`get_action` over the engine).
-`src.report` already renders "—" and skips those points. Runs on the L40S (benchmark +
-profile need CUDA / TensorRT).
+SR is NOT produced here: every bench row carries `success_rate=NaN`, and `src.report` flags
+each unpaired row as SR-PENDING (a speed number without its SR is not a validated win). The
+SR-per-precision join is the separate, owner-gated eval-shim re-run (`get_cost`/`get_action`
+over the engine); its results can be fed back in via `sr=<file.json>` ({track: {precision:
+SR}}) without touching code. Runs on the L40S (benchmark + profile need CUDA / TensorRT).
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ import torch
 from src.interfaces import EnginePaths, ExportConfig
 from src.export import _ENGINE_ROOT
 from src.benchmark import benchmark
-from src.profile import profile
+from src.profile import profile, CEM_NUM_SAMPLES
 from src.precision_match import _build_adapter, example_inputs
 from src.report import report
 
@@ -68,9 +69,15 @@ def run_track(
     adapter.to(device)
     encode_inputs, predict_inputs = example_inputs(adapter, cfg, device=device)
 
+    # Profile at the CYCLE's real batches so the runtime-weighted shares are honest (the
+    # profiler weights per-call times by CEM call counts): encode once at batch 1 (single
+    # obs), predict at the candidate fan-out CEM_NUM_SAMPLES. The predict latent is rebuilt
+    # from its own batch-1 encode inside example_inputs, so these two calls stay consistent.
+    prof_encode, _ = example_inputs(adapter, cfg, batch=1, device=device)
+    _, prof_predict = example_inputs(adapter, cfg, batch=CEM_NUM_SAMPLES, device=device)
     prof = {
         "fp32": profile(
-            adapter, encode_inputs, predict_inputs, cfg.n_profile_iters, cfg.warmup
+            adapter, prof_encode, prof_predict, cfg.n_profile_iters, cfg.warmup
         )
     }
 
@@ -94,6 +101,7 @@ def main() -> None:
     tracks = _TRACKS
     wandb_experiment = None
     out_dir = Path("reports/phase5")
+    sr_overrides = None
     for a in sys.argv[1:]:
         if a.startswith("track="):
             tracks = (a.split("=", 1)[1],)
@@ -101,6 +109,12 @@ def main() -> None:
             wandb_experiment = a.split("=", 1)[1]
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
+        elif a.startswith("sr="):
+            # Optional: join SR from the gated eval-shim re-run — a JSON file
+            # {track: {precision: success_rate}}. Absent -> every row stays SR-PENDING.
+            import json
+
+            sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
 
     cfg = ExportConfig()
     torch.manual_seed(cfg.seed)
@@ -121,7 +135,7 @@ def main() -> None:
             wandb_experiment, name="phase5-study", config={"phase": "phase5-study"}
         )
     try:
-        report(bench_all, prof_all, out_dir, wandb_run=run)
+        report(bench_all, prof_all, out_dir, wandb_run=run, sr_overrides=sr_overrides)
     finally:
         if run is not None:
             run.finish()

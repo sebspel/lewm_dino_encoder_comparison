@@ -92,12 +92,27 @@ class Export(Protocol):
 
 
 class BenchResult(TypedDict):
-    latency_p50_ms: float  # per planning-step inference latency
+    # Per PREDICTOR-STEP inference latency (encode runs once per rollout and is NOT timed
+    # here — the encoder asymmetry surfaces in `throughput`/`rollouts_completed` and the
+    # profile, not in these percentiles). Each step syncs the CUDA stream, so for LeWM's
+    # tiny ops this is a launch+sync floor, not compute — which compresses the LeWM↔DINO
+    # p95 ratio (LeWM is launch-latency-bound, SPEC §Parity).
+    latency_p50_ms: float
     latency_p95_ms: float
-    rollouts_completed: int  # CEM rollouts finished within the fixed time budget
-    throughput: float  # rollouts/sec
+    # MODEL-ONLY rollouts in the fixed budget: encode-once + predict-over-horizon with NO CEM
+    # planner in the loop (no candidate sampling / topk / elite update). This is the model
+    # speedup ceiling with the planner treated as free; the REALIZED wall-clock
+    # rollouts-in-budget (planner in the loop) comes from the gated eval-shim re-run. Their
+    # gap is the planner floor (≈ Amdahl from the profile shares) — SPEC §dilution disclosure.
+    rollouts_completed: int
+    throughput: float  # model-only rollouts/sec (same planner-free caveat)
+    # Sampled from cudaMemGetInfo (`torch.cuda.mem_get_info`), NOT `torch.cuda.max_memory_
+    # allocated`: TensorRT's engine + execution-context device allocations bypass torch's
+    # caching allocator, so the allocator would undercount exactly the optimized path
+    # (SPEC §Interface Contracts). Device-level → whole-GPU used memory (benchmark pod is
+    # dedicated).
     peak_mem_mb: float
-    success_rate: float  # Push-T SR paired with this engine config (eval shim)
+    success_rate: float  # Push-T SR paired with this engine config (gated eval shim; NaN until then)
 
 
 class Benchmark(Protocol):
@@ -112,9 +127,30 @@ class Benchmark(Protocol):
 
 
 class ComponentProfile(TypedDict):
-    encoder_ms: float  # mean per-cycle time in the encoder
-    predictor_ms: float  # mean per-cycle time in the predictor
-    planner_ms: float  # mean per-cycle time in the CEM planner (excl. model calls)
+    # Raw mean time PER SINGLE CALL, measured at the cycle's real batch per component
+    # (encode: batch 1 obs; predict: the candidate fan-out num_samples; planner: one CEM
+    # iteration). These are NOT summable across components and NOT the cycle's time share — a
+    # planning cycle calls `predict` many times and `encode` ~once, so per-call means must be
+    # weighted by call count before they mean anything (see `*_cycle_ms`).
+    encoder_ms: float
+    predictor_ms: float
+    planner_ms: float
+    # Calls per planning cycle, from the CEM decomposition (docs/platform_api.md §3/§5:
+    # num_samples=300, n_steps=30, horizon=5). encoder ~once (cached), predict autoregressive
+    # over the horizon per iteration, planner once per iteration.
+    encoder_calls: int
+    predictor_calls: int
+    planner_calls: int
+    # Runtime-WEIGHTED per-cycle time (calls × per-call ms). THESE are the true time shares
+    # and sum to the modelled cycle (within the cuda.synchronize barrier).
+    encoder_cycle_ms: float
+    predictor_cycle_ms: float
+    planner_cycle_ms: float
+    # Derived from the weighted shares: optimizable fraction p = (enc+pred)/cycle (only the
+    # model is TRT-optimized; the Python planner is precision-invariant) and the Amdahl
+    # end-to-end speedup ceiling 1/(1-p) it sets (SPEC §dilution disclosure).
+    optimizable_fraction: float
+    amdahl_ceiling: float
 
 
 class Profile(Protocol):

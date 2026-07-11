@@ -322,6 +322,13 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   sum ≈ cycle within the sync barrier). Record the **FP32 baseline per-component time
   shares** + the derived **optimizable fraction** `(enc+pred)/total`, per model (SPEC
   §Speedup study — dilution disclosure).
+  → **runtime-weighting fix (plumbing landed, pod-run pending):** `src/profile.py` per-call
+  means are now weighted by the CEM per-cycle call counts (predict `(horizon+1)×n_steps`=180
+  at the candidate batch, encode ×2, planner ×n_steps) into `*_cycle_ms` that DO sum to the
+  cycle, and it derives `optimizable_fraction p=(enc+pred)/cycle` + the Amdahl ceiling
+  `1/(1-p)` (unweighted per-call sums under-weighted the predictor and `p` wasn't computed).
+  `src/study.py` profiles `encode` at batch 1 / `predict` at `num_samples` so the weights are
+  honest. `ComponentProfile` extended; `tests/test_profile.py`.
 - [ ] 🖥️ **Fixed-time-budget benchmark** on the L40S: per model × precision, record
   **rollouts completed**, **per-step latency p50/p95**, throughput (rollouts/sec), **peak
   GPU memory** (sample via `cudaMemGetInfo`/nvidia-smi — **not** the torch allocator; TRT
@@ -331,6 +338,14 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   the engine's `encode`/`predict` (SPEC §Interface Contracts). The DINO shim reproduces
   `PreJEPA.rollout` (full `404` carry, per-step action-replace, proprio+pixels cost). Same
   env/goal/precision/budget across models; only the model differs.
+  → **instrument + labeling fixes (plumbing landed, pod-run + gated SR pending):**
+  `src/benchmark.py` `peak_mem_mb` now samples **cudaMemGetInfo** (`torch.cuda.mem_get_info`,
+  device-level used) per rollout, not `torch.cuda.max_memory_allocated` — so the TRT
+  engine/context arena is counted (was undercounting the optimized path). `rollouts_completed`
+  /`throughput` documented as **model-only** (planner-free ceiling; realized = gated eval-shim)
+  and `p50/p95` as **predictor-step** latency (encode untimed; LeWM on a launch+sync floor) —
+  in the benchmark docstring + `interfaces.BenchResult`. The `get_cost`/`get_action` SR shim
+  itself stays 🔴 owner-gated (eval/CEM parity).
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
@@ -344,6 +359,14 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   `src.export` built (`engines/<track>/{encoder,predictor}.<prec>.plan`), benchmarks each
   built precision, and calls `src.report`. Missing engines → precision skipped (FP16-only
   fallback); SR left NaN for the gated eval-shim join. `tests/test_study.py`.
+  → **honesty fixes in `src/report.py` (landed):** rollouts ratio labelled **model-only** and
+  the **Amdahl dilution table** (p, ceiling, per-precision model-only vs Amdahl-predicted
+  realized speedup; measured-realized marked *gated*) added — so the planner floor that
+  dilutes the model-only ratio is visible, not hidden. p95 ratio labelled **predictor-step**.
+  Component breakdown table/plot now stack the **runtime-weighted** `*_cycle_ms`. Every
+  unpaired-SR row is flagged **SR-PENDING** (a speed number without its SR is not a validated
+  win); `sr=<json>` / `report(sr_overrides=)` joins the gated eval-shim SR back in without
+  code edits. `tests/test_report.py`.
 - [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 

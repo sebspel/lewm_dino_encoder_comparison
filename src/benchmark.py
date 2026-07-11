@@ -3,19 +3,30 @@
 Owned PLUMBING (fails LOUDLY): drives the two
 TensorRT engines built by `src.export` through a Python CEM-style rollout — encode ONCE,
 then `predict` autoregressively over the horizon (the exact encoder-cached /
-predictor-dominates call pattern, docs/platform_api.md §5) — for a fixed wall-clock budget,
-and records per-step inference latency (p50/p95), rollouts completed, throughput, and peak
-GPU memory. Only the model runs in the engine; the rollout loop stays in Python.
+predictor-dominates call pattern, docs/platform_api.md §5) — for a fixed wall-clock budget.
+
+**What the numbers are (and are NOT).** This harness runs the MODEL only — the CEM planner
+is not in the loop (no candidate sampling / topk / elite update). So:
+  - `rollouts_completed` / `throughput` are the **model-only** count (planner treated as
+    free) — the *ceiling*, not the realized wall-clock. The realized rollouts-in-budget
+    (planner in the loop) comes from the gated eval-shim re-run; their gap is the planner
+    floor (SPEC §dilution disclosure, ≈ Amdahl from the profile shares).
+  - `latency_p50/p95_ms` time the **predictor step only** — `encode` runs once per rollout
+    and is deliberately untimed here (the encoder asymmetry surfaces in throughput and the
+    profile). Each step syncs the stream, so for LeWM's tiny op this is a launch+sync floor,
+    which compresses the LeWM↔DINO p95 ratio (LeWM is launch-latency-bound, SPEC §Parity).
 
 **SR is NOT produced here.** Every speed figure must carry its SR, but the
 SR path is the eval driver re-run on the optimized model through a get_cost /
 get_action shim (owner-gated — needs the real checkpoint + adapter wiring). So `benchmark`
 returns real speed metrics and `success_rate=NaN`; the headline runner (`src.report`) joins
-in the SR per precision from that separate eval run.
+in the SR per precision from that separate eval run and flags every still-unpaired row.
 
 Runs ONLY on the L40S: `EngineRunner` lazy-imports `tensorrt` and allocates CUDA buffers.
-`peak_mem_mb` is `torch.cuda.max_memory_allocated` — torch-visible I/O + activation
-buffers; TensorRT's own workspace arena is a separate cudaMalloc and is not counted here.
+`peak_mem_mb` is sampled from **cudaMemGetInfo** (`torch.cuda.mem_get_info`) — device-level
+used memory, so it counts TensorRT's engine + execution-context arena, which a
+`torch.cuda.max_memory_allocated` (torch-allocator) reading would silently miss on exactly
+the optimized path (SPEC §Interface Contracts).
 """
 
 from __future__ import annotations
@@ -74,17 +85,24 @@ def benchmark(
         _rollout()
     torch.cuda.synchronize(device)
 
-    torch.cuda.reset_peak_memory_stats(device)
+    def _used_mem_mb() -> float:
+        # cudaMemGetInfo via torch: device-level (total - free) used bytes. Captures the TRT
+        # engine + context arena (a separate cudaMalloc outside torch's allocator). Sampled
+        # after warmup, so engines/contexts/I-O buffers are already resident.
+        free, total = torch.cuda.mem_get_info(device)
+        return (total - free) / 1e6
+
+    peak_mem_mb = _used_mem_mb()
     step_latencies_ms: list[float] = []
     rollouts = 0
     start = perf_counter()
     while perf_counter() - start < time_budget_s:
         step_latencies_ms.extend(_rollout())
         rollouts += 1
+        peak_mem_mb = max(peak_mem_mb, _used_mem_mb())  # once per rollout, not per step
     elapsed = perf_counter() - start
 
     lat = torch.tensor(step_latencies_ms)
-    peak_mem_mb = torch.cuda.max_memory_allocated(device) / 1e6
     return BenchResult(
         latency_p50_ms=torch.quantile(lat, 0.50).item(),
         latency_p95_ms=torch.quantile(lat, 0.95).item(),
