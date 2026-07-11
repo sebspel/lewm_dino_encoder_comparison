@@ -397,10 +397,15 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
     capped by the model's share of the cycle. Reporting per-component *relative* speedup
     alone hides this. So the study also reports, per model: the **FP32 baseline
     per-component time shares** and the derived **optimizable fraction**
-    `(encoder+predictor)/total` (the Amdahl ceiling on end-to-end gain), and — per
-    precision — **both** the *model-only* speedup (planner treated as free) **and** the
-    *realized* wall-clock speedup (rollouts-in-budget); their gap is the planner floor
-    and should match the Amdahl prediction from the shares. The optimizable fraction is
+    `p = (encoder+predictor)/total`, which *sets* the Amdahl ceiling on end-to-end
+    **speedup** `1/(1−p)` (the fraction is not itself the ceiling; `p` alone is only the
+    ceiling on the fraction of runtime removable), and — per precision — **both** the
+    *model-only* speedup (planner treated as free) **and** the *realized* wall-clock
+    speedup (rollouts-in-budget); their gap is the planner floor and should match the
+    Amdahl prediction `1/((1−p) + p/s)` from the shares (`s` = the model-portion speedup).
+    Amdahl assumes the slices don't overlap — enforced for the profile by the
+    `cuda.synchronize` barriers — so realized wall-clock may modestly beat the naive
+    prediction where CPU planner work overlaps GPU execution. The optimizable fraction is
     itself model-dependent (LeWM's single token is planner/launch-latency-bound, DINO's
     196-token grid is model-bound), which is what explains why the same precision helps
     the two tracks' wall-clock differently — a result, not bookkeeping.
