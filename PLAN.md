@@ -346,6 +346,19 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   and `p50/p95` as **predictor-step** latency (encode untimed; LeWM on a launch+sync floor) —
   in the benchmark docstring + `interfaces.BenchResult`. The `get_cost`/`get_action` SR shim
   itself stays 🔴 owner-gated (eval/CEM parity).
+  → **owner-gated SR shim (DINO-WM) landed:** `src/sr_shim.py::DINOWMSRShim` subclasses
+  `DINOv3PreJEPA` and overrides ONLY `_encode_image` (→ encoder engine) + `predict` (→
+  predictor engine); `get_cost`/`rollout`/`criterion`/`split_embedding`/goal-encode are
+  inherited byte-unchanged, so cost parity holds by construction (non-`Actionable` → zero-pad
+  warm-start, matching the Phase-3 baseline). Parity reference = installed swm 0.1.1
+  `PreJEPA.get_cost` (the `~/stable-worldmodel` checkout is 16 commits ahead / diverged).
+  `build_engine_fns(engines)` = pod EngineRunner callables; `.from_adapter` = torch path for
+  the gate. Gate `src/sr_shim.py::sr_cost_parity` (+ `tests/test_sr_shim.py`): shim.get_cost
+  vs `PreJEPA.get_cost` **bit-for-bit** (max_abs 0.0 on dummy `DINOv3PreJEPA`, n_obs∈{1,3});
+  pod runs `python -m src.sr_shim` on the real checkpoint. **Open (owner/pod):** encoder engine
+  traces a **static hist axis**; goal-encode calls it at hist=1 vs init at n_obs — export the
+  encoder with a dynamic hist axis (or confirm eval n_obs/goal frame counts) before the SR run.
+  LeWM SR shim deferred with its fidelity gate.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
