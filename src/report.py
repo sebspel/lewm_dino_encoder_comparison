@@ -26,7 +26,9 @@ Input shape: ``bench[track][precision] -> BenchResult`` and
 
 from __future__ import annotations
 
+import json
 import math
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -298,6 +300,29 @@ def _join_sr(bench: dict, sr_overrides: dict | None) -> None:
                 bench[track][prec]["success_rate"] = sr
 
 
+# --- durable results I/O (canonical per-track JSON <-> render) ------------------------
+def load_results(paths) -> tuple[dict, dict]:
+    """Load + merge the per-track `results.<track>.json` files (written by `src.study`) back
+    into the nested `bench[track][precision]` / `prof[track][precision]` shape `report`
+    consumes — so the headline re-renders OFF-POD from the canonical numbers, no L40S
+    benchmark re-run (to join the later gated SR, or tweak a plot). Whichever track files
+    exist are merged (one track, or both); NaN SRs round-trip via the `NaN` json token."""
+    bench: dict = {}
+    prof: dict = {}
+    for p in paths:
+        data = json.loads(Path(p).read_text())
+        track = data["meta"]["track"]
+        bench[track] = data["bench"]
+        prof[track] = data["prof"]
+    return bench, prof
+
+
+def _resolve_result_paths(src) -> list[Path]:
+    """`src` is a directory (glob its `results.*.json`) or a single result file."""
+    src = Path(src)
+    return sorted(src.glob("results.*.json")) if src.is_dir() else [src]
+
+
 def report(
     bench: dict, prof: dict, out_dir: Path, wandb_run=None, sr_overrides: dict | None = None
 ) -> dict:
@@ -342,17 +367,22 @@ def report(
         path.write_text(text + "\n")
         table_paths[key] = path
 
-    plots = {
-        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir),
-        "rollouts_ratio": plot_rollouts_ratio(bench, out_dir),
-        "p95_ratio": plot_p95_ratio(bench, out_dir),
-        "component_breakdown": plot_component_breakdown(prof, out_dir),
-    }
     ratios = {
         p: {"rollouts_ratio": rollouts_ratio(bench, p), "p95_ratio": p95_ratio(bench, p)}
         for p in _PRECISIONS
         if p in bench.get("lewm", {}) and p in bench.get("dino", {})
     }
+
+    plots = {
+        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir),
+        "component_breakdown": plot_component_breakdown(prof, out_dir),
+    }
+    # The two cross-track (LeWM-vs-DINOv3) ratio plots need BOTH tracks at a shared precision;
+    # a single-track render would emit misleading empty bars, so skip them unless a ratio
+    # exists (SPEC §Headline-artifact durability).
+    if ratios:
+        plots["rollouts_ratio"] = plot_rollouts_ratio(bench, out_dir)
+        plots["p95_ratio"] = plot_p95_ratio(bench, out_dir)
 
     dilution = {t: dilution_disclosure(bench, prof, t) for t in _TRACKS}
 
@@ -381,3 +411,56 @@ def report(
         "dilution": dilution,
         "sr_pending": missing_sr,
     }
+
+
+def main() -> None:
+    """Off-pod re-render entrypoint: load the canonical per-track results JSON that `src.study`
+    wrote and rebuild the headline tables/plots — no L40S, no benchmark re-run. This is how the
+    later, separately-gated SR-per-precision is joined in, and how a plot is tweaked.
+
+        uv run python -m src.report                              # default $STABLEWM_HOME/reports/phase5
+        uv run python -m src.report from=<dir|results.json>      # explicit source
+        uv run python -m src.report from=<dir> sr=<sr.json> wandb=<eval overlay> out=<dir>
+    """
+    src = None
+    out_dir = None
+    sr_overrides = None
+    wandb_experiment = None
+    for a in sys.argv[1:]:
+        if a.startswith("from="):
+            src = a.split("=", 1)[1]
+        elif a.startswith("out="):
+            out_dir = Path(a.split("=", 1)[1])
+        elif a.startswith("sr="):
+            sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
+        elif a.startswith("wandb="):
+            wandb_experiment = a.split("=", 1)[1]
+    if src is None:
+        from src.study import default_out_dir  # shared default; lazy to avoid an import cycle
+
+        src = default_out_dir()
+    paths = _resolve_result_paths(src)
+    if not paths:
+        raise SystemExit(f"[report] no results.*.json under {src} — run `src.study` first")
+    bench, prof = load_results(paths)
+    if out_dir is None:
+        s = Path(src)
+        out_dir = s if s.is_dir() else s.parent
+
+    run = None
+    if wandb_experiment is not None:
+        from src import wandb_log
+
+        run = wandb_log.init(
+            wandb_experiment, name="phase5-report", config={"phase": "phase5-report"}
+        )
+    try:
+        report(bench, prof, out_dir, wandb_run=run, sr_overrides=sr_overrides)
+    finally:
+        if run is not None:
+            run.finish()
+    print(f"[report] headline artifacts -> {out_dir}  (from {len(paths)} track file(s))")
+
+
+if __name__ == "__main__":
+    main()

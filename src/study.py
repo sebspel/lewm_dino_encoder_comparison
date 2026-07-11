@@ -30,8 +30,10 @@ SR}}) without touching code. Runs on the L40S (benchmark + profile need CUDA / T
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -65,6 +67,37 @@ def engine_paths(
         encoder=d / f"encoder.{precision}.plan",
         predictor=d / f"predictor.{precision}.plan",
     )
+
+
+def dump_track_results(
+    name: str, prof: dict, bench: dict, cfg: ExportConfig, out_dir: Path
+) -> Path:
+    """Persist one track's canonical raw results to `results.<name>.json` — the machine-
+    readable benchmark + profile numbers plus this run's fairness conditions (time budget,
+    batch, seed), from which the tables/plots are regenerable views (`src.report from=<dir>`).
+    Written PER TRACK so lewm/dino can be benchmarked in separate pod sessions without one
+    clobbering the other (CLAUDE.md §8, SPEC §Headline-artifact durability). NaN SRs serialize
+    as the `NaN` token (Python's json round-trips them; `src.report.load_results` reads them
+    back)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"results.{name}.json"
+    payload = {
+        "meta": {
+            "track": name,
+            "precisions_built": list(bench),
+            "time_budget_s": cfg.time_budget_s,
+            "warmup": cfg.warmup,
+            "n_profile_iters": cfg.n_profile_iters,
+            "num_samples": CEM_NUM_SAMPLES,
+            "seed": cfg.seed,
+            "obs_shape": list(cfg.obs_shape),
+            "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+        "prof": prof,
+        "bench": bench,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+    return path
 
 
 def run_track(
@@ -142,6 +175,10 @@ def main() -> None:
         name, prof, bench = run_track(track, cfg, device)
         prof_all[name] = prof
         bench_all[name] = bench
+        # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
+        # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
+        # can re-render/join SR off-pod without re-running this benchmark.
+        dump_track_results(name, prof, bench, cfg, out_dir)
 
     run = None
     if wandb_experiment is not None:

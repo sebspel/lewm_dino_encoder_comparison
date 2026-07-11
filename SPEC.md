@@ -416,6 +416,15 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`):
     engines, so a completed study survives pod teardown. W&B logging (tables as HTML,
     plots as images) is **additive, never the sole copy** — stdout and a W&B run alone
     leave no durable on-disk record of the results (CLAUDE.md §8, log-before-delete).
+    The **canonical** artifact is the raw **per-track results JSON** (`results.<track>.json`:
+    the benchmark + profile numbers plus the run's fairness conditions — time budget, batch,
+    seed); the tables and plots are regenerable **views** of it. It is written **per track**
+    so LeWM and DINOv3 can be benchmarked in separate pod sessions without one clobbering the
+    other (CLAUDE.md §8), and it decouples the expensive pod-only benchmark from the cheap
+    render: the report re-renders **off-pod** from the JSON (`src.report from=<dir>`), which is
+    how the later, separately-gated **SR-per-precision** is joined in without re-running the
+    L40S benchmark. A single-track render omits the two cross-track (LeWM-vs-DINOv3) ratio
+    plots, which need both tracks.
   - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and
     the Python planner is precision-invariant, the per-precision **wall-clock** delta is
     capped by the model's share of the cycle. Reporting per-component *relative* speedup

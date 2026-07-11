@@ -408,6 +408,18 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
     only); `src/study.py` default `out_dir` under `$STABLEWM_HOME` (env-derived, repo-local
     fallback). Verify: after a study run the three table `.txt` files + four plot `.png`
     files exist under `$STABLEWM_HOME/reports/phase5/`.
+  → **canonical per-track results JSON + decoupled render (landed):** `src/study.py`
+    (`dump_track_results`) writes each track's raw benchmark + profile numbers plus the run's
+    fairness conditions (time_budget_s, num_samples, seed, obs_shape) to `results.<track>.json`
+    under `out_dir` **before** rendering — the canonical machine-readable result; tables/plots
+    are regenerable views. **Per-track files** so lewm/dino benchmark in separate pod sessions
+    without clobbering (CLAUDE.md §8). `src/report.py` gains `load_results` + a `from=<dir|file>`
+    entrypoint (`uv run python -m src.report from=$STABLEWM_HOME/reports/phase5 [out=<dir>]
+    [sr=<f.json>] [wandb=<ov>]`) that merges the per-track JSONs and re-renders **off-pod** —
+    the later, separately-gated SR-per-precision join needs no L40S re-run. Single-track render
+    **skips** the two cross-track ratio plots (empty otherwise). `tests/test_study.py` +
+    `tests/test_report.py`. Verify: `results.{lewm,dino}.json` round-trip through
+    `report.load_results`; a one-track render emits no `*_ratio.png`.
 - [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 

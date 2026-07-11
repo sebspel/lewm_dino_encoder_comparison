@@ -136,6 +136,36 @@ def test_nan_sr_is_skipped_not_crashed(tmp_path):
     assert Path(out["plots"]["speed_vs_sr"]).exists()
 
 
+def test_single_track_render_skips_ratio_plots(tmp_path):
+    """A single-track render must NOT emit the two cross-track ratio plots (they'd be empty),
+    but still renders + persists the single-track tables (SPEC §Headline-artifact durability)."""
+    bench, prof = _synthetic()
+    del bench["dino"], prof["dino"]
+    out = report.report(bench, prof, tmp_path)
+    assert out["ratios"] == {}
+    assert "rollouts_ratio" not in out["plots"] and "p95_ratio" not in out["plots"]
+    assert not (tmp_path / "rollouts_ratio.png").exists()
+    assert Path(out["tables"]["speed_table"]).exists()
+
+
+def test_load_results_merges_per_track(tmp_path):
+    """`load_results` merges whichever per-track `results.<track>.json` files exist back into
+    the nested shape `report` consumes; NaN SRs round-trip via the json `NaN` token."""
+    import json
+
+    bench, prof = _synthetic()
+    bench["lewm"]["fp32"]["success_rate"] = math.nan  # unfilled SR must survive the round-trip
+    for track in ("lewm", "dino"):
+        (tmp_path / f"results.{track}.json").write_text(
+            json.dumps({"meta": {"track": track}, "bench": bench[track], "prof": prof[track]})
+        )
+
+    b, p = report.load_results(report._resolve_result_paths(tmp_path))
+    assert set(b) == {"lewm", "dino"} and set(p) == {"lewm", "dino"}
+    assert report.rollouts_ratio(b, "fp32") == 48.0  # cross-track headline reconstructs
+    assert math.isnan(b["lewm"]["fp32"]["success_rate"])
+
+
 def test_benchmark_missing_engine_raises(tmp_path):
     import torch
 
