@@ -13,8 +13,12 @@ headline outputs:
 
 Pure data → tables/plots; runs anywhere (matplotlib Agg, no CUDA). SR is NaN wherever the
 gated eval-shim re-run has not paired it — every such row is flagged SR-PENDING (not a
-validated win) and plots skip those points; feed SR back in via `sr_overrides`. Optionally
-logs the tables + figures to an open W&B run (shared project).
+validated win) and plots skip those points; feed SR back in via `sr_overrides`.
+
+All headline artifacts are persisted to `out_dir` on disk — each table serialized to a
+`.txt`, each plot to a `.png` — so a completed study survives pod teardown (SPEC
+§Headline-artifact durability). Logging the tables + figures to an open W&B run (shared
+project) is optional and **additive, never the sole copy**.
 
 Input shape: ``bench[track][precision] -> BenchResult`` and
 ``prof[track][precision] -> ComponentProfile`` (missing entries are skipped).
@@ -325,6 +329,19 @@ def report(
     print("Amdahl dilution (model-only vs realized wall-clock speedup):")
     print(dilution_table)
 
+    # Durability: serialize each table to a .txt on disk (not stdout/W&B-HTML only), so a
+    # completed study survives pod teardown — same contract as the plots + checkpoints
+    # (SPEC §Headline-artifact durability; W&B logging below stays additive).
+    tables = {
+        "speed_table": (out_dir / "speed_table.txt", speed_table),
+        "component_table": (out_dir / "component_table.txt", component_table),
+        "dilution_table": (out_dir / "dilution_table.txt", dilution_table),
+    }
+    table_paths = {}
+    for key, (path, text) in tables.items():
+        path.write_text(text + "\n")
+        table_paths[key] = path
+
     plots = {
         "speed_vs_sr": plot_speed_vs_sr(bench, out_dir),
         "rollouts_ratio": plot_rollouts_ratio(bench, out_dir),
@@ -358,6 +375,7 @@ def report(
         )
 
     return {
+        "tables": table_paths,  # durable .txt on disk (SPEC §Headline-artifact durability)
         "plots": plots,
         "ratios": ratios,  # rollouts_ratio is MODEL-ONLY (planner-free) — see dilution
         "dilution": dilution,

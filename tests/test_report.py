@@ -84,6 +84,22 @@ def test_tables_render_and_report_emits_plots(tmp_path):
     assert out["ratios"]["fp32"]["rollouts_ratio"] == 48.0
 
 
+def test_tables_persisted_to_disk(tmp_path):
+    """Durability (SPEC §Headline-artifact durability): each table serialized to a .txt on
+    disk, not stdout/W&B-HTML only, so a completed study survives pod teardown."""
+    bench, prof = _synthetic()
+    out = report.report(bench, prof, tmp_path)
+    assert set(out["tables"]) == {"speed_table", "component_table", "dilution_table"}
+    for path in out["tables"].values():
+        assert Path(path).exists()
+        assert Path(path).read_text().strip()  # non-empty
+    # the serialized table matches what was rendered
+    assert (
+        Path(out["tables"]["speed_table"]).read_text().rstrip("\n")
+        == report.render_speed_table(bench)
+    )
+
+
 def test_dilution_disclosure_model_only_and_predicted(tmp_path):
     """Issue 2/4: model-only speedup + Amdahl-predicted realized; measured realized is gated."""
     bench, prof = _synthetic()
