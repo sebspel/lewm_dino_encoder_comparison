@@ -16,7 +16,12 @@ CLAUDE-owned and fails LOUDLY — distinct from the OWNER-gated FP16/INT8 precis
 Runs anywhere on dummy weights (a real `DINOv3PreJEPA` with a tiny random backbone — no
 DINOv3 download); `main()` runs it on the real checkpoint on the L40S via `load_pretrained`.
 
-    uv run python -m src.fidelity            # real checkpoint (pod)
+    uv run python -m src.fidelity            # DINO-WM shim vs PreJEPA.rollout (real checkpoint)
+    uv run python -m src.fidelity --lewm     # LeWM action_encoder per-frame guard (real checkpoint)
+
+This module also carries the **LeWM action-encoder per-frame guard** (owner-signed-off
+2026-07-11, `lewm_action_encoder_per_frame`): the silent-failure boundary that lets LeWM's
+`action_encoder` live inside the compiled per-step `predict` engine (SPEC §Interface Contracts).
 """
 
 from __future__ import annotations
@@ -41,8 +46,9 @@ from src.shim import dino_rollout
 _RTOL = 1e-4
 _ATOL = 1e-5
 
-# Real DINO-WM checkpoint (epoch-10 .pt), same address the precision-match / eval paths use.
+# Real checkpoints (epoch-10 .pt), same addresses the precision-match / eval paths use.
 _CHECKPOINT = "dino/weights_epoch_10.pt"
+_LEWM_CHECKPOINT = "lewm/weights_epoch_10.pt"
 
 
 def dino_fidelity(
@@ -101,6 +107,43 @@ def dino_fidelity(
     }
 
 
+# LeWM per-frame action-encoder guard (owner sign-off 2026-07-11).
+# LeWM.rollout pre-encodes the WHOLE action sequence once; LeWMAdapter.predict re-encodes each
+# per-step window inside the engine. These agree — so the action_encoder may live inside the
+# compiled per-step predict engine — iff the encoder is per-frame: output at step t depends only
+# on the action at t, with no receptive field along the macro-step (T) axis. LeWM's Embedder is a
+# Conv1d(kernel_size=1) + per-position MLP, so it is per-frame; a kernel_size>1 (temporal-
+# smoothing) config would leak neighbouring/future actions into act_emb[:, t] and silently break
+# per-step faithfulness. This asserts the property directly on the real weights (SPEC §Interface
+# Contracts): action_encoder(seq)[:, t] must equal action_encoder(seq[:, :t+1])[:, -1] at every t.
+_ACT_RTOL = 1e-4
+_ACT_ATOL = 1e-5
+
+
+def lewm_action_encoder_per_frame(
+    action_encoder: nn.Module,
+    seq_len: int = 5,
+    batch: int = 2,
+    action_dim: int = MODEL_ACTION_DIM,
+) -> dict:
+    """Self-guarding check: encoding step t within the full sequence must equal encoding it as
+    the last step of the prefix ending at t. Exact for a per-frame encoder (float roundoff);
+    a temporal kernel makes the two disagree because the full-sequence step sees future actions
+    the prefix cannot. Random actions are valid — it compares the encoder against itself."""
+    device = next(action_encoder.parameters()).device
+    seq = torch.randn(batch, seq_len, action_dim, device=device)
+    action_encoder.eval()
+    passed = True
+    max_abs = 0.0
+    with torch.no_grad():
+        full: Tensor = action_encoder(seq)  # (B, T, D)
+        for t in range(seq_len):
+            step = action_encoder(seq[:, : t + 1])[:, -1]  # (B, D) — last step of the prefix
+            max_abs = max(max_abs, (full[:, t] - step).abs().max().item())
+            passed = passed and torch.allclose(full[:, t], step, rtol=_ACT_RTOL, atol=_ACT_ATOL)
+    return {"seq_len": seq_len, "max_abs": max_abs, "passed": passed}
+
+
 def build_dummy_dino_model() -> nn.Module:
     """A REAL `DINOv3PreJEPA` (so it exposes the native `rollout`/`replace_action_in_embedding`
     the gate compares against) wired with a tiny random backbone + the real `Embedder` extras
@@ -126,9 +169,8 @@ def build_dummy_dino_model() -> nn.Module:
     )
 
 
-def main() -> None:
-    """Run the gate on the REAL DINO-WM checkpoint (L40S) via the platform load path."""
-    dummy = "--dummy" in sys.argv[1:]
+def _run_dino(dummy: bool) -> None:
+    """Run the DINO-WM adapter-fidelity gate on the REAL checkpoint (L40S) via load_pretrained."""
     if dummy:
         model = build_dummy_dino_model()
     else:
@@ -151,6 +193,44 @@ def main() -> None:
             f"export until this passes."
         )
     print("adapter-fidelity: PASS")
+
+
+def _run_lewm(dummy: bool) -> None:
+    """Run the LeWM action-encoder per-frame guard on the REAL checkpoint (L40S)."""
+    if dummy:
+        from src.smoke import build_dummy_lewm
+
+        model = build_dummy_lewm()
+    else:
+        import stable_worldmodel as swm
+
+        model = swm.wm.utils.load_pretrained(_LEWM_CHECKPOINT)
+
+    torch.manual_seed(0)
+    result = lewm_action_encoder_per_frame(model.action_encoder)
+    print(
+        f"[lewm] action_encoder per-frame (seq_len={result['seq_len']}): "
+        f"max_abs={result['max_abs']:.3e} (rtol={_ACT_RTOL}, atol={_ACT_ATOL})"
+    )
+    if not result["passed"]:
+        raise SystemExit(
+            f"LEWM PER-FRAME GUARD FAILED: action_encoder mixes across the macro-step axis "
+            f"(max_abs={result['max_abs']:.3e}) — per-step predict is NOT faithful to "
+            f"LeWM.rollout's whole-sequence act-encode; do NOT put the action encoder inside "
+            f"the predict engine (kernel_size>1?)."
+        )
+    print("lewm action-encoder per-frame: PASS")
+
+
+def main() -> None:
+    """`--lewm` runs the LeWM per-frame guard; otherwise the DINO-WM fidelity gate. `--dummy`
+    exercises either path on random weights off-pod."""
+    args = sys.argv[1:]
+    dummy = "--dummy" in args
+    if "--lewm" in args:
+        _run_lewm(dummy)
+    else:
+        _run_dino(dummy)
 
 
 if __name__ == "__main__":
