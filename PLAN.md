@@ -358,7 +358,17 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   pod runs `python -m src.sr_shim` on the real checkpoint. **Open (owner/pod):** encoder engine
   traces a **static hist axis**; goal-encode calls it at hist=1 vs init at n_obs — export the
   encoder with a dynamic hist axis (or confirm eval n_obs/goal frame counts) before the SR run.
-  LeWM SR shim deferred with its fidelity gate.
+  → **LeWM `encode`-override check landed:** `src/sr_shim.py::LeWMSRShim` subclasses `LeWM` and
+  overrides `encode` (no `_encode_image` seam — `LeWM.encode` fuses backbone + info-dict
+  bookkeeping + the `action_encoder` branch, so the override RE-IMPLEMENTS its body and is not
+  inherited-by-construction); `predict` stays **native**. Gate `sr_cost_parity_lewm`
+  (+ `tests/test_sr_shim.py`, `build_dummy_lewm_model`): shim.get_cost vs `LeWM.get_cost`
+  **bit-for-bit** (max_abs 0.0, n_obs∈{1,3}). Run at **B=1**: vendored CEM pins `batch_size=1`
+  and `LeWM.criterion` (pinned swm 0.1.1) only supports one env per solve (broadcasts the
+  single-env goal over candidates, errors for B>1 — the checkout removed these methods).
+  Still 🔴 deferred for LeWM: the **action-encoder engine boundary** (whole-sequence
+  `LeWM.rollout` act-encode vs per-step `LeWMAdapter.predict`) — the predict engine + LeWM
+  adapter-fidelity gate, hinging on whether `action_encoder` is temporal.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component

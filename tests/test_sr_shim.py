@@ -14,10 +14,16 @@ import torch
 
 from stable_worldmodel.protocols import Actionable
 
-from src.adapter import DINOWMAdapter
+from src.adapter import DINOWMAdapter, LeWMAdapter
 from src.fidelity import build_dummy_dino_model
 from src.interfaces import ExportConfig
-from src.sr_shim import DINOWMSRShim, sr_cost_parity
+from src.sr_shim import (
+    DINOWMSRShim,
+    LeWMSRShim,
+    build_dummy_lewm_model,
+    sr_cost_parity,
+    sr_cost_parity_lewm,
+)
 
 
 def test_sr_shim_get_cost_matches_platform():
@@ -37,6 +43,28 @@ def test_sr_shim_is_non_actionable():
     model = build_dummy_dino_model()
     adapter = DINOWMAdapter(model)
     shim = DINOWMSRShim.from_adapter(model, adapter)
+    assert not isinstance(shim, Actionable)
+    assert not hasattr(shim, "get_action")
+    assert hasattr(shim, "get_cost")
+
+
+def test_lewm_sr_shim_encode_override_matches_platform():
+    # LeWM.encode has no _encode_image seam, so LeWMSRShim RE-IMPLEMENTS encode's body. Routing
+    # the pixel path through the adapter's torch encode must reproduce LeWM.get_cost bit-for-bit
+    # -> the wholesale override preserves the inherited cost path (no silent SR corruption).
+    torch.manual_seed(0)
+    model = build_dummy_lewm_model()
+    adapter = LeWMAdapter(model)
+    result = sr_cost_parity_lewm(model, adapter.encode, ExportConfig())
+    assert result["max_abs"] < 1e-4, result
+    assert result["shape"] == (1, 4)  # B=1 (batch_size=1 contract) x candidates
+
+
+def test_lewm_sr_shim_is_non_actionable():
+    torch.manual_seed(0)
+    model = build_dummy_lewm_model()
+    adapter = LeWMAdapter(model)
+    shim = LeWMSRShim.from_adapter(model, adapter)
     assert not isinstance(shim, Actionable)
     assert not hasattr(shim, "get_action")
     assert hasattr(shim, "get_cost")

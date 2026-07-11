@@ -48,8 +48,10 @@ from typing import Callable
 import torch
 from torch import Tensor, nn
 
+from stable_worldmodel.wm.lewm.lewm import LeWM
+
 from src.dino_patch import DINOv3PreJEPA
-from src.interfaces import DINO_PREDICTOR_DIM, EnginePaths, ExportConfig
+from src.interfaces import DINO_PREDICTOR_DIM, MODEL_ACTION_DIM, EnginePaths, ExportConfig
 
 # (B, T, C, H, W) -> (B, T, 196, 384): the register-sliced patch grid, same contract as
 # DINOv3PreJEPA._encode_image. (B, T, P, 404) -> (B, T, P, 404): the dim-preserving predictor.
@@ -106,6 +108,62 @@ class DINOWMSRShim(DINOv3PreJEPA):
         adapter's pure-torch `encode` / `predict` — the exact functions the engines
         reconstruct — so the shim's cost equals `model.get_cost` bit-for-bit."""
         return cls(model, adapter.encode, adapter.predict)
+
+
+class LeWMSRShim(LeWM):
+    """LeWM whose pixel-encode path routes through an injected ``encode_fn`` (the exported
+    encoder engine on the pod, or the adapter's torch ``encode`` in the parity check).
+
+    **Why this needs its own check, unlike DINO.** DINO's shim overrides the narrow
+    ``_encode_image`` seam and inherits ``encode`` untouched, so parity holds *by construction*.
+    ``LeWM.encode`` has **no such seam** — it fuses the backbone call (``encoder -> cls ->
+    projector``) with the info-dict bookkeeping *and* the ``action_encoder`` branch in one
+    method that returns the mutated dict. So this override **re-implements ``encode``'s body**;
+    it is NOT inherited, and a wrong key/dtype/shape would silently corrupt every LeWM SR (the
+    inherited ``rollout`` / ``get_cost`` consume ``info['emb']`` / ``info['act_emb']``). That is
+    exactly what ``sr_cost_parity_lewm`` validates: the override must reproduce
+    ``LeWM.get_cost`` bit-for-bit.
+
+    ``predict`` is left **native** on purpose. Routing it through an engine raises the
+    action-encoder boundary question — ``LeWM.rollout`` encodes the *whole* action sequence once
+    and passes ``LeWM.predict`` a pre-encoded ``act_emb``, whereas ``LeWMAdapter.predict``
+    re-encodes the *raw* action per step inside the engine. Whether those agree depends on
+    whether ``action_encoder`` is temporal; resolving it is the deferred, owner-gated step (the
+    LeWM adapter-fidelity gate). This shim/check deliberately covers only the ``encode`` seam.
+
+    Non-``Actionable`` (``LeWM`` has no ``get_action``) -> the CEM warm-start zero-pads, matching
+    the Phase-3 baseline. NOTE: ``LeWM.get_cost`` (pinned swm 0.1.1) only supports a **single
+    env per solve** (``batch_size=1`` -> ``current_bs=1``); its ``criterion`` broadcasts the
+    single-env goal over the candidate axis but errors for ``B>1``. The vendored CEM config
+    pins ``batch_size=1``, so this is the real contract — the check runs at ``B=1``.
+    """
+
+    def __init__(self, model: LeWM, encode_fn: EncodeFn):
+        nn.Module.__init__(self)
+        self.encoder = model.encoder
+        self.projector = model.projector
+        self.action_encoder = model.action_encoder
+        self.predictor = model.predictor
+        self.pred_proj = model.pred_proj
+        self._encode_fn = encode_fn
+
+    def encode(self, info: dict) -> dict:
+        # Wholesale override of LeWM.encode (no _encode_image seam). Mirror the source EXACTLY
+        # except the engine replaces encoder->cls->projector: set info['emb'] from encode_fn,
+        # run the action-encode branch, return the mutated dict. `encode_fn` (adapter/engine)
+        # returns (b, t, D) — the same shape LeWM.encode's `rearrange('(b t) d -> b t d')`
+        # produces — so the info-dict contract the inherited rollout consumes is preserved.
+        info["emb"] = self._encode_fn(info["pixels"])
+        if "action" in info:
+            info["act_emb"] = self.action_encoder(info["action"])
+        return info
+
+    @classmethod
+    def from_adapter(cls, model: LeWM, adapter) -> "LeWMSRShim":
+        """Check path: route the pixel encode through the adapter's pure-torch `encode` — the
+        exact function the encoder engine reconstructs — so the shim's cost equals
+        `LeWM.get_cost` bit-for-bit (isolating the `encode`-override risk)."""
+        return cls(model, adapter.encode)
 
 
 def build_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, PredictFn]:
@@ -221,31 +279,142 @@ def sr_cost_parity(
     }
 
 
-def main() -> None:
-    """Run the SR-cost parity check on the REAL DINO-WM checkpoint (L40S) through the adapter's
-    pure-torch encode/predict — the pre-engine gate that the shim's inherited ``get_cost``
-    reproduces the platform's exactly before it is trusted to carry the engines' SR."""
+def sr_cost_parity_lewm(
+    model: LeWM,
+    encode_fn: EncodeFn,
+    cfg: ExportConfig,
+    candidates: int = 4,
+    n_obs: int | None = None,
+    pred_steps: int = 2,
+) -> dict:
+    """Compare ``LeWMSRShim.get_cost`` (pixel-encode via ``encode_fn``, ``predict`` native)
+    against ``LeWM.get_cost`` on identical inputs, returning the max abs/rel drift on the
+    ``(1, candidates)`` cost. Bit-for-bit (drift 0) when ``encode_fn`` is the adapter's
+    ``encode`` — proving the wholesale ``encode`` override reproduces the source's cost path.
+
+    Runs at ``B=1`` (single env): the vendored CEM pins ``batch_size=1`` and ``LeWM.criterion``
+    only supports ``B=1`` (it broadcasts the single-env goal over the candidate axis)."""
+    device = next(model.parameters()).device
+    n_obs = getattr(model.predictor, "num_frames", 3) if n_obs is None else n_obs
+    horizon = n_obs + pred_steps
+    action_dim = MODEL_ACTION_DIM
+
+    model.eval()
+    for attr in ("_init_cached_info", "_goal_cached_info"):
+        if hasattr(model, attr):
+            delattr(model, attr)
+
+    shim = LeWMSRShim(model, encode_fn)
+    shim.eval()
+
+    def r(*shape):
+        return torch.randn(*shape, device=device)
+
+    # B=1 (single env per solve). LeWM cost needs pixels/goal/action only (no proprio/extras).
+    info = {
+        "pixels": r(1, candidates, n_obs, *cfg.obs_shape),
+        "goal": r(1, candidates, 1, *cfg.obs_shape),
+        "action": r(1, candidates, n_obs, action_dim),  # placeholder; rollout overwrites
+    }
+    cand = r(1, candidates, horizon, action_dim)
+
+    with torch.no_grad():
+        ref = model.get_cost(_clone(info), cand.clone())
+        mine = shim.get_cost(_clone(info), cand.clone())
+
+    if ref.shape != mine.shape:
+        raise AssertionError(
+            f"LeWM SR-parity shape mismatch: model {tuple(ref.shape)} vs shim {tuple(mine.shape)}"
+        )
+    diff = (ref.float() - mine.float()).abs()
+    return {
+        "shape": tuple(ref.shape),
+        "max_abs": diff.max().item(),
+        "max_rel": (diff / ref.float().abs().clamp_min(1e-12)).max().item(),
+    }
+
+
+def build_dummy_lewm_model() -> LeWM:
+    """A REAL ``LeWM`` (so it exposes the native ``encode`` / ``rollout`` / ``get_cost`` the
+    check compares against) wired from the shared ``src.smoke`` stand-in submodules — no
+    ViT-Tiny download. Mirrors ``src.fidelity.build_dummy_dino_model``."""
+    from src.smoke import build_dummy_lewm
+
+    d = build_dummy_lewm()
+    return LeWM(
+        encoder=d.encoder,
+        predictor=d.predictor,
+        action_encoder=d.action_encoder,
+        projector=d.projector,
+        pred_proj=d.pred_proj,
+    )
+
+
+def _track_arg(argv, default: str = "both") -> str:
+    for a in argv:
+        if a.startswith("track="):
+            return a.split("=", 1)[1]
+    return default
+
+
+def _run_dino_parity() -> None:
     import stable_worldmodel as swm
 
     from src.adapter import DINOWMAdapter
 
     model = swm.wm.utils.load_pretrained("dino/weights_epoch_10.pt")
     adapter = DINOWMAdapter(model)
-
     torch.manual_seed(0)
     result = sr_cost_parity(model, adapter.encode, adapter.predict, ExportConfig())
     print(
         f"[dino] SR-cost parity (shim.get_cost vs PreJEPA.get_cost) {result['shape']}: "
         f"max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
     )
-    # Same submodules on both sides -> bit-for-bit; a nonzero drift means the subclass wiring
-    # altered the inherited cost path (a silent-SR bug) and must be fixed before any engine run.
     if result["max_abs"] > 1e-4:
         raise SystemExit(
-            f"SR-COST PARITY FAILED: shim.get_cost diverges from PreJEPA.get_cost "
+            f"DINO SR-COST PARITY FAILED: shim.get_cost diverges from PreJEPA.get_cost "
             f"(max_abs={result['max_abs']:.3e}) — the subclass overrides changed the cost path."
         )
-    print("sr-cost parity: PASS")
+    print("[dino] sr-cost parity: PASS")
+
+
+def _run_lewm_parity() -> None:
+    import stable_worldmodel as swm
+
+    from src.adapter import LeWMAdapter
+
+    model = swm.wm.utils.load_pretrained("lewm/weights_epoch_10.pt")
+    adapter = LeWMAdapter(model)
+    torch.manual_seed(0)
+    result = sr_cost_parity_lewm(model, adapter.encode, ExportConfig())
+    print(
+        f"[lewm] SR-cost parity (shim.get_cost vs LeWM.get_cost) {result['shape']}: "
+        f"max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
+    )
+    # The encode override re-implements LeWM.encode's body; nonzero drift means that
+    # re-implementation diverges (a silent-SR bug) and must be fixed before any LeWM engine run.
+    if result["max_abs"] > 1e-4:
+        raise SystemExit(
+            f"LeWM SR-COST PARITY FAILED: shim.get_cost diverges from LeWM.get_cost "
+            f"(max_abs={result['max_abs']:.3e}) — the encode override changed the cost path."
+        )
+    print("[lewm] sr-cost parity: PASS")
+
+
+def main() -> None:
+    """Run the SR-cost parity check(s) on the REAL checkpoint(s) (L40S) through the adapter's
+    pure-torch encode/predict — the pre-engine gate that each shim's ``get_cost`` reproduces the
+    platform's exactly before it is trusted to carry the engines' SR.
+
+        uv run python -m src.sr_shim [track=dino|lewm|both]   (default: both)
+    """
+    track = _track_arg(sys.argv[1:])
+    if track in ("dino", "both"):
+        _run_dino_parity()
+    if track in ("lewm", "both"):
+        _run_lewm_parity()
+    if track not in ("dino", "lewm", "both"):
+        raise SystemExit(f"unknown track {track!r}; expected dino | lewm | both")
 
 
 if __name__ == "__main__":
