@@ -282,9 +282,21 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   `predict` directly. So to produce the SR that pairs with each precision's speed number,
   the exported/quantized adapter is re-wrapped in a thin **Python** shim exposing
   `get_cost` / `get_action` (which call the engine's `encode` / `predict` underneath) and
-  slotted into `CEMSolver(model=...)`, letting the Phase-3 owned eval driver re-run
+  slotted into `CEMSolver(model=...)`, letting the platform's Phase-3 eval logic re-run
   unchanged on the optimized model. The shim stays in Python; only `encode` / `predict`
-  lives inside the engine — the planner is still never compiled in. For DINO-WM the shim
+  lives inside the engine — the planner is still never compiled in.
+  **Injection seam (the one specified exception to the no-monkeypatch eval stance).** The
+  Phase-3 latency callback rides in through a *config* seam (`cfg.solver.callbacks`), so its
+  driver (`src/eval.py`) needs no monkeypatch. Model injection has **no such config seam**:
+  the vendored `eval_wm.run` builds its model internally
+  (`swm.wm.utils.load_pretrained(cfg.policy)`) and hands it to `CEMSolver(model=...)`. So the
+  SR re-run uses a **dedicated** driver (`src/sr_eval.py`, distinct from the trained-checkpoint
+  `src/eval.py`) that slots the shim in by a **scoped `load_pretrained` patch** around the run.
+  The patch swaps **only which model the loader returns**; the vendored `eval_wm.py` and the
+  solver/CEM logic stay byte-unmodified, and no CEM config, seed, sample count, or plan changes
+  — so eval/CEM parity is preserved (the SR differs from the FP32 baseline only by the engines'
+  quantization drift). Because it touches the model boundary the CEM eval runs on, this seam is
+  owner-gated (SPEC §Implementation Boundaries — eval/CEM parity). For DINO-WM the shim
   must reproduce `PreJEPA.rollout` **faithfully**: carry the full `404` state, replace only
   the action channels each step (`replace_action_in_embedding`), keep the predictor's
   predicted proprio, and compute the cost from predicted **proprio and pixels** — otherwise

@@ -384,6 +384,19 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   for B>1 — the checkout removed these methods). Per-frame boundary owner-signed-off 2026-07-11
   (`src/fidelity.py::lewm_action_encoder_per_frame`); the LeWM predict engine + adapter-fidelity
   gate can now build.
+  → **SR-per-precision eval driver landed (plumbing, pod-run pending):** `src/sr_eval.py`
+  (`uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
+  [precision=fp32,fp16,int8] [out=<dir>]`) re-runs the byte-unmodified Phase-3 eval
+  (`scripts.plan.eval_wm.run`) on the engine-backed SR shim per built precision and writes the
+  `{track:{precision:SR}}` `sr.json` that `src.study`/`src.report` join via `sr=<file>`
+  (read-modify-write per track key → separate lewm/dino pod sessions don't clobber, CLAUDE.md §8).
+  **Seam** (rationale in SPEC §Interface Contracts — "Injection seam"): `eval_wm.run` has no config
+  seam for a model object, so the driver runs it byte-unmodified and slots the shim in by a scoped
+  `load_pretrained` patch (swaps only the model object → parity preserved). Reuses `src.eval`'s
+  Hydra compose + SR parse; missing engines → precision skipped (FP16-only fallback).
+  `tests/test_sr_eval.py` covers the argv routing / track map / no-clobber merge (CPU); the eval leg
+  is pod-only (engines + CUDA + dataset). 🔴 owner-confirm on pod: the `load_pretrained` patch-seam
+  is the eval/CEM-parity-adjacent call.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component
