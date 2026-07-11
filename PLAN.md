@@ -230,7 +230,11 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   abs drift vs `get_cost` within tolerance on real weights.
   → `src/fidelity.py` (+ `tests/test_fidelity.py`): DINO-WM shim vs `DINOv3PreJEPA.rollout`,
   bit-for-bit (max_abs 0.0) on a dummy `DINOv3PreJEPA`; pod runs `python -m src.fidelity` on
-  the real checkpoint. LeWM gate deferred — see SPEC/notes (temporal action Embedder).
+  the real checkpoint. LeWM: `action_encoder` (`Embedder`) confirmed **per-frame**
+  (`Conv1d(k=1)` + per-position MLP, no T-axis mixing) vs installed swm 0.1.1 → per-step
+  `LeWMAdapter.predict` == `LeWM.rollout` whole-sequence act-encode (SPEC §Interface
+  Contracts). Remaining 🔴: owner sign-off + a self-guarding runtime assert
+  (`action_encoder(seq)[:,t] ≈ action_encoder(seq[:,:t+1])[:,-1]`) in `src/fidelity.py`.
 
 - [x] 🔴 Real export **PyTorch→ONNX→TensorRT**, per model:
   `uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>`. Trace via
@@ -369,9 +373,12 @@ precision). (See SPEC §Parity, `src/interfaces.py`.)
   **bit-for-bit** (max_abs 0.0, n_obs∈{1,3}). Run at **B=1**: vendored CEM pins `batch_size=1`
   and `LeWM.criterion` (pinned swm 0.1.1) only supports one env per solve (broadcasts the
   single-env goal over candidates, errors for B>1 — the checkout removed these methods).
-  Still 🔴 deferred for LeWM: the **action-encoder engine boundary** (whole-sequence
-  `LeWM.rollout` act-encode vs per-step `LeWMAdapter.predict`) — the predict engine + LeWM
-  adapter-fidelity gate, hinging on whether `action_encoder` is temporal.
+  LeWM **action-encoder engine boundary resolved (design):** `action_encoder` is per-frame
+  (`Embedder` `Conv1d(k=1)`), so per-step `LeWMAdapter.predict` is numerically identical to
+  `LeWM.rollout`'s whole-sequence act-encode and the encoder can sit inside the per-step
+  predict engine (SPEC §Interface Contracts). Still 🔴 pending: owner sign-off + the
+  self-guarding assert (`src/fidelity.py`), then the LeWM predict engine + adapter-fidelity
+  gate can build.
 - [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 rollouts-in-budget ratio**
   + **p95 latency ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR,
   degradation quoted vs FP32**; **speed-vs-SR plotted**; **per-component

@@ -262,6 +262,21 @@ Runtime-checked via jaxtyping + beartype with shared named axes.
   predictor's own predicted proprio) live in the **Python rollout/shim**, not the compiled
   engine. **The adapter is the unit TensorRT optimizes; the CEM rollout loop runs in
   Python around it** — the planner is never compiled into the engine.
+  **LeWM `predict`'s action conditioning is per-frame, so the per-step engine boundary is
+  faithful.** LeWM's `action_encoder` (`Embedder`) is a `Conv1d(kernel_size=1)` over the
+  packed-action feature axis followed by a per-position MLP — no receptive field along the
+  macro-step (T) axis — so the action embedding `act_emb[:, t]` (the frameskip-packed action
+  code — 5×2=10 wide — **distinct from the state latent `emb[:, t]`**) depends only on the
+  packed action at step t. The platform pre-encodes the whole action sequence **once** in
+  `LeWM.rollout` then windows it into per-step `predict` calls; the adapter re-encodes each
+  step inside `predict`. Because the encoder is per-frame these are numerically identical, so
+  the action encoder may live inside the compiled per-step `predict` engine (no whole-sequence
+  pre-encode needed in the shim). This is an owner-gated **silent-failure** boundary — a
+  `kernel_size > 1` (temporal) config would make `act_emb[:, t]` depend on neighbouring/future
+  actions and silently break per-step faithfulness — guarded by a runtime assertion
+  `action_encoder(seq)[:, t] ≈ action_encoder(seq[:, :t+1])[:, -1]` on the real checkpoint.
+  (Confirmed against installed swm 0.1.1 source; the `smoothed_dim` / permute-to-length shape
+  is set up to *allow* temporal smoothing, but the config leaves `kernel_size=1`.)
 - **Re-entering the platform eval on the optimized model (Phase-5 SR-per-precision).**
   The CEM solver calls the world model via `get_cost` / `get_action` — not `encode` /
   `predict` directly. So to produce the SR that pairs with each precision's speed number,
