@@ -28,6 +28,17 @@ from time import perf_counter
 
 from stable_worldmodel.solver.callbacks import Callback
 
+
+def _percentile(sorted_ms, q):
+    """Linear-interpolated q-th percentile (q in [0,100]) over a NON-empty sorted list."""
+    if len(sorted_ms) == 1:
+        return sorted_ms[0]
+    pos = (q / 100.0) * (len(sorted_ms) - 1)
+    lo = int(pos)
+    frac = pos - lo
+    hi = min(lo + 1, len(sorted_ms) - 1)
+    return sorted_ms[lo] + frac * (sorted_ms[hi] - sorted_ms[lo])
+
 # Registry: instances append themselves at construction (see module docstring) so the
 # driver can reach the config-instantiated callback after the run.
 _RECORDERS = []
@@ -77,16 +88,22 @@ class SolveLatencyRecorder(Callback):
             self._t0 = None
 
     def summary(self):
-        """Eager-baseline latency: median over the recorded solves (ms).
+        """Per-cycle (CEM-solve) latency distribution over the recorded solves.
 
-        The rigorous p50/p95 rig comes later; here we want one stable number per track.
-        ``median_ms`` is ``None`` when nothing was recorded, so the caller can surface an
-        empty run instead of dividing by zero.
+        Reports ``p50_ms`` / ``p95_ms`` (the Phase-5 headline, SPEC §Interface Contracts)
+        and keeps ``median_ms`` (== p50) for the Phase-3 eval driver. ``latencies_ms`` is the
+        RAW per-solve list so ``src.report`` can truncate to the common min-n across tracks
+        before taking the percentiles (equal-n). All are ``None`` / ``[]`` on an empty run, so
+        the caller can surface it instead of dividing by zero.
         """
-        n = len(self.latencies_s)
+        lat_ms = sorted(x * 1e3 for x in self.latencies_s)
+        n = len(lat_ms)
         return {
             "n_solves": n,
-            "median_ms": median(self.latencies_s) * 1e3 if n else None,
+            "median_ms": median(lat_ms) if n else None,
+            "p50_ms": _percentile(lat_ms, 50) if n else None,
+            "p95_ms": _percentile(lat_ms, 95) if n else None,
+            "latencies_ms": lat_ms,
         }
 
 

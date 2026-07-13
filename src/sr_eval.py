@@ -109,20 +109,33 @@ def _merge_sr_json(path, track, sr_by_precision):
 
 def _eval_one(hydra_argv, shim):
     """Run the byte-unmodified vendored eval with `shim` slotted into `CEMSolver(model=...)`,
-    and return the parsed Push-T success rate.
+    and return `(success_rate, per_cycle_latencies_ms)`.
 
     The shim rides in by patching `load_pretrained` (the only seam — see module docstring);
     the patch is scoped to the run and restored after. `output.filename` points at a fresh,
-    driver-owned results file (the entrypoint appends, so a shared file would accumulate runs)."""
+    driver-owned results file (the entrypoint appends, so a shared file would accumulate runs).
+    The **per-cycle (CEM-solve) latency** rides in on the SAME run via the eval overlay's
+    observation-only `SolveLatencyRecorder` (`cfg.solver.callbacks`), so per-cycle latency and
+    SR come from the same solves (SPEC §Interface Contracts). The raw per-solve list is returned
+    so `src.report` can truncate to the common min-n across tracks (equal-n percentiles)."""
     import stable_worldmodel as swm
 
     from scripts.plan import eval_wm
 
+    from src import eval_latency
+
     out_file = Path(tempfile.mkdtemp(prefix="swm_sreval_")) / "results.txt"
     cfg = _compose_eval_cfg(hydra_argv, out_file)
+    eval_latency.reset_registry()
     with patch.object(swm.wm.utils, "load_pretrained", return_value=shim):
         eval_wm.run(cfg)
-    return _parse_success_rate(out_file.read_text())
+    latency = eval_latency.pop_records()
+    if latency["n_solves"] == 0:
+        raise RuntimeError(
+            "the latency callback recorded no CEM solves — is SolveLatencyRecorder injected "
+            "via cfg.solver.callbacks in the eval overlay?"
+        )
+    return _parse_success_rate(out_file.read_text()), latency["latencies_ms"]
 
 
 def main():
@@ -166,13 +179,21 @@ def main():
                 )
                 continue
             shim = _build_shim(track, model, engines)
-            sr = _eval_one(hydra_argv, shim)
-            sr_by_precision[precision] = sr
+            sr, per_cycle_ms = _eval_one(hydra_argv, shim)
+            # Carry the RAW per-solve latencies (not pre-reduced percentiles) so src.report
+            # truncates to the common min-n across tracks before taking p50/p95 (equal-n).
+            sr_by_precision[precision] = {
+                "success_rate": sr,
+                "per_cycle_latencies_ms": per_cycle_ms,
+            }
 
             import wandb
 
-            wandb.log({f"sr/{precision}": sr})
-            print(f"[sr-eval:{track}] {precision}: success_rate={sr}")
+            wandb.log({f"sr/{precision}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)})
+            print(
+                f"[sr-eval:{track}] {precision}: success_rate={sr} "
+                f"n_solves={len(per_cycle_ms)}"
+            )
     finally:
         run.finish()
 

@@ -1,26 +1,17 @@
-"""Fixed-wall-clock-budget benchmark — real timing harness.
+"""Latency benchmark — real timing harness for the exported engines.
 
-Owned PLUMBING (fails LOUDLY): drives the two
-TensorRT engines built by `src.export` through a Python CEM-style rollout — encode ONCE,
-then `predict` autoregressively over the horizon (the exact encoder-cached /
-predictor-dominates call pattern, docs/platform_api.md §5) — for a fixed wall-clock budget.
+Owned PLUMBING (fails LOUDLY). **Latency is the headline** (SPEC §Interface Contracts):
+this harness measures the two COMPONENT latency distributions in isolated, equal-n
+fixed-iteration loops on the engines — **encode-step** (exposes the LeWM↔DINOv3 encoder
+token-count asymmetry) and **predict-step** (quantization's kernel target) — each as p50/p95,
+warm-up dropped. It also samples peak GPU memory.
 
-**What the numbers are (and are NOT).** This harness runs the MODEL only — the CEM planner
-is not in the loop (no candidate sampling / topk / elite update). So:
-  - `rollouts_completed` / `throughput` are the **model-only** count (planner treated as
-    free) — the *ceiling*, not the realized wall-clock. The realized rollouts-in-budget
-    (planner in the loop) comes from the gated eval-shim re-run; their gap is the planner
-    floor (SPEC §dilution disclosure, ≈ Amdahl from the profile shares).
-  - `latency_p50/p95_ms` time the **predictor step only** — `encode` runs once per rollout
-    and is deliberately untimed here (the encoder asymmetry surfaces in throughput and the
-    profile). Each step syncs the stream, so for LeWM's tiny op this is a launch+sync floor,
-    which compresses the LeWM↔DINO p95 ratio (LeWM is launch-latency-bound, SPEC §Parity).
-
-**SR is NOT produced here.** Every speed figure must carry its SR, but the
-SR path is the eval driver re-run on the optimized model through a get_cost /
-get_action shim (owner-gated — needs the real checkpoint + adapter wiring). So `benchmark`
-returns real speed metrics and `success_rate=NaN`; the headline runner (`src.report`) joins
-in the SR per precision from that separate eval run and flags every still-unpaired row.
+There is **no fixed-wall-clock rollout-count run** (owner decision — redundant with the
+per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (full CEM solve)
+and the **SR** are NOT produced here: both come from the gated eval-shim re-run (`src.sr_eval`,
+via the observation-only CEM-solve-latency callback), so they share the same solves. This
+harness therefore returns real component-latency + peak-mem numbers with `per_cycle_*` and
+`success_rate` left NaN; `src.report` joins the per-cycle latency + SR back in per precision.
 
 Runs ONLY on the L40S: `EngineRunner` lazy-imports `tensorrt` and allocates CUDA buffers.
 `peak_mem_mb` is sampled from **cudaMemGetInfo** (`torch.cuda.mem_get_info`) — device-level
@@ -40,16 +31,30 @@ from torch import Tensor
 from src.interfaces import EnginePaths, BenchResult
 from src.trt_runtime import EngineRunner
 
-# One rollout replays PlanConfig.horizon predictor steps over the cached latent
-# (docs/platform_api.md §3: horizon=5). Fixed across tracks — a parity condition.
-_ROLLOUT_HORIZON = 5
+
+def _percentiles_ms(step_ms: list[float]) -> tuple[float, float]:
+    """(p50, p95) over a list of per-call latencies in ms."""
+    lat = torch.tensor(step_ms)
+    return torch.quantile(lat, 0.50).item(), torch.quantile(lat, 0.95).item()
+
+
+def _time_loop(runner: EngineRunner, inputs: tuple[Tensor, ...], n_iters: int) -> list[float]:
+    """Time `n_iters` isolated calls of one engine. `EngineRunner.run` syncs its stream, so
+    `perf_counter` around it is an accurate per-call GPU wall-clock (not an async-launch
+    artifact). Warm-up is the caller's responsibility (run before the timed loop)."""
+    step_ms: list[float] = []
+    for _ in range(n_iters):
+        t0 = perf_counter()
+        runner.run(inputs)
+        step_ms.append((perf_counter() - t0) * 1000.0)
+    return step_ms
 
 
 def benchmark(
     engines: EnginePaths,
     encode_inputs: tuple[Tensor, ...],
     predict_inputs: tuple[Tensor, ...],
-    time_budget_s: float,
+    n_iters: int,
     warmup: int,
 ) -> BenchResult:
     for name, path in engines.items():
@@ -59,55 +64,38 @@ def benchmark(
     encoder = EngineRunner(engines["encoder"])
     predictor = EngineRunner(engines["predictor"])
     device = encoder.device
-    # predict_inputs[0] is the dim-preserving predictor STATE (LeWM: latent 192; DINO: the
-    # assembled 404 embedding) that `predict` returns unchanged in shape, so it re-feeds
-    # autoregressively. predict_inputs[1:] is the per-track fixed conditioning (LeWM: action;
-    # DINO: none) reused each step — this measures timing, not rollout correctness.
-    state0 = predict_inputs[0]
-    conditioning = predict_inputs[1:]
 
-    def _rollout() -> list[float]:
-        """One rollout: encode once (timed as the encoder cost), then HORIZON predictor
-        steps feeding the state forward. Returns each predictor step's latency in ms
-        (EngineRunner.run syncs its stream, so perf_counter around it is an accurate per-step
-        GPU wall-clock number). DINO's 384->404 assembly is a Python step outside the engine,
-        so the encoder output is not threaded directly into `predict` here."""
-        encoder.run(encode_inputs)
-        state = state0
-        step_ms = []
-        for _ in range(_ROLLOUT_HORIZON):
-            t0 = perf_counter()
-            state = predictor.run((state, *conditioning))
-            step_ms.append((perf_counter() - t0) * 1000.0)
-        return step_ms
-
+    # encode_inputs is the single obs (batch 1 — the cached per-cycle encode); predict_inputs
+    # is the dim-preserving predictor STATE (LeWM latent 192; DINO assembled 404) at the
+    # candidate fan-out batch, plus per-track fixed conditioning (LeWM action; DINO none).
+    # Values are held fixed across iters — this measures per-call timing, not rollout state.
     for _ in range(warmup):
-        _rollout()
+        encoder.run(encode_inputs)
+        predictor.run(predict_inputs)
     torch.cuda.synchronize(device)
 
     def _used_mem_mb() -> float:
         # cudaMemGetInfo via torch: device-level (total - free) used bytes. Captures the TRT
         # engine + context arena (a separate cudaMalloc outside torch's allocator). Sampled
-        # after warmup, so engines/contexts/I-O buffers are already resident.
+        # after warm-up, so engines/contexts/I-O buffers are already resident.
         free, total = torch.cuda.mem_get_info(device)
         return (total - free) / 1e6
 
     peak_mem_mb = _used_mem_mb()
-    step_latencies_ms: list[float] = []
-    rollouts = 0
-    start = perf_counter()
-    while perf_counter() - start < time_budget_s:
-        step_latencies_ms.extend(_rollout())
-        rollouts += 1
-        peak_mem_mb = max(peak_mem_mb, _used_mem_mb())  # once per rollout, not per step
-    elapsed = perf_counter() - start
+    encode_ms = _time_loop(encoder, encode_inputs, n_iters)
+    peak_mem_mb = max(peak_mem_mb, _used_mem_mb())
+    predict_ms = _time_loop(predictor, predict_inputs, n_iters)
+    peak_mem_mb = max(peak_mem_mb, _used_mem_mb())
 
-    lat = torch.tensor(step_latencies_ms)
+    encode_p50, encode_p95 = _percentiles_ms(encode_ms)
+    predict_p50, predict_p95 = _percentiles_ms(predict_ms)
     return BenchResult(
-        latency_p50_ms=torch.quantile(lat, 0.50).item(),
-        latency_p95_ms=torch.quantile(lat, 0.95).item(),
-        rollouts_completed=rollouts,
-        throughput=rollouts / elapsed,
+        per_cycle_p50_ms=math.nan,  # joined by src.report from the gated eval-shim re-run
+        per_cycle_p95_ms=math.nan,
+        encode_p50_ms=encode_p50,
+        encode_p95_ms=encode_p95,
+        predict_p50_ms=predict_p50,
+        predict_p95_ms=predict_p95,
         peak_mem_mb=peak_mem_mb,
         success_rate=math.nan,  # joined in by src.report from the gated eval-shim re-run
     )

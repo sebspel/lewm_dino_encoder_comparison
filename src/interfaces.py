@@ -35,6 +35,14 @@ MODEL_ACTION_DIM = 10
 # 4-wide, embedded to 10 and concatenated (with action's 10) onto the 384 latent -> 404.
 DINO_PROPRIO_DIM = 4
 
+# CEM planning-cycle call counts (docs/platform_api.md §5). The measured per-cycle latency is
+# decomposed by weighting the isolated engine-step latencies by these counts and subtracting
+# from the cycle (overhead = cycle − enc·ENC_CALLS − pred·PRED_CALLS; SPEC §Interface
+# Contracts). 🔴 confirm against the installed `CEMSolver.solve` on the pod, not assumed.
+CEM_NUM_SAMPLES = 300  # candidate fan-out — the batch `predict` is timed at
+ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, batch 1)
+PREDICTOR_CALLS_PER_CYCLE = 180  # (horizon 5 + 1) × n_steps 30, batched over the candidates
+
 
 class WMStepAdapter(Protocol):
     """Common two-method boundary the export/benchmark/profile plumbing binds to, so it
@@ -92,20 +100,22 @@ class Export(Protocol):
 
 
 class BenchResult(TypedDict):
-    # Per PREDICTOR-STEP inference latency (encode runs once per rollout and is NOT timed
-    # here — the encoder asymmetry surfaces in `throughput`/`rollouts_completed` and the
-    # profile, not in these percentiles). Each step syncs the CUDA stream, so for LeWM's
-    # tiny ops this is a launch+sync floor, not compute — which compresses the LeWM↔DINO
-    # p95 ratio (LeWM is launch-latency-bound, SPEC §Parity).
-    latency_p50_ms: float
-    latency_p95_ms: float
-    # MODEL-ONLY rollouts in the fixed budget: encode-once + predict-over-horizon with NO CEM
-    # planner in the loop (no candidate sampling / topk / elite update). This is the model
-    # speedup ceiling with the planner treated as free; the REALIZED wall-clock
-    # rollouts-in-budget (planner in the loop) comes from the gated eval-shim re-run. Their
-    # gap is the planner floor (≈ Amdahl from the profile shares) — SPEC §dilution disclosure.
-    rollouts_completed: int
-    throughput: float  # model-only rollouts/sec (same planner-free caveat)
+    # HEADLINE latency — the full per-decision PLANNING CYCLE (encode + predict + overhead),
+    # measured on the REAL CEM solve via the eval-latency callback over the SR eval-shim run.
+    # NOT produced by `benchmark` (no planner in the harness); left NaN here and JOINED per
+    # precision from that gated run, so per-cycle latency and SR come from the same solves
+    # (SPEC §Interface Contracts). Equal-n across tracks (report truncates to the common
+    # min-n before taking the percentiles).
+    per_cycle_p50_ms: float
+    per_cycle_p95_ms: float
+    # COMPONENT latency — isolated per-precision engine-step p50/p95 from fixed-iteration
+    # loops (warm-up dropped, equal-n). `encode_*` exposes the encoder token-count asymmetry
+    # (LeWM 1 token vs DINOv3 196); `predict_*` is quantization's kernel target. Each engine
+    # call syncs its stream, so for LeWM's tiny ops these sit on a launch+sync floor.
+    encode_p50_ms: float
+    encode_p95_ms: float
+    predict_p50_ms: float
+    predict_p95_ms: float
     # Sampled from cudaMemGetInfo (`torch.cuda.mem_get_info`), NOT `torch.cuda.max_memory_
     # allocated`: TensorRT's engine + execution-context device allocations bypass torch's
     # caching allocator, so the allocator would undercount exactly the optimized path
@@ -118,50 +128,12 @@ class BenchResult(TypedDict):
 class Benchmark(Protocol):
     def __call__(
         self,
-        engines: EnginePaths,  # encoder + predictor engines, driven by a Python rollout
-        encode_inputs: tuple[Tensor, ...],
-        predict_inputs: tuple[Tensor, ...],
-        time_budget_s: float,
+        engines: EnginePaths,  # encoder + predictor engines, timed as isolated step loops
+        encode_inputs: tuple[Tensor, ...],  # obs at batch 1 (the cached per-cycle encode)
+        predict_inputs: tuple[Tensor, ...],  # predictor state at the candidate fan-out batch
+        n_iters: int,  # fixed-iteration count per step loop (equal-n percentiles)
         warmup: int,
     ) -> BenchResult: ...
-
-
-class ComponentProfile(TypedDict):
-    # Raw mean time PER SINGLE CALL, measured at the cycle's real batch per component
-    # (encode: batch 1 obs; predict: the candidate fan-out num_samples; planner: one CEM
-    # iteration). These are NOT summable across components and NOT the cycle's time share — a
-    # planning cycle calls `predict` many times and `encode` ~once, so per-call means must be
-    # weighted by call count before they mean anything (see `*_cycle_ms`).
-    encoder_ms: float
-    predictor_ms: float
-    planner_ms: float
-    # Calls per planning cycle, from the CEM decomposition (docs/platform_api.md §3/§5:
-    # num_samples=300, n_steps=30, horizon=5). encoder ~once (cached), predict autoregressive
-    # over the horizon per iteration, planner once per iteration.
-    encoder_calls: int
-    predictor_calls: int
-    planner_calls: int
-    # Runtime-WEIGHTED per-cycle time (calls × per-call ms). THESE are the true time shares
-    # and sum to the modelled cycle (within the cuda.synchronize barrier).
-    encoder_cycle_ms: float
-    predictor_cycle_ms: float
-    planner_cycle_ms: float
-    # Derived from the weighted shares: optimizable fraction p = (enc+pred)/cycle (only the
-    # model is TRT-optimized; the Python planner is precision-invariant) and the Amdahl
-    # end-to-end speedup ceiling 1/(1-p) it sets (SPEC §dilution disclosure).
-    optimizable_fraction: float
-    amdahl_ceiling: float
-
-
-class Profile(Protocol):
-    def __call__(
-        self,
-        adapter: WMStepAdapter,
-        encode_inputs: tuple[Tensor, ...],
-        predict_inputs: tuple[Tensor, ...],
-        n_iters: int,
-        warmup: int,
-    ) -> ComponentProfile: ...
 
 
 @dataclass(frozen=True)
@@ -172,6 +144,5 @@ class ExportConfig:
     proprio_dim: int = DINO_PROPRIO_DIM  # DINO-WM proprio extra fed to predict
     precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
     warmup: int = 5
-    time_budget_s: float = 10.0  # fixed wall-clock budget for the benchmark
-    n_profile_iters: int = 30  # cycles timed for the per-component profile
+    n_latency_iters: int = 200  # fixed iters per engine-step loop (equal-n p50/p95)
     seed: int = 0

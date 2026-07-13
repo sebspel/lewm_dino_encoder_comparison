@@ -16,8 +16,8 @@ platform's DINO-WM predictor (whose reference backbone is **DINOv2**) with the f
 swapped to **DINOv3** — the same training framework, a different encoder.
 
 1. **Inference-optimization study on an L40S:** export both models PyTorch→ONNX→TensorRT with
-   INT8 quantized **explicitly** (Q/DQ), and benchmark planning latency, throughput, and peak
-   GPU memory across FP32→FP16→INT8. Headline: the **LeWM-vs-DINOv3 speedup ratio** and the
+   INT8 quantized **explicitly** (Q/DQ), and benchmark planning latency and peak GPU memory
+   across FP32→FP16→INT8. Headline: the **LeWM-vs-DINOv3 per-cycle latency ratio** and the
    **per-model FP32→FP16→INT8 optimization delta**.
 2. **QLoRA delta on the DINOv3-WM backbone:** fine-tune the frozen DINOv3 backbone with QLoRA
    on Push-T, re-run the task-quality metric, and report the delta vs the frozen baseline.
@@ -101,17 +101,39 @@ requirements those signatures must satisfy; it does not restate the signatures.
   Owner-accepted trade-off: the FP16 cast of the remainder can under/overflow a few initializers;
   keeping the remainder FP32 is the documented fallback if that drift proves unacceptable.
 - **Every speed result carries the SR for that engine config** — no speed number is reported
-  without its task-quality counterpart. Rollouts-completed under a fixed wall-clock budget is the
-  headline speed measure.
+  without its task-quality counterpart. **Per-cycle planning latency (p50/p95) is the headline
+  speed measure** — there is no fixed-wall-clock rollout-count run (serial planning makes
+  rollouts/sec ≈ 1/per-cycle-latency, so it is redundant with the equal-n latency measurement).
 - **Peak memory is sampled from the driver/runtime** (`cudaMemGetInfo`/nvidia-smi), **not** the
   torch caching allocator: TensorRT's engine and execution-context device allocations bypass
   torch's allocator, so `torch.cuda.max_memory_allocated` would systematically undercount exactly
   the optimized path.
-- **The per-component profile slices are mutually exclusive and additive.** `planner_ms` is the
-  pure CEM/Python overhead with the encode/predict call time subtracted, so encoder + predictor +
-  planner sum to the measured cycle within the `cuda.synchronize` barrier. Only then are the FP32
-  baseline **time shares** meaningful — and they are load-bearing for the dilution disclosure
-  below.
+- **The per-component profile slices are mutually exclusive and additive, by subtraction from the
+  measured cycle.** The full planning-cycle time is **measured on the real CEM solve** (not
+  reconstructed from a hand-rolled solver mirror); encoder and predictor are timed in isolation and
+  weighted by their real per-cycle call counts (**confirmed against the installed `CEMSolver.solve`,
+  not assumed**), and the remainder is `overhead_ms = cycle − encoder − predictor` — the
+  un-optimizable floor (CEM sampling/topk/mean-var **plus** the criterion, the 384→404 assembly,
+  per-step action-replace/proprio-carry, and host/Python glue). This is additive to the cycle by
+  construction and removes the solver mirror as an error source for the Amdahl denominator. A
+  negative `overhead_ms` is **surfaced loudly** as a sign the call-count weighting or the isolated
+  measurement is off — never clamped. Only then are the FP32 baseline **time shares** meaningful —
+  load-bearing for the dilution disclosure below.
+- **Three latency distributions, all p50/p95 (never means), mapping to the three profile slices.**
+  (1) **per-cycle** p50/p95 — the **headline**: the full per-decision planning latency (encode +
+  predict + overhead), measured on the real solve; (2) **encode-step** p50/p95 — a component that
+  exposes the LeWM-vs-DINOv3 encoder token-count asymmetry (wall-clock-diluted in the cycle because
+  encode is cached and runs ~twice, so it does **not** dominate the headline); (3) **predictor-step**
+  p50/p95 — a component: quantization's kernel target. Any unqualified "p50/p95 latency" means
+  **predictor-step**. Percentiles are harvested from **fixed-iteration** loops (fixed count, warm-up
+  dropped) — so n is equal across tracks and the tail is not boundary-censored (there is no
+  wall-clock-limited run). encode-/predict-step ride isolated
+  per-precision engine loops (timing is data-independent); per-cycle rides the observation-only
+  CEM-solve-latency callback over the SR eval-shim run, so **per-cycle latency and SR come from the
+  same solves**. Per-cycle samples accrue far slower (one per solve), so its loop needs enough solves
+  for a stable p95, and — because SR-driven episodes terminate at different step counts — its samples
+  are truncated to a common minimum n (or drawn from a dedicated fixed-solve-count pass) for an
+  equal-n comparison.
 - **One adapter Protocol, two concrete tracks.** A common two-method `encode`/`predict` interface
   (not a fused `__call__`) so export and benchmark treat both tracks identically; the latent shape
   and how the action enters `predict` differ per track (LeWM: a separate AdaLN-conditioning
@@ -160,18 +182,25 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   encoding, eval seeds, and identical input normalization (ImageNet stats). Mostly enforced by the
   platform's eval; confirm they are not varied between tracks.
 - **Matched export/benchmark conditions:** both models exported and benchmarked at the **same
-  precision** on the **same L40S** under the **same fixed wall-clock budget**, same env/goal, and
-  the **same shared inference batch size**. Within that budget, compare per-step inference latency
-  (**p50 and p95**) and the **number of CEM rollouts completed** — rollout count is the intended
-  degree of freedom; the model is the only other difference. Training batch size is held equal
-  across tracks (128, LeWM's paper value) and does **not** carry into inference. **Every speed
-  figure is reported with its SR**, and FP16/INT8 results quote **SR and latency degradation
-  relative to FP32** — a precision that is faster but degrades task quality must be visible.
+  precision** on the **same L40S**, same env/goal, and the **same shared inference batch size**.
+  There is no fixed-wall-clock budget run; **latency is the headline** and the model is the only
+  difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
+  measured in equal-n fixed-iteration loops (§Interface
+  Contracts): the headline is **per-cycle p50/p95** (full per-decision planning latency), with
+  **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are locked** for the
+  whole benchmark (`nvidia-smi -pm 1` + `-lgc` at a sustainable clock, `-lmc` if supported) so
+  rollout counts and tail latencies are not thermal artifacts; the lock is applied **before**
+  warm-up, reset with `-rgc` in a trap on exit, and the locked clock is recorded in the per-track
+  results as a fairness condition (if the pod denies clock control, clocks/throttle-reasons are
+  sampled and any throttling is flagged instead). Training batch size is held equal across tracks
+  (128, LeWM's paper value) and does **not** carry into inference. **Every speed figure is reported
+  with its SR**, and FP16/INT8 results quote **SR and latency degradation relative to FP32** — a
+  precision that is faster but degrades task quality must be visible.
 - **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap comes from the
   encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
   DINOv3's large backbone exposing the full patch-token grid (so the predictor and planner also
   operate over `N_patches` tokens for DINO vs one for LeWM). No batch or precision mismatch may
-  confound it; the encoder/predictor/planner profile must attribute the gap to the right component.
+  confound it; the encoder/predictor/overhead profile must attribute the gap to the right component.
 - **QLoRA comes after the frozen baseline**, and the delta is reported against frozen DINOv3-WM.
 
 ---
@@ -187,7 +216,7 @@ touching:
   matching.
 - QLoRA targeting (which DINOv3 modules, rank, what stays frozen — the predictor is unfrozen and
   co-trained, so only backbone targeting is open).
-- The benchmark fairness conditions (matched precision, fixed time budget, env/goal).
+- The benchmark fairness conditions (matched precision, locked GPU clock, env/goal).
 - The model adapter dims (the Constants above).
 - Any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity.
 
@@ -232,32 +261,34 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   Drift is measured and reported only; the pass/fail is an **owner sign-off on the measured drift
   table** — deliberately **not** coded into a tolerance object or automated gate.
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8
-  (FP32→FP16→INT8), benchmarked on the L40S under a fixed wall-clock budget (latency p50/p95,
-  rollouts completed, throughput, peak GPU memory, **and SR per precision**), with
-  encoder/predictor/planner profiled separately to locate bottlenecks. Only the model is
-  TRT-optimized; the CEM planner stays in Python around it. Headline: LeWM-vs-DINOv3
-  rollouts-in-budget + p95-latency ratio + per-model FP32→FP16→INT8 delta in **both speed and SR**
+  (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
+  (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
+  per precision**, with encoder/predictor/overhead profiled separately to locate bottlenecks. Only
+  the model is TRT-optimized; the CEM planner stays in Python around it. Headline: LeWM-vs-DINOv3
+  **per-cycle p50/p95 latency ratio** + per-model FP32→FP16→INT8 delta in **both speed and SR**
   (degradation quoted vs FP32; speed plotted against SR).
   - **Headline-artifact durability.** The headline tables (serialized to text) **and** plots (PNG)
     are persisted to the persistent network volume, the same durability contract as checkpoints and
     engines, so a completed study survives pod teardown. W&B logging is **additive, never the sole
     copy**. The **canonical** artifact is the raw **per-track results** (benchmark + profile numbers
-    plus the run's fairness conditions — time budget, batch, seed); tables and plots are regenerable
+    plus the run's fairness conditions — locked clock, batch, seed); tables and plots are regenerable
     **views** of it. It is written **per track** so LeWM and DINOv3 can be benchmarked in separate
     pod sessions without clobbering each other, and it decouples the expensive pod-only benchmark
     from the cheap render — the report re-renders **off-pod** from the saved results, which is how
     the separately-gated SR-per-precision is joined in without re-running the L40S benchmark. A
     single-track render omits the two cross-track ratio plots, which need both tracks.
   - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and the Python
-    planner is precision-invariant, the per-precision **wall-clock** delta is capped by the model's
-    share of the cycle. So the study also reports, per model: the **FP32 baseline per-component time
-    shares** and the derived **optimizable fraction** `p = (encoder+predictor)/total`, which sets
-    the Amdahl ceiling on end-to-end speedup `1/(1−p)`; and — per precision — **both** the
-    *model-only* speedup (planner treated as free) **and** the *realized* wall-clock speedup
-    (rollouts-in-budget), whose gap is the planner floor and should match the Amdahl prediction
-    `1/((1−p) + p/s)`. Reporting per-component *relative* speedup alone hides this dilution. That
-    the optimizable fraction is itself model-dependent (LeWM's single token is
-    planner/launch-latency-bound, DINO's 196-token grid is model-bound) is what explains why the
+    overhead (CEM planner + criterion + assembly + glue) is precision-invariant, the per-precision
+    **wall-clock** delta is capped by the model's share of the cycle. So the study also reports, per
+    model: the **FP32 baseline per-component time shares** (encoder + predictor + `overhead_ms`, the
+    last derived by subtraction from the measured cycle) and the derived **optimizable fraction**
+    `p = (encoder+predictor)/cycle`, which sets the Amdahl ceiling on end-to-end speedup `1/(1−p)`;
+    and — per precision — **both** the *model-only* speedup (overhead treated as free, from the
+    encode+predict component times) **and** the *realized* speedup (the measured FP32-vs-precision
+    **per-cycle latency ratio**), whose gap is the overhead floor and should match the Amdahl
+    prediction `1/((1−p) + p/s)`. Reporting per-component *relative* speedup alone
+    hides this dilution. That the optimizable fraction is itself model-dependent (LeWM's single token
+    is overhead/launch-latency-bound, DINO's 196-token grid is model-bound) is what explains why the
     same precision helps the two tracks differently — a result, not bookkeeping.
 - **QLoRA delta:** the task-quality metric re-run on a QLoRA-tuned DINOv3 backbone (backbone
   QLoRA-adapted, **predictor unfrozen and co-trained**), reported as a delta against the frozen

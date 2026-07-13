@@ -121,14 +121,16 @@ def _run_track(
             engines,
             encode_inputs=(obs,),
             predict_inputs=predict_inputs,
-            time_budget_s=cfg.time_budget_s,
+            n_iters=cfg.n_latency_iters,
             warmup=cfg.warmup,
         )
     assert set(result) == {
-        "latency_p50_ms",
-        "latency_p95_ms",
-        "rollouts_completed",
-        "throughput",
+        "per_cycle_p50_ms",
+        "per_cycle_p95_ms",
+        "encode_p50_ms",
+        "encode_p95_ms",
+        "predict_p50_ms",
+        "predict_p95_ms",
         "peak_mem_mb",
         "success_rate",
     }

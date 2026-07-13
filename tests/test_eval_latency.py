@@ -50,10 +50,23 @@ def test_per_step_call_is_noop_and_records_nothing():
 
 
 def test_empty_summary_is_none():
-    assert SolveLatencyRecorder(sync_cuda=False).summary() == {
-        "n_solves": 0,
-        "median_ms": None,
-    }
+    s = SolveLatencyRecorder(sync_cuda=False).summary()
+    assert s["n_solves"] == 0
+    assert s["median_ms"] is None and s["p50_ms"] is None and s["p95_ms"] is None
+    assert s["latencies_ms"] == []
+
+
+def test_summary_reports_percentiles_and_raw_latencies():
+    """The per-cycle headline is p50/p95 (SPEC §Interface Contracts); the raw per-solve list is
+    kept so src.report can truncate to a common min-n across tracks (equal-n)."""
+    cb = SolveLatencyRecorder(sync_cuda=False)
+    for _ in range(5):
+        _simulate_solve(cb)
+    s = cb.summary()
+    assert s["n_solves"] == 5
+    assert len(s["latencies_ms"]) == 5
+    assert s["p95_ms"] >= s["p50_ms"] >= 0.0
+    assert s["median_ms"] == s["p50_ms"]  # median == p50
 
 
 def test_registry_pop_returns_summary_and_clears():
