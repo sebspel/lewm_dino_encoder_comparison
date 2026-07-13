@@ -206,8 +206,8 @@ invocation, percentile timing, memory logging, profiler hooks, table runner).
 is TensorRT-optimized; the **CEM planner stays in Python**. **Latency is the headline** —
 three equal-n p50/p95 distributions (**per-cycle** headline, encode-step + predictor-step
 components); there is **no fixed-wall-clock rollout-count run** (owner decision — redundant
-with per-cycle latency under serial planning). GPU clocks locked for the run. **Every speed
-number is paired with an SR** (Phase-3 eval per precision). (See SPEC §Parity, §Interface
+with per-cycle latency under serial planning). GPU clocks not locked (SPEC §Parity). **Every
+speed number is paired with an SR** (Phase-3 eval per precision). (See SPEC §Parity, §Interface
 Contracts, `src/interfaces.py`.)
 
 **Prerequisite (checkpoint loader — established here, not assumed):**
@@ -342,13 +342,13 @@ Contracts, `src/interfaces.py`.)
   (fixed iters, warm-up dropped). **No fixed-wall-clock rollout-count run** (owner decision).
   **Peak GPU memory** is sampled during these latency runs via `cudaMemGetInfo`/nvidia-smi
   (**not** the torch allocator; TRT engine + context device allocations bypass it, SPEC
-  §Interface Contracts). **Lock GPU clocks** for the whole run (`nvidia-smi -pm 1` + `-lgc`,
-  `-rgc` on exit; record the locked clock, or flag throttling if the pod denies control).
+  §Interface Contracts). **GPU clocks are not locked** (SPEC §Parity — the comparison is a
+  ratio on shared back-to-back hardware state).
   **SR** comes from the Phase-3 eval driver re-run on the optimized model, slotted into
   `CEMSolver(model=...)` through the `get_cost`/`get_action` shim over the engine's
   `encode`/`predict` — so per-cycle latency and SR come from the **same solves**. The DINO shim
   reproduces `PreJEPA.rollout` (full `404` carry, per-step action-replace, proprio+pixels cost).
-  Same env/goal/precision/locked-clock across models; only the model differs.
+  Same env/goal/precision across models; only the model differs.
   → **instrument + labeling fixes (plumbing landed, pod-run + gated SR pending):**
   `src/benchmark.py` `peak_mem_mb` now samples **cudaMemGetInfo** (`torch.cuda.mem_get_info`,
   device-level used) per rollout, not `torch.cuda.max_memory_allocated` — so the TRT
@@ -363,8 +363,8 @@ Contracts, `src/interfaces.py`.)
   emits **encode-step + predictor-step** p50/p95 per precision (isolated engine loops, `n_latency_
   iters`, warm-up dropped) and samples **peak GPU memory** during them; **per-cycle** p50/p95 comes
   from `src/eval_latency.py`'s per-solve records (now full distribution + raw list) over the
-  `src/sr_eval.py` run, truncated to common min-n in `src/report.py` (equal-n). `src/study.py` locks
-  GPU clocks (`lock_gpu_clocks`/`reset_gpu_clocks`) and records the locked clock in the results meta.
+  `src/sr_eval.py` run, truncated to common min-n in `src/report.py` (equal-n). GPU clocks are
+  **not** locked (SPEC §Parity).
   `interfaces.BenchResult` carries the three latency distributions + peak mem (no rollouts/throughput).
   `tests/test_benchmark.py` + `tests/test_eval_latency.py`.
   → **owner-gated SR shim (DINO-WM) landed:** `src/sr_shim.py::DINOWMSRShim` subclasses
@@ -427,7 +427,7 @@ Contracts, `src/interfaces.py`.)
   §Speedup study — dilution disclosure).
   → **table runner (landed, pod-run pending):** `src/study.py` (`uv run python -m src.study
   [track=<lewm|dino>] [wandb=<eval overlay>]`) orchestrates the boxes above per track×precision —
-  locks GPU clocks, loads the engines `src.export` built
+  loads the engines `src.export` built
   (`engines/<track>/{encoder,predictor}.<prec>.plan`), benchmarks each built precision (component
   latency + peak mem), dumps `results.<track>.json`, and calls `src.report`. Missing engines →
   precision skipped (FP16-only fallback); per-cycle latency + SR left NaN for the gated eval-shim
@@ -456,7 +456,7 @@ Contracts, `src/interfaces.py`.)
     files exist under `$STABLEWM_HOME/reports/phase5/`.
   → **canonical per-track results JSON + decoupled render (landed):** `src/study.py`
     (`dump_track_results`) writes each track's raw benchmark + profile numbers plus the run's
-    fairness conditions (locked_clock, num_samples, seed, obs_shape) to `results.<track>.json`
+    fairness conditions (num_samples, seed, obs_shape) to `results.<track>.json`
     under `out_dir` **before** rendering — the canonical machine-readable result; tables/plots
     are regenerable views. **Per-track files** so lewm/dino benchmark in separate pod sessions
     without clobbering (CLAUDE.md §8). `src/report.py` gains `load_results` + a `from=<dir|file>`

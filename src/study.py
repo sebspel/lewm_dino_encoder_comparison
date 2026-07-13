@@ -14,7 +14,7 @@ hands the assembled bench dict to `src.report` for the headline tables + plots.
 latency distributions (encode-step + predict-step p50/p95, engine step loops) + peak memory; the
 HEADLINE **per-cycle** latency and the **SR** come from the separate, gated `src.sr_eval` run
 (same solves) and are joined off-pod by `src.report`. There is no fixed-wall-clock rollout-count
-run. GPU clocks are locked around the run so the numbers aren't thermal artifacts.
+run.
 
 The headline tables (`.txt`) + plots (`.png`) are persisted to `$STABLEWM_HOME/reports/phase5/`
 by default — the persistent network volume, so a completed study survives pod teardown (SPEC
@@ -32,8 +32,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -70,53 +68,14 @@ def engine_paths(
     )
 
 
-def lock_gpu_clocks() -> int | None:
-    """Best-effort GPU clock lock so latency + memory numbers aren't thermal artifacts
-    (SPEC §Parity — a fairness condition). Enables persistence mode and pins the graphics
-    clock to the max supported. Returns the locked clock (MHz), or None if the pod denies
-    clock control (a common unprivileged-container case) — then the caller records None and
-    the run proceeds unlocked (throttling would still show in `nvidia-smi dmon`). The owner may
-    prefer a lower *sustainable* clock; this pins the max as a reproducible default."""
-    if shutil.which("nvidia-smi") is None:
-        return None
-    try:
-        subprocess.run(["nvidia-smi", "-pm", "1"], check=True, capture_output=True)
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=clocks.max.graphics", "--format=csv,noheader,nounits"],
-            check=True, capture_output=True, text=True,
-        )
-        clock = int(out.stdout.strip().splitlines()[0])
-        subprocess.run(
-            ["nvidia-smi", "-lgc", f"{clock},{clock}"], check=True, capture_output=True
-        )
-        print(f"[study] locked GPU graphics clock to {clock} MHz")
-        return clock
-    except Exception as e:  # denied / unsupported — proceed unlocked, record None
-        print(
-            f"[study] GPU clock lock unavailable ({e}); proceeding unlocked "
-            "(throttling not prevented — check nvidia-smi dmon)"
-        )
-        return None
-
-
-def reset_gpu_clocks() -> None:
-    """Undo `lock_gpu_clocks` (`nvidia-smi -rgc`). Best-effort; safe if the lock never took."""
-    if shutil.which("nvidia-smi") is None:
-        return
-    try:
-        subprocess.run(["nvidia-smi", "-rgc"], check=True, capture_output=True)
-    except Exception:
-        pass
-
-
 def dump_track_results(
-    name: str, bench: dict, cfg: ExportConfig, out_dir: Path, locked_clock: int | None
+    name: str, bench: dict, cfg: ExportConfig, out_dir: Path
 ) -> Path:
     """Persist one track's canonical raw results to `results.<name>.json` — the machine-
-    readable benchmark numbers plus this run's fairness conditions (locked clock, batch, seed),
-    from which the tables/plots are regenerable views (`src.report from=<dir>`). Written PER
-    TRACK so lewm/dino can be benchmarked in separate pod sessions without one clobbering the
-    other (CLAUDE.md §8, SPEC §Headline-artifact durability). NaN latencies/SRs serialize as the
+    readable benchmark numbers plus this run's fairness conditions (batch, seed), from which
+    the tables/plots are regenerable views (`src.report from=<dir>`). Written PER TRACK so
+    lewm/dino can be benchmarked in separate pod sessions without one clobbering the other
+    (CLAUDE.md §8, SPEC §Headline-artifact durability). NaN latencies/SRs serialize as the
     `NaN` token (Python's json round-trips them; `src.report.load_results` reads them back)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"results.{name}.json"
@@ -124,7 +83,6 @@ def dump_track_results(
         "meta": {
             "track": name,
             "precisions_built": list(bench),
-            "locked_clock_mhz": locked_clock,
             "n_latency_iters": cfg.n_latency_iters,
             "warmup": cfg.warmup,
             "num_samples": CEM_NUM_SAMPLES,
@@ -195,17 +153,13 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     bench_all: dict = {}
-    locked_clock = lock_gpu_clocks()
-    try:
-        for track in tracks:
-            name, bench = run_track(track, cfg, device)
-            bench_all[name] = bench
-            # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
-            # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
-            # can re-render/join per-cycle latency + SR off-pod without re-running this benchmark.
-            dump_track_results(name, bench, cfg, out_dir, locked_clock)
-    finally:
-        reset_gpu_clocks()
+    for track in tracks:
+        name, bench = run_track(track, cfg, device)
+        bench_all[name] = bench
+        # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
+        # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
+        # can re-render/join per-cycle latency + SR off-pod without re-running this benchmark.
+        dump_track_results(name, bench, cfg, out_dir)
 
     run = None
     if wandb_experiment is not None:

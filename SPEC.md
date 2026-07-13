@@ -187,12 +187,11 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
   measured in equal-n fixed-iteration loops (§Interface
   Contracts): the headline is **per-cycle p50/p95** (full per-decision planning latency), with
-  **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are locked** for the
-  whole benchmark (`nvidia-smi -pm 1` + `-lgc` at a sustainable clock, `-lmc` if supported) so
-  rollout counts and tail latencies are not thermal artifacts; the lock is applied **before**
-  warm-up, reset with `-rgc` in a trap on exit, and the locked clock is recorded in the per-track
-  results as a fairness condition (if the pod denies clock control, clocks/throttle-reasons are
-  sampled and any throttling is flagged instead). Training batch size is held equal across tracks
+  **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are not locked** —
+  the study runs both tracks back-to-back at the same precision on the same L40S with warm-up
+  dropped, and the LeWM-vs-DINOv3 comparison is a *ratio* on that shared hardware state, so any
+  residual boost/thermal drift applies to both tracks alike rather than to one. Training batch
+  size is held equal across tracks
   (128, LeWM's paper value) and does **not** carry into inference. **Every speed figure is reported
   with its SR**, and FP16/INT8 results quote **SR and latency degradation relative to FP32** — a
   precision that is faster but degrades task quality must be visible.
@@ -216,7 +215,7 @@ touching:
   matching.
 - QLoRA targeting (which DINOv3 modules, rank, what stays frozen — the predictor is unfrozen and
   co-trained, so only backbone targeting is open).
-- The benchmark fairness conditions (matched precision, locked GPU clock, env/goal).
+- The benchmark fairness conditions (matched precision, env/goal).
 - The model adapter dims (the Constants above).
 - Any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity.
 
@@ -271,7 +270,7 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     are persisted to the persistent network volume, the same durability contract as checkpoints and
     engines, so a completed study survives pod teardown. W&B logging is **additive, never the sole
     copy**. The **canonical** artifact is the raw **per-track results** (benchmark + profile numbers
-    plus the run's fairness conditions — locked clock, batch, seed); tables and plots are regenerable
+    plus the run's fairness conditions — batch, seed); tables and plots are regenerable
     **views** of it. It is written **per track** so LeWM and DINOv3 can be benchmarked in separate
     pod sessions without clobbering each other, and it decouples the expensive pod-only benchmark
     from the cheap render — the report re-renders **off-pod** from the saved results, which is how

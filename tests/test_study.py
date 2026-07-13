@@ -63,7 +63,7 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
         "lewm", cfg, torch.device("cpu"), engine_root=tmp_path
     )
 
-    path = study.dump_track_results(name, bench, cfg, tmp_path, locked_clock=1980)
+    path = study.dump_track_results(name, bench, cfg, tmp_path)
     assert path == tmp_path / "results.lewm.json"
 
     b = report.load_results([path])
@@ -71,6 +71,5 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
 
     # meta records the run's fairness conditions so the numbers are self-describing later
     meta = json.loads(path.read_text())["meta"]
-    assert meta["locked_clock_mhz"] == 1980
     assert meta["num_samples"] == study.CEM_NUM_SAMPLES
     assert meta["n_latency_iters"] == 2
