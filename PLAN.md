@@ -343,7 +343,11 @@ Contracts, `src/interfaces.py`.)
   **Peak GPU memory** is sampled during these latency runs via `cudaMemGetInfo`/nvidia-smi
   (**not** the torch allocator; TRT engine + context device allocations bypass it, SPEC
   §Interface Contracts). **GPU clocks are not locked** (SPEC §Parity — the comparison is a
-  ratio on shared back-to-back hardware state).
+  ratio on shared back-to-back hardware state); a passive `nvidia-smi dmon` observer
+  (`src/gpu_clocks.py::log_gpu`) brackets each timed engine run — both the `src.benchmark`
+  component loops and the `src.sr_eval` per-cycle run — and logs per-sample clock/power/temp/
+  util/mem to `$STABLEWM_HOME/reports/phase5/gpu_logs/<track>.<precision>.<phase>.dmon.log` so
+  the unlocked hardware state is recorded, not assumed.
   **SR** comes from the Phase-3 eval driver re-run on the optimized model, slotted into
   `CEMSolver(model=...)` through the `get_cost`/`get_action` shim over the engine's
   `encode`/`predict` — so per-cycle latency and SR come from the **same solves**. The DINO shim
@@ -509,6 +513,9 @@ W&B; adapter target modules confirmed real.
   overhead-by-subtraction decomposition), `src/qlora.py`, `src/smoke.py` — the owned layer
   (Phases 4–6).
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
+- `src/gpu_clocks.py` — owned passive `nvidia-smi dmon` GPU-telemetry observer
+  (clock/power/temp/util/mem) bracketing each timed engine run; logs to
+  `$STABLEWM_HOME/reports/phase5/gpu_logs/` (Phase 5, SPEC §Parity).
 - `src/eval_latency.py` — owned observation-only CEM-solve-latency callback (`CEMSolver.Callback`
   subclass, injected via `cfg.solver.callbacks`; Phase 3).
 - `src/eval.py` — owned thin Phase-3 eval driver: runs the byte-unmodified `eval_wm.run`,

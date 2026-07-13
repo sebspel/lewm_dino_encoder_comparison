@@ -41,6 +41,7 @@ import torch
 from src.interfaces import EnginePaths, ExportConfig, CEM_NUM_SAMPLES
 from src.export import _ENGINE_ROOT
 from src.benchmark import benchmark
+from src.gpu_clocks import log_gpu
 from src.precision_match import _build_adapter, example_inputs
 from src.report import report
 
@@ -101,6 +102,7 @@ def run_track(
     cfg: ExportConfig,
     device: torch.device,
     engine_root: Path = _ENGINE_ROOT,
+    gpu_log_dir: Path | None = None,
 ) -> tuple[str, dict]:
     """Benchmark one track's every built precision. Returns ``(name, bench_by_precision)`` in
     the shape `src.report` consumes.
@@ -108,6 +110,10 @@ def run_track(
     The engine step loops are timed at the CYCLE's real batches so the report's runtime-weighted
     decomposition is honest: **encode** once at batch 1 (single obs), **predict** at the candidate
     fan-out `CEM_NUM_SAMPLES` (the batch the CEM evaluates all candidates in per horizon step).
+
+    Each precision's benchmark run is bracketed by an `nvidia-smi dmon` telemetry observer
+    (`gpu_log_dir/<track>.<precision>.benchmark.dmon.log`) so the unlocked GPU clock/power/temp
+    state during the timed loops is recorded, not merely assumed (SPEC §Parity).
     """
     adapter, name = _build_adapter(track)
     adapter.to(device)
@@ -124,9 +130,10 @@ def run_track(
                 f"(build with `src.export model={name} precision={precision}`)"
             )
             continue
-        bench[precision] = benchmark(
-            engines, encode_inputs, predict_inputs, cfg.n_latency_iters, cfg.warmup
-        )
+        with log_gpu(f"{name}.{precision}.benchmark", gpu_log_dir):
+            bench[precision] = benchmark(
+                engines, encode_inputs, predict_inputs, cfg.n_latency_iters, cfg.warmup
+            )
     return name, bench
 
 
@@ -154,7 +161,7 @@ def main() -> None:
 
     bench_all: dict = {}
     for track in tracks:
-        name, bench = run_track(track, cfg, device)
+        name, bench = run_track(track, cfg, device, gpu_log_dir=out_dir / "gpu_logs")
         bench_all[name] = bench
         # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
         # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`

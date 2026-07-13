@@ -190,7 +190,14 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are not locked** —
   the study runs both tracks back-to-back at the same precision on the same L40S with warm-up
   dropped, and the LeWM-vs-DINOv3 comparison is a *ratio* on that shared hardware state, so any
-  residual boost/thermal drift applies to both tracks alike rather than to one. Training batch
+  residual boost/thermal drift applies to both tracks alike rather than to one. To make that
+  shared-state assumption **verifiable rather than asserted**, an `nvidia-smi dmon` observer logs
+  per-sample GPU telemetry (SM/mem **clock (MHz)**, **power (W)**, **temperature (C)**, utilization,
+  memory) alongside every timed engine run — both the isolated component-latency loops and the
+  per-cycle eval-shim run. Its logs persist to the network volume
+  (`$STABLEWM_HOME/reports/phase5/gpu_logs/`), the same durability contract as the headline
+  artifacts. The observer is passive (a separate `nvidia-smi` subprocess, like the `cudaMemGetInfo`
+  peak-mem sampling) and does not touch seeds, samples, or the plan. Training batch
   size is held equal across tracks
   (128, LeWM's paper value) and does **not** carry into inference. **Every speed figure is reported
   with its SR**, and FP16/INT8 results quote **SR and latency degradation relative to FP32** — a
@@ -231,7 +238,9 @@ touching:
 - The DINOv3 encoder config (model string; dims read from config).
 - Export-script and benchmark-harness *plumbing* (trace call, Model-Optimizer PTQ invocation
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory
-  logging, table/plot runners).
+  logging, the passive `nvidia-smi dmon` GPU-telemetry logging around each timed engine run
+  (clock/power/temp/util/mem, a separate observer subprocess that never perturbs the timed loop or
+  the plan), table/plot runners).
 - The QLoRA training-loop wiring (owner specifies the targeting config).
 - The tracer-bullet smoke script.
 

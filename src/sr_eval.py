@@ -36,6 +36,7 @@ from unittest.mock import patch
 
 from src import wandb_log
 from src.eval import _compose_eval_cfg, _parse_success_rate
+from src.gpu_clocks import log_gpu
 
 # The eval overlay name -> track. The overlay sets `policy=<track>/weights_epoch_10.pt`; the
 # track selects the SR shim class and the engine directory (`engines/<track>/`).
@@ -179,7 +180,11 @@ def main():
                 )
                 continue
             shim = _build_shim(track, model, engines)
-            sr, per_cycle_ms = _eval_one(hydra_argv, shim)
+            # Bracket the per-cycle eval-shim run with the dmon telemetry observer so the
+            # unlocked GPU clock/power/temp state during the headline per-cycle solves is
+            # recorded, not merely assumed (SPEC §Parity).
+            with log_gpu(f"{track}.{precision}.sr_eval", out_dir / "gpu_logs"):
+                sr, per_cycle_ms = _eval_one(hydra_argv, shim)
             # Carry the RAW per-solve latencies (not pre-reduced percentiles) so src.report
             # truncates to the common min-n across tracks before taking p50/p95 (equal-n).
             sr_by_precision[precision] = {
