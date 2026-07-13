@@ -23,7 +23,8 @@ by default — the persistent network volume, so a completed study survives pod 
 
 Engines are NOT built here — run `uv run python -m src.export model=<t> precision=<p>` first
 (after the precision-match gate). A precision whose
-`engines/<track>/{encoder,predictor}.<p>.plan` is missing is skipped with a note, which is
+`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<p>.plan` (repo-local `engines/` fallback
+off-pod) is missing is skipped with a note, which is
 exactly the FP16-only fallback (SPEC §Caps / PLAN §Phase-5 cap). Runs on the L40S (benchmark
 needs CUDA / TensorRT).
 """
@@ -39,7 +40,7 @@ from pathlib import Path
 import torch
 
 from src.interfaces import EnginePaths, ExportConfig, CEM_NUM_SAMPLES
-from src.export import _ENGINE_ROOT
+from src.export import engine_root as default_engine_root
 from src.benchmark import benchmark
 from src.gpu_clocks import log_gpu
 from src.precision_match import _build_adapter, example_inputs
@@ -58,11 +59,13 @@ def default_out_dir() -> Path:
 
 
 def engine_paths(
-    track: str, precision: str, engine_root: Path = _ENGINE_ROOT
+    track: str, precision: str, engine_root: Path | None = None
 ) -> EnginePaths:
     """Where `src.export` writes a track's two engines for one precision
-    (`engines/<track>/{encoder,predictor}.<precision>.plan`)."""
-    d = Path(engine_root) / track
+    (`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<precision>.plan` by default;
+    repo-local `engines/` fallback off-pod)."""
+    root = engine_root if engine_root is not None else default_engine_root()
+    d = Path(root) / track
     return EnginePaths(
         encoder=d / f"encoder.{precision}.plan",
         predictor=d / f"predictor.{precision}.plan",
@@ -101,7 +104,7 @@ def run_track(
     track: str,
     cfg: ExportConfig,
     device: torch.device,
-    engine_root: Path = _ENGINE_ROOT,
+    engine_root: Path | None = None,
     gpu_log_dir: Path | None = None,
 ) -> tuple[str, dict]:
     """Benchmark one track's every built precision. Returns ``(name, bench_by_precision)`` in
@@ -115,6 +118,7 @@ def run_track(
     (`gpu_log_dir/<track>.<precision>.benchmark.dmon.log`) so the unlocked GPU clock/power/temp
     state during the timed loops is recorded, not merely assumed (SPEC §Parity).
     """
+    root = engine_root if engine_root is not None else default_engine_root()
     adapter, name = _build_adapter(track)
     adapter.to(device)
     encode_inputs, _ = example_inputs(adapter, cfg, batch=1, device=device)
@@ -122,11 +126,11 @@ def run_track(
 
     bench: dict = {}
     for precision in cfg.precisions:
-        engines = engine_paths(track, precision, engine_root)
+        engines = engine_paths(track, precision, root)
         if not (engines["encoder"].exists() and engines["predictor"].exists()):
             print(
                 f"[study:{name}] {precision}: engines missing under "
-                f"{Path(engine_root) / name} — skipped "
+                f"{Path(root) / name} — skipped "
                 f"(build with `src.export model={name} precision={precision}`)"
             )
             continue

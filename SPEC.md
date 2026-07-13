@@ -58,7 +58,11 @@ contribution is the optimization + QLoRA layer above a trained checkpoint.
 - **Single machine: L40S** — train and benchmark on the same instance (same hardware class as
   the LeWM paper, so speed numbers are comparable).
 - **TensorRT engines are architecture-specific and disposable** — regenerated on the L40S,
-  never committed.
+  gitignored, never committed. They are **saved to and loaded from the network volume by
+  default** (`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<precision>.plan`; repo-local
+  `engines/` fallback only off-pod where `STABLEWM_HOME` is unset), so a pod session's built
+  engines survive teardown and are not rebuilt each session. Living on the volume does not make
+  them durable *artifacts* — they stay regenerable and are re-derived if the L40S class changes.
 - **Durable artifacts persist on the persistent network volume, never in git:** datasets,
   checkpoints, exports, and the Phase-5 headline reports all live under the persistent root
   (`STABLEWM_HOME`, e.g. `$STABLEWM_HOME/reports/`). The root must point at the network volume

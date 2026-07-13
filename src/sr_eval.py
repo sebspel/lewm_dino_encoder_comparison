@@ -205,7 +205,8 @@ def main():
     if not sr_by_precision:
         raise SystemExit(
             f"[sr-eval:{track}] no engines found for any of {precisions} under "
-            f"engines/{track}/ — run `src.export model={track} precision=<p>` first"
+            f"{engine_paths(track, 'fp32')['encoder'].parent} — "
+            f"run `src.export model={track} precision=<p>` first"
         )
 
     sr_path = out_dir / "sr.json"

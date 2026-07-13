@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import os
 import sys
 from pathlib import Path
 
@@ -413,9 +414,14 @@ def export(
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
 
 
-# Engines are large + device-specific, so they land in a repo-local, gitignored dir
-# (`*.plan`/`*.onnx` are ignored) — regenerable on the L40S, one subdir per track.
-_ENGINE_ROOT = Path("engines")
+def engine_root() -> Path:
+    """Where the TensorRT engines are saved + loaded by default: `$STABLEWM_HOME/engines/` — the
+    persistent network volume, so a pod session's built engines survive teardown and are not
+    rebuilt each session (SPEC §Execution Environment). Falls back to the repo-local `engines/`
+    only off-pod where `STABLEWM_HOME` is unset. Engines stay large + device-specific + gitignored
+    (`*.plan`/`*.onnx` ignored) either way — regenerable on the L40S, one subdir per track."""
+    home = os.environ.get("STABLEWM_HOME")
+    return Path(home) / "engines" if home else Path("engines")
 
 
 def main() -> None:
@@ -457,7 +463,7 @@ def main() -> None:
         precision=precision,
         encode_inputs=encode_inputs,
         predict_inputs=predict_inputs,
-        engine_dir=_ENGINE_ROOT / name,
+        engine_dir=engine_root() / name,
         calib_loader=calib_loader,
     )
     for method, path in engines.items():
