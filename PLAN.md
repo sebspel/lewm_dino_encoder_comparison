@@ -365,7 +365,7 @@ Contracts, `src/interfaces.py`.)
   **removed** from `src/benchmark.py` — `rollouts_completed`/`throughput` and `time_budget_s`
   (`ExportConfig`/`Benchmark`) dropped (owner decision: headline is latency). `src/benchmark.py`
   emits **encode-step + predictor-step** p50/p95 per precision (isolated engine loops, `n_latency_
-  iters`, warm-up dropped) and samples **peak GPU memory** during them; **per-cycle** p50/p95 comes
+  iters=100` timed after `warmup=10` dropped) and samples **peak GPU memory** during them; **per-cycle** p50/p95 comes
   from `src/eval_latency.py`'s per-solve records (now full distribution + raw list) over the
   `src/sr_eval.py` run, truncated to common min-n in `src/report.py` (equal-n). GPU clocks are
   **not** locked (SPEC §Parity).

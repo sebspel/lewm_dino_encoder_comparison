@@ -125,8 +125,8 @@ requirements those signatures must satisfy; it does not restate the signatures.
   exposes the LeWM-vs-DINOv3 encoder token-count asymmetry (wall-clock-diluted in the cycle because
   encode is cached and runs ~twice, so it does **not** dominate the headline); (3) **predictor-step**
   p50/p95 — a component: quantization's kernel target. Any unqualified "p50/p95 latency" means
-  **predictor-step**. Percentiles are harvested from **fixed-iteration** loops (fixed count, warm-up
-  dropped) — so n is equal across tracks and the tail is not boundary-censored (there is no
+  **predictor-step**. Percentiles are harvested from **fixed-iteration** loops (100 timed iters per
+  step, 10 warm-up iters dropped) — so n is equal across tracks and the tail is not boundary-censored (there is no
   wall-clock-limited run). encode-/predict-step ride isolated
   per-precision engine loops (timing is data-independent); per-cycle rides the observation-only
   CEM-solve-latency callback over the SR eval-shim run, so **per-cycle latency and SR come from the

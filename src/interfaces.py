@@ -143,6 +143,6 @@ class ExportConfig:
     action_dim: int = MODEL_ACTION_DIM  # model-facing action fed to predict (frameskip pack)
     proprio_dim: int = DINO_PROPRIO_DIM  # DINO-WM proprio extra fed to predict
     precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
-    warmup: int = 5
-    n_latency_iters: int = 200  # fixed iters per engine-step loop (equal-n p50/p95)
+    warmup: int = 10  # warm-up iters dropped before timing each engine-step loop
+    n_latency_iters: int = 100  # fixed timed iters per engine-step loop (equal-n p50/p95)
     seed: int = 0
