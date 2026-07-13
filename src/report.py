@@ -369,7 +369,10 @@ def _finalize_per_cycle(bench: dict) -> None:
             continue
         n = min(len(v) for v in lat_by_track.values())
         for t, lat in lat_by_track.items():
-            sample = sorted(lat)[:n]
+            # First n in TEMPORAL order — a representative chronological subset; NOT sorted()[:n]
+            # (the n smallest), which would censor the upper tail (`_percentile_ms` sorts
+            # internally via torch.quantile, so the input order does not matter for the value).
+            sample = lat[:n]
             bench[t][prec]["per_cycle_p50_ms"] = _percentile_ms(sample, 0.50)
             bench[t][prec]["per_cycle_p95_ms"] = _percentile_ms(sample, 0.95)
 

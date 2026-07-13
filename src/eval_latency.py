@@ -96,14 +96,18 @@ class SolveLatencyRecorder(Callback):
         before taking the percentiles (equal-n). All are ``None`` / ``[]`` on an empty run, so
         the caller can surface it instead of dividing by zero.
         """
-        lat_ms = sorted(x * 1e3 for x in self.latencies_s)
-        n = len(lat_ms)
+        raw_ms = [x * 1e3 for x in self.latencies_s]  # TEMPORAL (recording) order
+        srt = sorted(raw_ms)
+        n = len(raw_ms)
         return {
             "n_solves": n,
-            "median_ms": median(lat_ms) if n else None,
-            "p50_ms": _percentile(lat_ms, 50) if n else None,
-            "p95_ms": _percentile(lat_ms, 95) if n else None,
-            "latencies_ms": lat_ms,
+            "median_ms": median(srt) if n else None,
+            "p50_ms": _percentile(srt, 50) if n else None,
+            "p95_ms": _percentile(srt, 95) if n else None,
+            # RAW, in temporal order — src.report truncates to the common min-n across tracks by
+            # taking the first n (a representative chronological subset), NOT the n smallest,
+            # which would drop the upper tail (equal-n, SPEC §Interface Contracts).
+            "latencies_ms": raw_ms,
         }
 
 

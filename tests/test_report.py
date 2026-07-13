@@ -146,6 +146,23 @@ def test_join_eval_fills_sr_and_equal_n_per_cycle(tmp_path):
     assert not math.isnan(bench["dino"]["fp32"]["per_cycle_p95_ms"])
 
 
+def test_equal_n_truncation_is_temporal_not_smallest(tmp_path):
+    """Equal-n truncation keeps the first n in TEMPORAL order (a representative subset), NOT the
+    n smallest — otherwise the upper tail is censored and p95 deflated (SPEC §Interface Contracts)."""
+    bench = {
+        "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
+        "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
+    }
+    overrides = {
+        # lewm: a large latency arrives FIRST (temporal), then small ones; min-n across tracks = 3
+        "lewm": {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": [100.0, 1.0, 2.0, 3.0, 4.0]}},
+        "dino": {"fp32": {"success_rate": 88.0, "per_cycle_latencies_ms": [10.0, 11.0, 12.0]}},
+    }
+    report.report(bench, tmp_path, sr_overrides=overrides)
+    # temporal first-3 = [100,1,2] -> p95 near 100; sorted()[:3] = [1,2,3] would give ~3
+    assert bench["lewm"]["fp32"]["per_cycle_p95_ms"] > 50.0
+
+
 def test_nan_sr_is_skipped_not_crashed(tmp_path):
     bench = _synthetic()
     bench["lewm"]["fp32"]["success_rate"] = math.nan
