@@ -321,6 +321,15 @@ Contracts, `src/interfaces.py`.)
   ~3–4, per-tensor INT8 vs DINOv3 outlier channels) → **INT8 is the FP16-only-fallback
   candidate**, SR-per-precision is the arbiter (Phase-5 benchmark). All rows kept for the
   FP32→FP16→INT8 delta + speed-vs-SR study.
+  → **gap found (2026-07-14):** `_MATCH_BATCHES` vary the batch axis but always at the traced
+  hist, so the gate never caught the fixed-`HS` predict engine failing on the `T < HS` windows the
+  platform rollout feeds (`n_obs=1` → windows 1,2,3,…). **Fixed (2026-07-14):** `precision_match`
+  now adds off-nominal history rows `_MATCH_HISTS=(1,2)` that route the engines through the shim's
+  hist-adapt wrappers and compare against the native-`T` PyTorch predict (a `hist` table column);
+  `sr_cost_parity*` now also run at `n_obs=1` (the growing sub-`HS` windows). Both tracks covered
+  (both predictors owner-confirmed causal) — no per-track gating. Predict-side fix landed under the
+  SR shim below (SPEC §Interface Contracts — fixed-history predict engine, §Requirements —
+  engine-fidelity gate). 🔴 owner-gated (per-step predictor boundary).
 - [ ] 🖥️ **Per-component decomposition** — encoder, predictor, and **overhead** per planning
   cycle, both models × precisions, **derived in `src/report.py`** (no standalone profiler): the
   benchmark's isolated engine-step p50s × the CEM per-cycle call counts give the enc/pred cycle
@@ -386,6 +395,16 @@ Contracts, `src/interfaces.py`.)
   callable with `_hist_adapt` (repeat-pad the frame axis up to the traced hist, encode, slice
   back) — exact because the encoder is temporally independent (per-frame), keeping the
   precision-match-gated engine byte-for-byte; `tests/test_sr_shim.py` covers it off-pod.
+  → **static-hist PREDICT (landed, 2026-07-14 — causality owner-confirmed for BOTH tracks):** DINO
+  `rollout` calls `predict(z[:, -HS:])`, which at `n_obs=1` is a `T<HS` window into the fixed-`HS`
+  predict engine — `build_engine_fns`'s `predict_fn` had NO hist-adapt (unlike the encoder), so it
+  hit the same negative-dim bind crash as LeWM (below). Fix = the shared predictor analogue of
+  `_hist_adapt` (`_predict_hist_adapt`: right-pad frame axis to `HS`, run, slice `[:, :T]`), applied
+  to both `build_engine_fns` (DINO, 1-input) and `build_lewm_engine_fns` (LeWM, 2-input) — exact
+  because both predictors are causal with prefix pos-embeddings (owner-confirmed) and the tail-pad
+  outputs are discarded. **No per-track gating** (was previously pending a DINO causality check;
+  now confirmed, so DINO gets the identical fix, not a torch-fallback / dynamic-hist re-export).
+  🔴 owner-gated (SPEC §Interface Contracts — fixed-history predict engine).
   → **LeWM encode+predict shim landed (engine-backed, Design A):** `src/sr_shim.py::LeWMSRShim`
   subclasses `LeWM` and routes BOTH `encode` and `predict` through injected engine/adapter
   callables, so the SR reflects the same quantized encoder+predictor engines the benchmark times
@@ -405,6 +424,19 @@ Contracts, `src/interfaces.py`.)
   for B>1 — the checkout removed these methods). Per-frame boundary owner-signed-off 2026-07-11
   (`src/fidelity.py::lewm_action_encoder_per_frame`); the LeWM predict engine + adapter-fidelity
   gate can now build.
+  → **static-hist PREDICT fix (landed, 2026-07-14 — had crashed the `sr_eval` lewm run):** the LeWM
+  predict engine traces a fixed history axis (`HS=3`) but inherited `LeWM.rollout`
+  (`lewm.py:96-100`) calls `predict` with a growing window (`min(n_obs,HS)→HS`; `n_obs=1` at eval →
+  1,2,3,…), so `build_lewm_engine_fns.predict_fn` bound a `T<HS` window and crashed (`torch.empty`
+  negative dim `[-1,3,192]` in `trt_runtime._bind_outputs`). Fixed: the two-input predictor callable
+  is wrapped in `_predict_hist_adapt` (right-pad emb+RAW-act to `HS`, run, slice `[:, :T]`) — exact
+  by causal-attn + prefix pos-embedding + discarded tail-pad (`num_frames=HS=3`, so windows never
+  exceed `HS`). Same helper as DINO (above) — one fix, both tracks. `precision_match` gained the
+  `T∈{1,2}` variable-window rows (`_MATCH_HISTS`, routed through the shim's hist-adapt) and
+  `sr_cost_parity_lewm` runs at `n_obs=1` too (the fixed-`HS` gates missed both); `tests/
+  test_sr_shim.py` covers `_predict_hist_adapt` off-pod. Engine byte-unchanged, no re-export.
+  🔴 owner-gated (per-step predictor boundary; SPEC §Interface Contracts — fixed-history predict
+  engine).
   → **SR-per-precision eval driver landed (plumbing, pod-run pending):** `src/sr_eval.py`
   (`uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
   [precision=fp32,fp16,int8] [out=<dir>]`) re-runs the byte-unmodified Phase-3 eval

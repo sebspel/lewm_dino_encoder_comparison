@@ -154,6 +154,32 @@ requirements those signatures must satisfy; it does not restate the signatures.
   action encoder may live inside the compiled per-step engine. This is an **owner-gated
   silent-failure boundary**: a temporal (kernel > 1) action-encoder config would make the per-step
   boundary wrong with no error, so it is guarded by a runtime assertion on the real checkpoint.
+- **The per-step `predict` engine traces a FIXED history axis, but the platform `rollout` feeds a
+  GROWING history window.** Unlike the action encoder, the predictor *does* mix across the
+  macro-step (history) axis, and the export traces only a dynamic batch axis with the history axis
+  frozen at `HS` (= `predictor.num_frames` = 3). The platform rollout, however, hands `predict` a
+  window that grows `min(n_obs, HS) → HS` — with `n_obs = 1` at eval the lengths are 1, 2, 3, 3, …
+  — so the first steps give the fixed-`HS` engine a `T < HS` window it cannot bind (a negative-dim
+  output; the hist mismatch surfaces loudly at bind time, not as a wrong number). The shim serves a
+  `T < HS` window by **right-padding the history axis up to `HS`, running the engine, and slicing
+  the first `T` frames back** — the predictor analogue of the encoder's static-hist repeat-pad, and
+  the documented TensorRT best practice (static sequence axis + dynamic batch) that keeps the
+  precision-match-gated engine byte-for-byte (no re-export / re-quantize). This is **exact only
+  under a model-specific mask-free-padding exception**: it holds iff the predictor is **causal**
+  with **prefix positional embeddings** and the padded (tail) frames' outputs are discarded, so no
+  real read position ever attends a pad frame. (The general case — right-padding a causal
+  transformer — *does* need an attention mask; this one does not, precisely because the pad sits
+  after every position we read.) Because that exactness is a silent-failure assumption, the
+  boundary is **owner-gated** and must be **proven by a variable-window (`T ∈ {1, 2}`)
+  engine-vs-torch parity check**: the fixed-`HS` precision-match and SR-cost-parity gates never
+  exercise `T < HS`, which is why the mismatch passed every gate yet crashed the SR run. **Both
+  tracks' predictors are owner-confirmed causal with prefix positional embeddings, so the identical
+  right-pad/slice fix applies to LeWM and DINO-WM alike — there is no per-track gating.** DINO-WM's
+  predict engine has the same fixed-`HS`/variable-window structure (`rollout` calls
+  `predict(z[:, -HS:])`); the fix is applied to it exactly as to LeWM, guarded by the same
+  variable-window parity check. (Were a predictor ever *not* causal, the exception would not hold
+  and the transient `T < HS` steps would fall back to the torch predictor or a dynamic-hist
+  re-export — not the case here.)
 - **SR-per-precision re-runs the platform eval on the optimized model.** The CEM solver calls the
   world model via `get_cost`/`get_action`, not `encode`/`predict`. So to produce the SR that pairs
   with each precision's speed number, the exported adapter is re-wrapped in a thin **Python** shim
@@ -271,7 +297,10 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   precision-matched against the PyTorch reference on the **real checkpoints** before any
   profiling/benchmark builds on them (INT8 after its Q/DQ graph is built from the calibration set).
   Drift is measured and reported only; the pass/fail is an **owner sign-off on the measured drift
-  table** — deliberately **not** coded into a tolerance object or automated gate.
+  table** — deliberately **not** coded into a tolerance object or automated gate. The match must
+  exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
+  the traced `HS`): a fixed-`HS`-only check passes a hist-mismatched predict engine (SPEC
+  §Interface Contracts — fixed-history predict engine).
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8
   (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR

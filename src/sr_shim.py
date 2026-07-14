@@ -238,30 +238,81 @@ def _hist_adapt(encode: EncodeFn, enc_hist: int) -> EncodeFn:
     return adapted
 
 
+def _predict_hist_adapt(predict: Callable[..., Tensor], pred_hist: int) -> Callable[..., Tensor]:
+    """Make a fixed-hist PREDICTOR callable ``(B, T, …) -> (B, T, …)`` T-agnostic — the
+    predictor analogue of ``_hist_adapt`` (and general over 1+ inputs sharing the frame axis:
+    DINO's single ``404`` embedding; LeWM's ``(emb, RAW action)``).
+
+    The exported predictor engine traces a **static hist (frame) axis** (``ExportConfig.hist``
+    = ``HS``); only the batch axis is dynamic. But the inherited ``rollout`` feeds ``predict`` a
+    window that GROWS ``min(n_obs, HS) -> HS`` (``predict(z[:, -HS:])``; at eval ``n_obs = 1`` the
+    windows are ``1, 2, 3, 3, …``), so the first steps hand the engine a ``T < HS`` window it
+    cannot bind (a negative-dim TensorRT output). A ``T < HS`` call is served by **right-padding
+    the frame axis up to ``HS``, running the engine, and slicing the first ``T`` frames back**.
+
+    Unlike the encoder (temporally independent), the predictor **does** mix across the frame
+    axis, so this is exact only under a **model-specific mask-free-padding exception**: it holds
+    iff the predictor is **causal** (frame ``i`` reads only frames ``<= i``) with **prefix
+    positional embeddings** and the padded (tail) frames' outputs are discarded — then no real
+    read frame ever attends a pad frame and every real frame keeps its positional embedding, so
+    frames ``0..T-1`` are byte-identical with or without the pad. (The general case — padding a
+    causal transformer — needs an attention mask; this one does not, because the pad sits AFTER
+    every frame we read.) **Both** predictors are owner-confirmed causal with prefix positional
+    embeddings, so the identical fix applies to LeWM and DINO alike — no per-track gating. The
+    pad content is therefore immaterial; a repeat-pad of the last frame (the encoder idiom) is
+    used to stay NaN-free. Keeps the precision-match-gated engine byte-for-byte (no re-export).
+
+    ``T > HS`` cannot occur (the rollout caps the window at ``HS``) and is a loud error. Because
+    the exactness is a silent-failure assumption, it is proven at the off-nominal windows
+    (``T in {1, 2}``) by ``src.precision_match`` (engine-vs-torch) — the fixed-``HS`` gates never
+    exercised ``T < HS``, which is why the mismatch passed every gate yet crashed the SR run."""
+
+    def adapted(*inputs: Tensor) -> Tensor:
+        t = inputs[0].shape[1]
+        if t == pred_hist:
+            return predict(*inputs)
+        if t > pred_hist:
+            raise ValueError(
+                f"predict hist {t} > engine hist {pred_hist}: the static-hist predictor engine "
+                "cannot serve more frames than it was traced for (re-export with a larger hist)"
+            )
+
+        def pad(x: Tensor) -> Tensor:
+            tail = x[:, -1:].repeat(1, pred_hist - t, *([1] * (x.ndim - 2)))
+            return torch.cat([x, tail], dim=1)
+
+        return predict(*(pad(x) for x in inputs))[:, :t]
+
+    return adapted
+
+
 def build_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, PredictFn]:
     """Wrap the encoder + predictor engines as ``encode`` / ``predict`` callables.
 
     Pod-only: ``EngineRunner`` lazy-imports ``tensorrt`` and allocates CUDA buffers, so this
     is imported lazily to keep ``src.sr_shim`` importable off-pod (tests use the adapter path).
 
-    Encoder hist axis: the engine traces a dynamic batch axis but a **static hist axis**, while
-    the inherited ``get_cost`` calls the encoder at ``n_obs`` frames (init) AND ``1`` frame
-    (goal). The encoder callable is wrapped with ``_hist_adapt`` so a ``T != enc_hist`` call is
-    served by repeat-pad/slice — exact (the encoder is temporally independent) and leaving the
-    precision-match-gated engine untouched. The traced hist is read from the engine's own input
-    binding (the single source of truth for what ``T`` it accepts)."""
+    Both engines trace a dynamic batch axis but a **static hist axis**, and the inherited
+    ``get_cost`` / ``rollout`` drive both at ``T != HS``. The encoder is called at ``n_obs``
+    frames (init) AND ``1`` frame (goal) -> wrapped with ``_hist_adapt`` (repeat-pad/slice, exact
+    because the encoder is temporally independent). The predictor is fed a GROWING window
+    (``predict(z[:, -HS:])``; ``n_obs = 1`` -> ``1, 2, 3, …``) -> wrapped with
+    ``_predict_hist_adapt`` (right-pad the frame axis to ``HS``, run, slice ``[:, :T]``, exact
+    because the predictor is causal with prefix positional embeddings). Both leave the
+    precision-match-gated engines byte-for-byte. Each traced hist is read from that engine's own
+    input binding (the single source of truth for what ``T`` it accepts)."""
     from src.trt_runtime import EngineRunner
 
     encoder = EngineRunner(engines["encoder"])
     predictor = EngineRunner(engines["predictor"])
 
-    # Read the static hist off the encoder's input binding (axis 1 of (batch, hist, C, H, W);
-    # axis 0 is dynamic -> -1, hist is concrete). Wrap so the goal encode (T=1) reuses it.
+    # Read the static hist off each engine's input binding (axis 1; axis 0 is the dynamic batch
+    # -> -1, hist is concrete). Wrap so the goal encode (T=1) and the sub-HS predict windows reuse it.
     enc_hist = int(encoder.engine.get_tensor_shape(encoder.input_names[0])[1])
     encode_fn = _hist_adapt(lambda pixels: encoder.run((pixels,)), enc_hist)
 
-    def predict_fn(embedding: Tensor) -> Tensor:
-        return predictor.run((embedding,))
+    pred_hist = int(predictor.engine.get_tensor_shape(predictor.input_names[0])[1])
+    predict_fn = _predict_hist_adapt(lambda embedding: predictor.run((embedding,)), pred_hist)
 
     return encode_fn, predict_fn
 
@@ -269,11 +320,12 @@ def build_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, PredictFn]:
 def build_lewm_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, LeWMPredictFn]:
     """Wrap the LeWM encoder + predictor engines as ``encode`` / ``predict`` callables.
 
-    Same static-hist encoder handling as ``build_engine_fns`` (the inherited ``get_cost`` encodes
-    the init at ``n_obs`` frames and the goal at ``1`` -> ``_hist_adapt`` repeat-pad/slices,
-    exact because the encoder is per-frame). The predictor callable differs from DINO's: the LeWM
-    predict engine is **two-input** — ``(emb, RAW action)`` — because ``action_encoder`` lives
-    inside it (Design A), so ``predict_fn`` binds both tensors."""
+    Same static-hist handling as ``build_engine_fns`` (encoder ``_hist_adapt``; predictor
+    ``_predict_hist_adapt`` right-pad-to-``HS``/slice, exact because the predictor is causal with
+    prefix positional embeddings — identical to DINO, no per-track gating). The predictor callable
+    differs from DINO's only in arity: the LeWM predict engine is **two-input** — ``(emb, RAW
+    action)`` — because ``action_encoder`` lives inside it (Design A), so both tensors are padded
+    on the shared frame axis and bound."""
     from src.trt_runtime import EngineRunner
 
     encoder = EngineRunner(engines["encoder"])
@@ -282,8 +334,8 @@ def build_lewm_engine_fns(engines: EnginePaths) -> tuple[EncodeFn, LeWMPredictFn
     enc_hist = int(encoder.engine.get_tensor_shape(encoder.input_names[0])[1])
     encode_fn = _hist_adapt(lambda pixels: encoder.run((pixels,)), enc_hist)
 
-    def predict_fn(emb: Tensor, act: Tensor) -> Tensor:
-        return predictor.run((emb, act))
+    pred_hist = int(predictor.engine.get_tensor_shape(predictor.input_names[0])[1])
+    predict_fn = _predict_hist_adapt(lambda emb, act: predictor.run((emb, act)), pred_hist)
 
     return encode_fn, predict_fn
 
@@ -460,17 +512,26 @@ def _run_dino_parity() -> None:
 
     model = swm.wm.utils.load_pretrained("dino/weights_epoch_10.pt")
     adapter = DINOWMAdapter(model)
-    torch.manual_seed(0)
-    result = sr_cost_parity(model, adapter.encode, adapter.predict, ExportConfig())
-    print(
-        f"[dino] SR-cost parity (shim.get_cost vs PreJEPA.get_cost) {result['shape']}: "
-        f"max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
-    )
-    if result["max_abs"] > 1e-4:
-        raise SystemExit(
-            f"DINO SR-COST PARITY FAILED: shim.get_cost diverges from PreJEPA.get_cost "
-            f"(max_abs={result['max_abs']:.3e}) — the subclass overrides changed the cost path."
+    # n_obs = history_size drives the traced-HS predict window; n_obs = 1 drives the GROWING
+    # sub-HS windows the eval actually feeds (1, 2, 3) — the variable-window coverage the
+    # fixed-HS gate missed. Bit-for-bit on the torch path either way (the shim reproduces the
+    # platform get_cost); on the pod `from_engines` path the sub-HS run also exercises the
+    # predictor hist-adapt end-to-end.
+    for n_obs in (model.history_size, 1):
+        torch.manual_seed(0)
+        result = sr_cost_parity(
+            model, adapter.encode, adapter.predict, ExportConfig(), n_obs=n_obs
         )
+        print(
+            f"[dino] SR-cost parity n_obs={n_obs} (shim.get_cost vs PreJEPA.get_cost) "
+            f"{result['shape']}: max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
+        )
+        if result["max_abs"] > 1e-4:
+            raise SystemExit(
+                f"DINO SR-COST PARITY FAILED (n_obs={n_obs}): shim.get_cost diverges from "
+                f"PreJEPA.get_cost (max_abs={result['max_abs']:.3e}) — the subclass overrides "
+                "changed the cost path."
+            )
     print("[dino] sr-cost parity: PASS")
 
 
@@ -481,21 +542,27 @@ def _run_lewm_parity() -> None:
 
     model = swm.wm.utils.load_pretrained("lewm/weights_epoch_10.pt")
     adapter = LeWMAdapter(model)
-    torch.manual_seed(0)
-    result = sr_cost_parity_lewm(model, adapter.encode, adapter.predict, ExportConfig())
-    print(
-        f"[lewm] SR-cost parity (shim.get_cost vs LeWM.get_cost) {result['shape']}: "
-        f"max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
-    )
-    # The encode override re-implements LeWM.encode's body and predict routes through the engine
-    # boundary (raw action -> per-frame action_encoder); nonzero drift means one of those diverges
-    # (a silent-SR bug) and must be fixed before any LeWM engine run.
-    if result["max_abs"] > 1e-4:
-        raise SystemExit(
-            f"LeWM SR-COST PARITY FAILED: shim.get_cost diverges from LeWM.get_cost "
-            f"(max_abs={result['max_abs']:.3e}) — the encode override or predict boundary "
-            "changed the cost path."
+    # n_obs = num_frames drives the traced-HS predict window; n_obs = 1 drives the GROWING sub-HS
+    # windows the eval feeds (1, 2, 3) — the variable-window coverage the fixed-HS gate missed.
+    n_frames = getattr(model.predictor, "num_frames", 3)
+    for n_obs in (n_frames, 1):
+        torch.manual_seed(0)
+        result = sr_cost_parity_lewm(
+            model, adapter.encode, adapter.predict, ExportConfig(), n_obs=n_obs
         )
+        print(
+            f"[lewm] SR-cost parity n_obs={n_obs} (shim.get_cost vs LeWM.get_cost) "
+            f"{result['shape']}: max_abs={result['max_abs']:.3e} max_rel={result['max_rel']:.3e}"
+        )
+        # The encode override re-implements LeWM.encode's body and predict routes through the
+        # engine boundary (raw action -> per-frame action_encoder); nonzero drift means one of
+        # those diverges (a silent-SR bug) and must be fixed before any LeWM engine run.
+        if result["max_abs"] > 1e-4:
+            raise SystemExit(
+                f"LeWM SR-COST PARITY FAILED (n_obs={n_obs}): shim.get_cost diverges from "
+                f"LeWM.get_cost (max_abs={result['max_abs']:.3e}) — the encode override or "
+                "predict boundary changed the cost path."
+            )
     print("[lewm] sr-cost parity: PASS")
 
 
