@@ -96,21 +96,21 @@ def test_batch_size_gt_one_fails_loud():
 def test_empty_summary_is_none():
     s = SolveLatencyRecorder(sync_cuda=False).summary()
     assert s["n_cycles"] == 0
-    assert s["median_ms"] is None and s["p50_ms"] is None and s["p95_ms"] is None
+    assert s["median_ms"] is None
     assert s["latencies_ms"] == []
 
 
-def test_summary_reports_percentiles_and_raw_latencies():
-    """The per-cycle headline is p50/p95 (SPEC §Interface Contracts); the raw per-decision list
-    is kept so src.report can truncate to a common min-n across tracks (equal-n)."""
+def test_summary_reports_raw_latencies():
+    """The raw per-decision list is what leaves the callback: the headline p50/p95 are only
+    valid after the common-min-n truncation across tracks, so src.report computes them (equal-n,
+    SPEC §Interface Contracts). median_ms is the Phase-3 eager baseline."""
     cb = SolveLatencyRecorder(sync_cuda=False)
     for _ in range(5):
         _simulate_solve(cb)
     s = cb.summary()
     assert s["n_cycles"] == 5
     assert len(s["latencies_ms"]) == 5
-    assert s["p95_ms"] >= s["p50_ms"] >= 0.0
-    assert s["median_ms"] == s["p50_ms"]  # median == p50
+    assert s["median_ms"] >= 0.0
 
 
 def test_registry_pop_returns_summary_and_clears():

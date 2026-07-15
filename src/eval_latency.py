@@ -46,16 +46,6 @@ from time import perf_counter
 from stable_worldmodel.solver.callbacks import Callback
 
 
-def _percentile(sorted_ms, q):
-    """Linear-interpolated q-th percentile (q in [0,100]) over a NON-empty sorted list."""
-    if len(sorted_ms) == 1:
-        return sorted_ms[0]
-    pos = (q / 100.0) * (len(sorted_ms) - 1)
-    lo = int(pos)
-    frac = pos - lo
-    hi = min(lo + 1, len(sorted_ms) - 1)
-    return sorted_ms[lo] + frac * (sorted_ms[hi] - sorted_ms[lo])
-
 # Registry: instances append themselves at construction (see module docstring) so the
 # driver can reach the config-instantiated callback after the run.
 _RECORDERS = []
@@ -133,20 +123,19 @@ class SolveLatencyRecorder(Callback):
         """Per-cycle (per-decision) latency distribution over the recorded decisions.
 
         ``n_cycles`` counts DECISIONS, not solves — a solve contributes one record per alive
-        episode (module docstring). Reports ``p50_ms`` / ``p95_ms`` (the Phase-5 headline, SPEC
-        §Interface Contracts) and keeps ``median_ms`` (== p50) for the Phase-3 eval driver.
-        ``latencies_ms`` is the RAW per-decision list so ``src.report`` can truncate to the
-        common min-n across tracks before taking the percentiles (equal-n). All are ``None`` /
-        ``[]`` on an empty run, so the caller can surface it instead of dividing by zero.
+        episode (module docstring). ``median_ms`` is the Phase-3 eager baseline (``src.eval``).
+
+        The Phase-5 headline p50/p95 are deliberately NOT computed here: they are only valid
+        AFTER truncating every track to the common min-n across tracks, which needs both tracks'
+        data and therefore happens in ``src.report._finalize_per_cycle``. So ``latencies_ms``
+        carries the RAW per-decision list out to that join instead. Both are ``None`` / ``[]``
+        on an empty run, so the caller can surface it instead of dividing by zero.
         """
         raw_ms = [x * 1e3 for x in self.latencies_s]  # TEMPORAL (recording) order
-        srt = sorted(raw_ms)
         n = len(raw_ms)
         return {
             "n_cycles": n,
-            "median_ms": median(srt) if n else None,
-            "p50_ms": _percentile(srt, 50) if n else None,
-            "p95_ms": _percentile(srt, 95) if n else None,
+            "median_ms": median(raw_ms) if n else None,
             # RAW, in temporal order (env order within a solve, solves in run order) — src.report
             # truncates to the common min-n across tracks by taking the first n (a representative
             # chronological subset), NOT the n smallest, which would drop the upper tail
