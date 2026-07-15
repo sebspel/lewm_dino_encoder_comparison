@@ -127,10 +127,13 @@ def _run_track(
     assert set(result) == {
         "per_cycle_p50_ms",
         "per_cycle_p95_ms",
+        "per_cycle_mean_ms",
         "encode_p50_ms",
         "encode_p95_ms",
+        "encode_mean_ms",
         "predict_p50_ms",
         "predict_p95_ms",
+        "predict_mean_ms",
         "peak_mem_mb",
         "success_rate",
     }

@@ -4,7 +4,9 @@ Owned PLUMBING (fails LOUDLY). **Latency is the headline** (SPEC §Interface Con
 this harness measures the two COMPONENT latency distributions in isolated, equal-n
 fixed-iteration loops on the engines — **encode-step** (exposes the LeWM↔DINOv3 encoder
 token-count asymmetry) and **predict-step** (quantization's kernel target) — each as p50/p95,
-warm-up dropped. It also samples peak GPU memory.
+warm-up dropped. It also samples peak GPU memory. Each step additionally carries its arithmetic
+**mean**, which feeds `src.report`'s per-component decomposition ONLY (means compose additively,
+percentiles do not) and is never reported as a headline.
 
 There is **no fixed-wall-clock rollout-count run** (owner decision — redundant with the
 per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (one episode's full
@@ -24,6 +26,7 @@ the optimized path (SPEC §Interface Contracts).
 from __future__ import annotations
 
 import math
+from statistics import fmean
 from time import perf_counter
 
 import torch
@@ -37,6 +40,14 @@ def _percentiles_ms(step_ms: list[float]) -> tuple[float, float]:
     """(p50, p95) over a list of per-call latencies in ms."""
     lat = torch.tensor(step_ms)
     return torch.quantile(lat, 0.50).item(), torch.quantile(lat, 0.95).item()
+
+
+def _mean_ms(step_ms: list[float]) -> float:
+    """Arithmetic mean over a list of per-call latencies in ms — the DECOMPOSITION basis
+    (`src.report.decompose`), never a reported headline. Means are what make
+    `cycle = enc·calls + pred·calls + overhead` exact (linearity of expectation); percentiles
+    do not compose that way. Reported latency stays p50/p95 (SPEC §Interface Contracts)."""
+    return fmean(step_ms)
 
 
 def _time_loop(runner: EngineRunner, inputs: tuple[Tensor, ...], n_iters: int) -> list[float]:
@@ -93,10 +104,13 @@ def benchmark(
     return BenchResult(
         per_cycle_p50_ms=math.nan,  # joined by src.report from the gated eval-shim re-run
         per_cycle_p95_ms=math.nan,
+        per_cycle_mean_ms=math.nan,
         encode_p50_ms=encode_p50,
         encode_p95_ms=encode_p95,
+        encode_mean_ms=_mean_ms(encode_ms),
         predict_p50_ms=predict_p50,
         predict_p95_ms=predict_p95,
+        predict_mean_ms=_mean_ms(predict_ms),
         peak_mem_mb=peak_mem_mb,
         success_rate=math.nan,  # joined in by src.report from the gated eval-shim re-run
     )

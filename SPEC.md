@@ -171,15 +171,30 @@ requirements those signatures must satisfy; it does not restate the signatures.
   ~4× gap closed. If matching the distribution still does not recover INT8 SR, the loss is inherent to
   per-tensor INT8 on these predictors and the documented **FP16-only fallback** applies.
 - **Every speed result carries the SR for that engine config** — no speed number is reported
-  without its task-quality counterpart. **Per-cycle planning latency (p50/p95) is the headline
-  speed measure** — there is no fixed-wall-clock rollout-count run (serial planning makes
-  rollouts/sec ≈ 1/per-cycle-latency, so it is redundant with the equal-n latency measurement).
+  without its task-quality counterpart. **Per-cycle planning latency is the headline
+  speed measure**, reported p50/p95 and **compared at p50** — there is no fixed-wall-clock
+  rollout-count run (serial planning makes rollouts/sec ≈ 1/per-cycle-latency, so it is redundant
+  with the equal-n latency measurement).
+- **Three statistics, three jobs — never substituted for one another** (owner ruling, 2026-07-15):
+  - **p50 — the COMPARISON basis.** The LeWM-vs-DINOv3 headline ratio and the FP32-relative
+    speedup are quoted at p50. The headline is a *mechanistic* claim (encoder compute asymmetry:
+    LeWM's single token vs DINOv3's 196-patch grid), i.e. a central-tendency question, and per-cycle
+    n is 50–100 (below) — p50 is the statistic that sample supports.
+  - **p95 — the reported tail, never a comparison basis.** Kept for all three distributions as a
+    descriptive figure. At n = 50–100 a p95 is roughly the 3rd-to-10th largest sample and its
+    interval reaches the maximum, so it is **not** load-bearing for any claim. Compounding this:
+    the per-cycle path has **no warm-up drop** (the vendored eval's warm-up pass is gated on
+    `compile`, which is `false`), so cold engine-context cost lands in exactly the samples p95
+    reads. Whether to drop a per-cycle warm-up is **owner-gated and open** — it would shrink an
+    already-small n and discard the only solve where all 50 episodes are alive.
+  - **mean — the DECOMPOSITION basis ONLY** (below); never a reported headline.
 - **Peak memory is sampled from the driver/runtime** (`cudaMemGetInfo`/nvidia-smi), **not** the
   torch caching allocator: TensorRT's engine and execution-context device allocations bypass
   torch's allocator, so `torch.cuda.max_memory_allocated` would systematically undercount exactly
   the optimized path.
 - **The per-component profile slices are mutually exclusive and additive, by subtraction from the
-  measured cycle.** The full planning-cycle time is **measured on the real CEM solve** (not
+  measured cycle — and the decomposition runs on MEANS, not percentiles.** The full planning-cycle
+  time is **measured on the real CEM solve** (not
   reconstructed from a hand-rolled solver mirror); encoder and predictor are timed in isolation and
   weighted by their real per-cycle call counts (**confirmed against the installed `CEMSolver.solve`,
   not assumed** — `ENCODER_CALLS_PER_CYCLE = 2`, `PREDICTOR_CALLS_PER_CYCLE = ((horizon − n_obs) + 1)
@@ -189,14 +204,27 @@ requirements those signatures must satisfy; it does not restate the signatures.
   below; pairing a per-solve measurement with per-decision counts is a unit mismatch, and the
   remainder is `overhead_ms = cycle − encoder − predictor` — the
   un-optimizable floor (CEM sampling/topk/mean-var **plus** the criterion, the 384→404 assembly,
-  per-step action-replace/proprio-carry, and host/Python glue). This is additive to the cycle by
-  construction and removes the solver mirror as an error source for the Amdahl denominator. A
+  per-step action-replace/proprio-carry, and host/Python glue).
+  **Why means (owner ruling, 2026-07-15):** the slices are additive **only in expectation**.
+  `cycle = enc·calls + pred·calls + overhead` is exact for means by linearity of expectation —
+  unconditionally, for any distribution and any correlation between the terms — whereas
+  `p50(a + b) ≠ p50(a) + p50(b)` in general. A percentile decomposition therefore books its own
+  non-additivity error as "planner overhead", inflating the Amdahl denominator. Amdahl's law is
+  itself an expectation model, so the optimizable fraction `p` and the ceiling are mean-derived
+  too, and the *realized* speedup they reconcile against must be mean-based to match. This is the
+  one place a mean is used; nothing mean-based is ever reported as a headline.
+  **Accepted residual (unquantified until the pod run):** the isolated engine loops drop warm-up
+  iters but the per-cycle callback records from the first decision of the first solve, so
+  cold-start cost sits in the cycle mean and **not** in the component means — the difference is
+  booked as overhead. Means are outlier-sensitive, so this bites harder than it would at p50, and
+  because it inflates overhead the **negative-overhead alarm cannot catch it**. A
   negative `overhead_ms` is **surfaced loudly** as a sign the call-count weighting or the isolated
   measurement is off — never clamped. Only then are the FP32 baseline **time shares** meaningful —
   load-bearing for the dilution disclosure below.
-- **Three latency distributions, all p50/p95 (never means), mapping to the three profile slices.**
-  (1) **per-cycle** p50/p95 — the **headline**: the full per-decision planning latency (encode +
-  predict + overhead), measured on the real solve. **A "cycle" is ONE episode's decision, which is
+- **Three latency distributions, each REPORTED as p50/p95, mapping to the three profile slices.**
+  A mean is never *reported* for any of them — it exists only as the decomposition basis above.
+  (1) **per-cycle** p50/p95 — the **headline**, compared at p50: the full per-decision planning
+  latency (encode + predict + overhead), measured on the real solve. **A "cycle" is ONE episode's decision, which is
   not the span of one `CEMSolver.solve` call.** At eval the 50 episodes are 50 env instances held
   **in flight together and advanced in lockstep** (`world.num_envs = eval.num_eval`; dataset-driven
   eval asserts `num_envs == len(episodes_idx)` and *freezes* rather than auto-resets terminated
@@ -225,8 +253,18 @@ requirements those signatures must satisfy; it does not restate the signatures.
   same solves**. Per-cycle samples accrue one **per alive episode per solve**, and — because
   SR-driven episodes terminate at different step counts, so both the sample count and the per-solve
   env count vary per track — its samples are truncated to a common minimum n for an equal-n
-  comparison. A dedicated latency-only pass is **not** an alternative: it would break the
+  comparison. The reported p50/p95 **and** the decomposition mean are all taken off that *same*
+  truncated sample, so the headline and the decomposition describe the same decisions.
+  A dedicated latency-only pass is **not** an alternative: it would break the
   same-solves pairing above.
+  **Per-cycle n is 50–100 per track per precision, not thousands** — establish this before reading
+  any per-cycle percentile. `eval_budget = 50` policy steps, and one plan fills the action buffer
+  with `receding_horizon × action_block = 25` env actions, so the solver is called on exactly **two**
+  steps (t=0 and t=25) and is not called at all in between. Decisions therefore total
+  `50 + alive_at_25` ≤ 100: solve 0 plans all 50 episodes, solve 1 only those not yet terminated.
+  Because Push-T terminates on success, **a higher-SR track contributes fewer decisions** — n is
+  SR-dependent hence track-dependent, which is what the equal-n truncation neutralises. This n is
+  why p50 carries the comparison and p95 does not.
 - **One adapter Protocol, two concrete tracks.** A common two-method `encode`/`predict` interface
   (not a fused `__call__`) so export and benchmark treat both tracks identically; the latent shape
   and how the action enters `predict` differ per track (LeWM: a separate AdaLN-conditioning
@@ -317,7 +355,7 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   There is no fixed-wall-clock budget run; **latency is the headline** and the model is the only
   difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
   measured in equal-n fixed-iteration loops (§Interface
-  Contracts): the headline is **per-cycle p50/p95** (full per-decision planning latency), with
+  Contracts): the headline is **per-cycle latency, reported p50/p95 and compared at p50**, with
   **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are not locked** —
   the study runs both tracks back-to-back at the same precision on the same L40S with warm-up
   dropped, and the LeWM-vs-DINOv3 comparison is a *ratio* on that shared hardware state, so any
@@ -413,9 +451,11 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
   per precision**, with encoder/predictor/overhead profiled separately to locate bottlenecks. Only
-  the model is TRT-optimized; the CEM planner stays in Python around it. Headline: LeWM-vs-DINOv3
-  **per-cycle p50/p95 latency ratio** + per-model FP32→FP16→INT8 delta in **both speed and SR**
-  (degradation quoted vs FP32; speed plotted against SR).
+  the model is TRT-optimized; the CEM planner stays in Python around it. Headline: the LeWM-vs-DINOv3
+  **per-cycle latency ratio at p50** (p95 reported alongside as the tail) + per-model
+  FP32→FP16→INT8 delta in **both speed and SR** (degradation quoted vs FP32 — the p50 speedup and
+  the SR delta in the **same row**, so a precision that is faster but degrades task quality cannot
+  be read as a win; speed plotted against SR).
   - **Headline-artifact durability.** The headline tables (serialized to text) **and** plots (PNG)
     are persisted to the persistent network volume, the same durability contract as checkpoints and
     engines, so a completed study survives pod teardown. W&B logging is **additive, never the sole
@@ -434,9 +474,13 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     `p = (encoder+predictor)/cycle`, which sets the Amdahl ceiling on end-to-end speedup `1/(1−p)`;
     and — per precision — **both** the *model-only* speedup (overhead treated as free, from the
     encode+predict component times) **and** the *realized* speedup (the measured FP32-vs-precision
-    **per-cycle latency ratio**), whose gap is the overhead floor and should match the Amdahl
+    **per-cycle ratio**), whose gap is the overhead floor and should match the Amdahl
     prediction `1/((1−p) + p/s)`. Reporting per-component *relative* speedup alone
-    hides this dilution. That the optimizable fraction is itself model-dependent (LeWM's single token
+    hides this dilution. **This whole block is mean-based**, `p` included, so the realized speedup
+    it reconciles against is the mean per-cycle ratio — matching the prediction's basis. It is
+    therefore **a different number from the reported p50 FP32-relative speedup**, which answers the
+    comparison question rather than the reconciliation one; the two are rendered in separate tables
+    and must not be conflated or averaged. That the optimizable fraction is itself model-dependent (LeWM's single token
     is overhead/launch-latency-bound, DINO's 196-token grid is model-bound) is what explains why the
     same precision helps the two tracks differently — a result, not bookkeeping.
 - **QLoRA delta:** the task-quality metric re-run on a QLoRA-tuned DINOv3 backbone (backbone

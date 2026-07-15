@@ -36,9 +36,12 @@ MODEL_ACTION_DIM = 10
 DINO_PROPRIO_DIM = 4
 
 # CEM planning-cycle call counts (docs/platform_api.md §5). The measured per-cycle latency is
-# decomposed by weighting the isolated engine-step latencies by these counts and subtracting
-# from the cycle (overhead = cycle − enc·ENC_CALLS − pred·PRED_CALLS; SPEC §Interface
-# Contracts). Confirmed against the installed `CEMSolver.solve` → `get_cost` → `rollout`
+# decomposed by weighting the isolated engine-step MEANS by these counts and subtracting from
+# the mean cycle (overhead = cycle − enc·ENC_CALLS − pred·PRED_CALLS; SPEC §Interface
+# Contracts). MEANS, not percentiles: linearity of expectation makes that identity exact for
+# any distribution, while p50(a+b) ≠ p50(a)+p50(b) — a percentile decomposition would silently
+# book the non-additivity error as planner overhead.
+# Confirmed against the installed `CEMSolver.solve` → `get_cost` → `rollout`
 # (`solver/cem.py:191-199`, `wm/prejepa/prejepa.py:218-348`, `wm/lewm/lewm.py:58-108`): the
 # `candidates` tensor CEMSolver samples has time-length `horizon` ONLY (not `n_obs + horizon`);
 # `rollout` splits it into an `n_obs`-length prefix (tags the current state, no predict call)
@@ -131,17 +134,24 @@ class BenchResult(TypedDict):
     # NOT produced by `benchmark` (no planner in the harness); left NaN here and JOINED per
     # precision from that gated run, so per-cycle latency and SR come from the same solves
     # (SPEC §Interface Contracts). Equal-n across tracks (report truncates to the common
-    # min-n before taking the percentiles).
+    # min-n before reducing).
+    # `p50` is the COMPARISON basis (the LeWM-vs-DINOv3 headline ratio + the FP32-relative
+    # degradation): robust to the tail at this n. `p95` is reported as the descriptive tail.
     per_cycle_p50_ms: float
     per_cycle_p95_ms: float
-    # COMPONENT latency — isolated per-precision engine-step p50/p95 from fixed-iteration
-    # loops (warm-up dropped, equal-n). `encode_*` exposes the encoder token-count asymmetry
+    # `mean` is the DECOMPOSITION basis only (never the headline) — see the call counts above.
+    per_cycle_mean_ms: float
+    # COMPONENT latency — isolated per-precision engine-step stats from fixed-iteration loops
+    # (warm-up dropped, equal-n). `encode_*` exposes the encoder token-count asymmetry
     # (LeWM 1 token vs DINOv3 196); `predict_*` is quantization's kernel target. Each engine
     # call syncs its stream, so for LeWM's tiny ops these sit on a launch+sync floor.
+    # p50/p95 are reported; `*_mean_ms` feeds the decomposition ONLY.
     encode_p50_ms: float
     encode_p95_ms: float
+    encode_mean_ms: float
     predict_p50_ms: float
     predict_p95_ms: float
+    predict_mean_ms: float
     # Sampled from cudaMemGetInfo (`torch.cuda.mem_get_info`), NOT `torch.cuda.max_memory_
     # allocated`: TensorRT's engine + execution-context device allocations bypass torch's
     # caching allocator, so the allocator would undercount exactly the optimized path

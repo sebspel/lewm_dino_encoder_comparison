@@ -216,6 +216,14 @@ with per-cycle latency under serial planning). GPU clocks not locked (SPEC §Par
 speed number is paired with an SR** (Phase-3 eval per precision). (See SPEC §Parity, §Interface
 Contracts, `src/interfaces.py`.)
 
+**Statistic split (owner ruling, 2026-07-15) — SPEC §Interface Contracts:** **p50** is the
+comparison basis (LeWM-vs-DINOv3 headline ratio, FP32-relative speedup); **p95** is reported for
+all three distributions as the descriptive tail but carries no claim (per-cycle n is 50–100, so a
+p95 sits within reach of the sample max, and the per-cycle path has no warm-up drop); **mean** is
+the decomposition basis only (`report.decompose` / `dilution_disclosure`) and is never reported —
+`cycle = enc·calls + pred·calls + overhead` is exact for means and only approximate for
+percentiles. Do not mix the three.
+
 **Prerequisite (checkpoint loader — established here, not assumed):**
 
 - [x] 🟢 **Checkpoint → adapter loader** (`_build_adapter` real path): materialize each
@@ -389,8 +397,8 @@ Contracts, `src/interfaces.py`.)
   engine-fidelity gate). 🔴 owner-gated (per-step predictor boundary).
 - [ ] 🖥️ **Per-component decomposition** — encoder, predictor, and **overhead** per planning
   cycle, both models × precisions, **derived in `src/report.py`** (no standalone profiler): the
-  benchmark's isolated engine-step p50s × the CEM per-cycle call counts give the enc/pred cycle
-  shares, and **overhead = measured per-cycle − enc − pred** (SPEC §Interface Contracts —
+  benchmark's isolated engine-step **means** × the CEM per-cycle call counts give the enc/pred cycle
+  shares, and **overhead = measured mean per-cycle − enc − pred** (SPEC §Interface Contracts —
   subtraction, not a solver mirror); a **negative overhead is surfaced loudly**, never clamped.
   **Confirm the call counts against the installed `CEMSolver.solve`** (encode, predict, n_steps).
   Reports the per-component shares + **optimizable fraction** `p=(enc+pred)/cycle` + Amdahl
@@ -410,6 +418,22 @@ Contracts, `src/interfaces.py`.)
   **Both counts are PER-DECISION** (one episode's plan) — the measured cycle must use the same unit;
   see the per-decision latency box below, which fixes the measurement side. Still pod-run pending:
   the above confirms the call-count *weighting*, not the real wall-clock measurement.
+  → **statistic fixed to the MEAN (owner ruling, 2026-07-15; landed, pod-run pending):** the
+  decomposition read `per_cycle_p50_ms` / `encode_p50_ms` / `predict_p50_ms` and subtracted, but the
+  identity it asserts (`cycle = enc·2 + pred·150 + overhead`) holds only in **expectation** —
+  `p50(a+b) ≠ p50(a)+p50(b)`, so the non-additivity error was being booked as planner overhead, and
+  the mean-based Amdahl `p` inherited it. `decompose` + `dilution_disclosure` now read
+  `*_mean_ms`; `BenchResult` carries `per_cycle_mean_ms` / `encode_mean_ms` / `predict_mean_ms`
+  (`benchmark` computes the step means; `report._finalize_per_cycle` computes the cycle mean off the
+  **same** equal-n-truncated sample as the reported p50/p95). Reported latency is unchanged (p50/p95);
+  the mean appears in no headline. `tests/test_report.py::test_decompose_uses_mean_not_p50` sets the
+  means away from the p50s so reading the wrong field fails loudly.
+  → **accepted residual (recorded, unquantified until the pod run):** the enc/pred loops drop
+  `warmup=10` iters but the per-cycle callback records from the first decision of the first solve, so
+  cold-start cost sits in the cycle mean and not the component means → booked as overhead. Means are
+  outlier-sensitive, so this bites harder than at p50, and it inflates overhead → **the
+  negative-overhead alarm cannot catch it**. 🔴 open: whether to drop a per-cycle warm-up (it would
+  shrink n from an already-small 50–100 and discard the only solve with all 50 episodes alive).
 - [ ] 🔴 **Per-decision latency bracket — unit mismatch in the decomposition + headline.**
   `SolveLatencyRecorder` brackets `reset → end_solve`, but both hooks sit OUTSIDE `solve`'s env
   loop (`cem.py:148` / `152` / `279`), so one record times **every still-alive episode**, while
@@ -559,14 +583,29 @@ Contracts, `src/interfaces.py`.)
   `tests/test_sr_eval.py` covers the argv routing / track map / no-clobber merge (CPU); the eval leg
   is pod-only (engines + CUDA + dataset). 🔴 owner-confirm on pod: the `load_pretrained` patch-seam
   is the eval/CEM-parity-adjacent call.
-- [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 per-cycle p50/p95 latency
-  ratio**; **per-model FP32→FP16→INT8 delta** in **both speed and SR, degradation quoted vs
-  FP32**; **speed-vs-SR plotted**; **per-component (encoder/predictor/overhead) bottleneck
+- [ ] Headline outputs (tables **and plots**): **LeWM-vs-DINOv3 per-cycle latency ratio at p50**
+  (p95 alongside as the tail); **per-model FP32→FP16→INT8 delta** in **both speed and SR,
+  degradation quoted vs FP32** (p50 speedup + SR delta in the same row); **speed-vs-SR plotted**;
+  **per-component (encoder/predictor/overhead) bottleneck
   breakdown** with all three latency p50/p95 distributions (per-cycle headline, encode-step +
   predictor-step components). Per model × precision, report **both** the *model-only* speedup
-  (encode+predict component ratio) and the *realized* speedup (per-cycle latency ratio; gap =
+  (encode+predict component ratio) and the *realized* speedup (mean per-cycle ratio; gap =
   overhead floor, ≈ Amdahl from the baseline shares), alongside the optimizable fraction (SPEC
   §Speedup study — dilution disclosure).
+  → **statistic ruling landed (2026-07-15; pod-run pending):** `per_cycle_ratio` defaults to **p50**
+  and `plot_per_cycle_ratio` / the W&B `headline/per_cycle_p50_ratio_*` key follow it (p95 logged
+  alongside, not plotted as the headline). `render_speed_table` now renders **all three
+  distributions at p50/p95** — `encode_p95_ms` / `predict_p95_ms` were computed and persisted but
+  rendered nowhere, so two of the six SPEC-required numbers reached no table.
+  → **`fp32_relative` wired in (was dead code):** computed + tested but never called by `report()`,
+  so the SR-delta half of SPEC §Parity's "quote SR and latency degradation relative to FP32" was
+  unrendered while a green unit test made it look alive. Now quoted at **p50** (agreeing with the
+  headline instead of introducing a second, tail-based speedup), `base` guarded with `.get` so a
+  single-track render cannot `KeyError`, and rendered as `fp32_relative_table.txt` with the speedup
+  and ΔSR in one row. Distinct from `dilution_disclosure`'s **mean**-based
+  `measured_realized_speedup` (which must match its Amdahl prediction's basis) — same shape,
+  different question. `tests/test_report.py` now asserts the table *renders*, not just that the
+  arithmetic is right.
   → **table runner (landed, pod-run pending):** `src/study.py` (`uv run python -m src.study
   [track=<lewm|dino>] [wandb=<eval overlay>]`) orchestrates the boxes above per track×precision —
   loads the engines `src.export` built
@@ -588,6 +627,12 @@ Contracts, `src/interfaces.py`.)
   speedup = the measured per-cycle latency ratio (no longer a rollouts proxy); `decompose` computes
   the enc/pred/`overhead` cycle shares. `report(bench, out_dir, …)` no longer takes `prof`;
   `load_results` returns bench only. `tests/test_report.py`.
+    → **PARTLY SUPERSEDED by the statistic ruling (2026-07-15)** — this line records what shipped
+    then; three of its claims have since changed. The headline ratio is **p50**, not p50/p95
+    (`per_cycle_ratio` default flipped); the speed table now shows encode/predict at **p50 AND p95**
+    (the p95s were computed but rendered nowhere); the dilution table's realized speedup is the
+    **mean** per-cycle ratio, since it must share a basis with its Amdahl prediction. See the
+    statistic-ruling notes on the decomposition + headline-outputs boxes above.
   → **persist headline artifacts to network storage (pending):** write the tables
     (serialized to `.txt`) **and** plots (`.png`) under `$STABLEWM_HOME/reports/phase5/`
     (not the repo-local `reports/phase5` default) so a completed study survives pod teardown;
@@ -612,7 +657,8 @@ Contracts, `src/interfaces.py`.)
   **FP16-only**. 3-attempt debugging cap (CLAUDE.md §6).
 
 **Interface note:** `src/interfaces.py` declares `BenchResult`'s three latency p50/p95
-distributions (per-cycle headline, encode-step + predictor-step) + peak mem, and the CEM
+distributions (per-cycle headline, encode-step + predictor-step) + their **means** (decomposition
+basis only, never reported) + peak mem, and the CEM
 per-cycle call counts (`ENCODER/PREDICTOR_CALLS_PER_CYCLE`, `CEM_NUM_SAMPLES`) the report's
 overhead-by-subtraction decomposition weights. No rollouts/throughput/`time_budget_s`/
 `ComponentProfile` — the fixed-wall-clock run and the standalone profiler were removed by owner
@@ -649,9 +695,9 @@ W&B; adapter target modules confirmed real.
   `src/calibrate.py` (calibration-data construction feeding the Model Optimizer — the predictor
   stream reproduces the CEM proposal + autoregressive latents),
   `src/probe_ranges.py` (read-only calib-vs-eval range probe; diagnoses/verifies INT8 saturation),
-  `src/benchmark.py` (component latency + peak mem), `src/report.py` (per-cycle headline +
-  overhead-by-subtraction decomposition), `src/qlora.py`, `src/smoke.py` — the owned layer
-  (Phases 4–6).
+  `src/benchmark.py` (component latency p50/p95 + means + peak mem), `src/report.py` (per-cycle
+  headline compared at p50; mean-based overhead-by-subtraction decomposition),
+  `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
 - `src/gpu_clocks.py` — owned passive `nvidia-smi dmon` GPU-telemetry observer
   (clock/power/temp/util/mem) bracketing each timed engine run; logs to
