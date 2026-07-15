@@ -121,8 +121,20 @@ requirements those signatures must satisfy; it does not restate the signatures.
   **predictor** stream is the one that is wrong, on two axes:
   - **Actions — established from the solver source, not inferred.** `CEMSolver.solve` (installed swm
     0.1.1, `solver/cem.py`) draws `candidates = randn(...) * var + mean` with **no clamp to the action
-    space**, from `var_scale = 1.0` and `mean = 0` (the zero-pad warm start for non-`Actionable`
-    LeWM/DINO-WM). So `predict` is driven by an **unbounded N(0,1)** proposal reaching ≈±4 across 300
+    space**, from `var_scale = 1.0` and `mean = 0`. **That `mean = 0` is a CONJUNCTION of two
+    independent conditions — both must hold, and neither is sufficient alone** (`prepare_init_action`,
+    `solver/utils.py`): (i) the models are **non-`Actionable`** — neither `LeWM` nor `PreJEPA` defines
+    `get_action`, so no actor generates a warm start (were one Actionable, it would fill the horizon
+    and `mean ≠ 0`); **and** (ii) `horizon == receding_horizon == 5`, so the policy consumes the whole
+    plan and `rest` is empty — `warm_start` (default **True**) never populates `_next_init`, so
+    `init_action=None` reaches the solver (were `receding_horizon < horizon`, the carried plan tail
+    would be **kept** and only the missing steps zero-padded → `mean = [tail, 0…] ≠ 0`). Condition (ii)
+    is a **config coincidence, not a property of these models**: lowering `receding_horizon` — e.g. to
+    raise the per-cycle sample count — would silently make the real proposal non-zero-mean while
+    `calibrate._sample_cem_actions` still draws zero-mean, re-opening this exact calibration gap with no
+    error. Both conditions are therefore **parity-gated** and pinned by tests
+    (`tests/test_sr_shim.py` — `not isinstance(shim, Actionable)`). So `predict` is driven by an
+    **unbounded N(0,1)** proposal reaching ≈±4 across 300
     samples × horizon, while expert actions are bounded by `Box(-1, 1)`. Calibrating on expert actions
     therefore under-estimates the inference action range by **~4×** and clips most of the proposal's
     dynamic range. Under Design A, LeWM's `action_encoder` sits **inside** the predict engine, so the raw
@@ -170,7 +182,12 @@ requirements those signatures must satisfy; it does not restate the signatures.
   measured cycle.** The full planning-cycle time is **measured on the real CEM solve** (not
   reconstructed from a hand-rolled solver mirror); encoder and predictor are timed in isolation and
   weighted by their real per-cycle call counts (**confirmed against the installed `CEMSolver.solve`,
-  not assumed**), and the remainder is `overhead_ms = cycle − encoder − predictor` — the
+  not assumed** — `ENCODER_CALLS_PER_CYCLE = 2`, `PREDICTOR_CALLS_PER_CYCLE = ((horizon − n_obs) + 1)
+  × n_steps = 150; the solver's `candidates` tensor is `horizon`-long, **not** `n_obs + horizon`, so
+  the rollout drives `(horizon − n_obs) + 1` predict calls, not `horizon + 1`). **Those counts are
+  per-decision, so the measured cycle must be per-decision too** — see the per-cycle definition
+  below; pairing a per-solve measurement with per-decision counts is a unit mismatch, and the
+  remainder is `overhead_ms = cycle − encoder − predictor` — the
   un-optimizable floor (CEM sampling/topk/mean-var **plus** the criterion, the 384→404 assembly,
   per-step action-replace/proprio-carry, and host/Python glue). This is additive to the cycle by
   construction and removes the solver mirror as an error source for the Amdahl denominator. A
@@ -179,7 +196,24 @@ requirements those signatures must satisfy; it does not restate the signatures.
   load-bearing for the dilution disclosure below.
 - **Three latency distributions, all p50/p95 (never means), mapping to the three profile slices.**
   (1) **per-cycle** p50/p95 — the **headline**: the full per-decision planning latency (encode +
-  predict + overhead), measured on the real solve; (2) **encode-step** p50/p95 — a component that
+  predict + overhead), measured on the real solve. **A "cycle" is ONE episode's decision, which is
+  not the span of one `CEMSolver.solve` call.** At eval the 50 episodes are 50 env instances held
+  **in flight together and advanced in lockstep** (`world.num_envs = eval.num_eval`; dataset-driven
+  eval asserts `num_envs == len(episodes_idx)` and *freezes* rather than auto-resets terminated
+  envs, so env *i* hosts episode *i* for the whole run). **In flight is not "in parallel": nothing
+  here executes concurrently.** `EnvPool.step` loops the envs in-process, and the policy hands every
+  still-alive episode to a **single** `solve` call whose env loop is likewise sequential at the
+  pinned `batch_size = 1` (`LeWM.criterion` errors for B>1). One solve is therefore **N independent
+  decisions computed back-to-back, and its wall clock is their sum**. The only genuinely batched
+  axis is the `num_samples` candidate fan-out *within* one episode's `get_cost`. (The platform's own
+  docstrings call the pool "parallel envs" and `batch_size` the envs "to process in parallel" —
+  that names a *vectorized interface*, not parallel execution; do not read it as concurrency.) The
+  latency callback therefore brackets **per env** — consecutive `start_batch` hooks, the last
+  closing at `end_solve` — and **never `reset → end_solve`**, which spans the whole batch. Bracketing
+  per solve while weighting components by per-decision call counts inflates `overhead_ms` toward the
+  entire cycle, and because that error makes overhead *more* positive, **the negative-overhead alarm
+  cannot catch it**. It would also make the headline scale with how many episodes are still alive —
+  SR-dependent, therefore track-dependent: a parity break; (2) **encode-step** p50/p95 — a component that
   exposes the LeWM-vs-DINOv3 encoder token-count asymmetry (wall-clock-diluted in the cycle because
   encode is cached and runs ~twice, so it does **not** dominate the headline); (3) **predictor-step**
   p50/p95 — a component: quantization's kernel target. Any unqualified "p50/p95 latency" means
@@ -187,11 +221,12 @@ requirements those signatures must satisfy; it does not restate the signatures.
   step, 10 warm-up iters dropped) — so n is equal across tracks and the tail is not boundary-censored (there is no
   wall-clock-limited run). encode-/predict-step ride isolated
   per-precision engine loops (timing is data-independent); per-cycle rides the observation-only
-  CEM-solve-latency callback over the SR eval-shim run, so **per-cycle latency and SR come from the
-  same solves**. Per-cycle samples accrue far slower (one per solve), so its loop needs enough solves
-  for a stable p95, and — because SR-driven episodes terminate at different step counts — its samples
-  are truncated to a common minimum n (or drawn from a dedicated fixed-solve-count pass) for an
-  equal-n comparison.
+  per-decision latency callback over the SR eval-shim run, so **per-cycle latency and SR come from the
+  same solves**. Per-cycle samples accrue one **per alive episode per solve**, and — because
+  SR-driven episodes terminate at different step counts, so both the sample count and the per-solve
+  env count vary per track — its samples are truncated to a common minimum n for an equal-n
+  comparison. A dedicated latency-only pass is **not** an alternative: it would break the
+  same-solves pairing above.
 - **One adapter Protocol, two concrete tracks.** A common two-method `encode`/`predict` interface
   (not a fused `__call__`) so export and benchmark treat both tracks identically; the latent shape
   and how the action enters `predict` differ per track (LeWM: a separate AdaLN-conditioning
@@ -235,11 +270,23 @@ requirements those signatures must satisfy; it does not restate the signatures.
   and the transient `T < HS` steps would fall back to the torch predictor or a dynamic-hist
   re-export — not the case here.)
 - **SR-per-precision re-runs the platform eval on the optimized model.** The CEM solver calls the
-  world model via `get_cost`/`get_action`, not `encode`/`predict`. So to produce the SR that pairs
+  world model via **`get_cost`**, not `encode`/`predict`. So to produce the SR that pairs
   with each precision's speed number, the exported adapter is re-wrapped in a thin **Python** shim
-  exposing `get_cost`/`get_action` (which call the engine's `encode`/`predict` underneath) and
+  exposing **`get_cost` only** (which calls the engine's `encode`/`predict` underneath) and
   slotted into the CEM solver, letting the platform's eval logic re-run unchanged. The shim stays
-  in Python; only `encode`/`predict` lives in the engine. For DINO-WM the shim must reproduce the
+  in Python; only `encode`/`predict` lives in the engine.
+  - **`get_action` must stay ABSENT from the shim — it is not a second method to implement.** Two
+    unrelated platform methods share that name: a **policy**-side `get_action(info_dict, **kwargs)`
+    (`WorldModelPolicy` — the *replanner*, which is not a model method at all) and the **model**-side
+    `Actionable.get_action(info, horizon, prefix_actions)` (only `TDMPC2`/`GCRL` define it; `LeWM` and
+    `PreJEPA` do **not**). `CEMSolver` touches the latter only via `prepare_init_action`'s
+    `isinstance(model, Actionable)` branch, which our non-`Actionable` tracks never take — that is
+    precisely what makes the warm start a zero-pad (`mean = 0`), load-bearing for both eval parity and
+    the INT8 calibration distribution above. Because `Actionable` is `@runtime_checkable`, `isinstance`
+    matches on **method presence, not signature**: adding *any* `get_action` to the shim — even a
+    policy-shaped one — silently flips it to `Actionable` and replaces the zero-pad with a generated
+    warm start. Pinned by `tests/test_sr_shim.py` (`not isinstance(shim, Actionable)`,
+    `not hasattr(shim, "get_action")`, both tracks). For DINO-WM the shim must reproduce the
   platform rollout faithfully (full `404` carry, per-step action-replace, proprio+pixels cost) or
   the SR is not comparable to the Phase-3 baseline — a silent parity break.
   - **Injection seam (the one specified exception to the no-monkeypatch eval stance).** Model
@@ -314,11 +361,13 @@ touching:
 
 - Dockerfile, compose, uv/pyproject scaffolding.
 - Hydra / W&B wiring around the platform entrypoints, including the owned W&B helper and the
-  **observation-only** CEM-solve-latency **callback** — injected through the platform's own config
+  **observation-only** per-decision latency **callback** — injected through the platform's own config
   seam, so the vendored eval and solver stay byte-untouched. It may only read/record timing
-  (bracketing one CEM solve with an optional `cuda.synchronize` barrier) and must leave seeds,
-  sample draws, and the plan byte-identical; perturbing any of those crosses into the eval/CEM
-  parity gate above and is OWNER-ONLY.
+  (bracketing each env's solve span with an optional `cuda.synchronize` barrier — one barrier per
+  env, each closing the span of the env whose work it waits on) and must leave seeds, sample draws,
+  and the plan byte-identical; perturbing any of those crosses into the eval/CEM parity gate above
+  and is OWNER-ONLY. **What the callback measures is a unit, not a free choice** — it must match the
+  per-decision call counts the report weights by (§Interface Contracts — per-cycle).
 - The DINOv3 encoder config (model string; dims read from config).
 - Export-script and benchmark-harness *plumbing* (trace call, Model-Optimizer PTQ invocation
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory

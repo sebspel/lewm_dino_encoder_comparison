@@ -18,9 +18,10 @@ eval:
   # .h5 default so eval replays the same expert trajectories the model was trained on.
   dataset_name: pusht_expert_train.lance
 
-# Inject the owned observation-only CEM-solve-latency callback through the platform's own
-# per-solve extension seam. hydra.utils.instantiate(cfg.solver, model=model) in eval_wm.py
-# builds it into CEMSolver(callbacks=[...]); it only records timing (SPEC §Impl Boundaries).
+# Inject the owned observation-only per-decision latency callback through the platform's own
+# callback seam. hydra.utils.instantiate(cfg.solver, model=model) in eval_wm.py builds it into
+# CEMSolver(callbacks=[...]); it only records timing (SPEC §Impl Boundaries). It brackets ONE
+# episode's decision (per `start_batch`), not a whole solve — a solve plans every alive episode.
 solver:
   callbacks:
     - _target_: src.eval_latency.SolveLatencyRecorder

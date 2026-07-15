@@ -7,9 +7,10 @@ token-count asymmetry) and **predict-step** (quantization's kernel target) — e
 warm-up dropped. It also samples peak GPU memory.
 
 There is **no fixed-wall-clock rollout-count run** (owner decision — redundant with the
-per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (full CEM solve)
-and the **SR** are NOT produced here: both come from the gated eval-shim re-run (`src.sr_eval`,
-via the observation-only CEM-solve-latency callback), so they share the same solves. This
+per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (one episode's full
+decision) and the **SR** are NOT produced here: both come from the gated eval-shim re-run
+(`src.sr_eval`, via the observation-only per-decision latency callback), so they share the same
+solves. This
 harness therefore returns real component-latency + peak-mem numbers with `per_cycle_*` and
 `success_rate` left NaN; `src.report` joins the per-cycle latency + SR back in per precision.
 

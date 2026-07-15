@@ -19,7 +19,7 @@ eval:
   dataset_name: pusht_expert_train.lance
 
 # Identical latency-callback injection to eval_lewm.yaml — same observation-only recorder,
-# same config seam, so the CEM-solve-latency metric is measured identically across tracks.
+# same config seam, so the per-decision latency metric is measured identically across tracks.
 solver:
   callbacks:
     - _target_: src.eval_latency.SolveLatencyRecorder

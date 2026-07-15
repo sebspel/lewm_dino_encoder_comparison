@@ -356,9 +356,10 @@ def _join_eval(bench: dict, overrides: dict | None) -> None:
 
 
 def _finalize_per_cycle(bench: dict) -> None:
-    """Compute per-cycle p50/p95 on each row from its joined raw per-solve latencies, AFTER
-    truncating every track to the common min-n across tracks per precision (equal-n, SPEC
-    §Interface Contracts). A single-track render truncates to that track's own n."""
+    """Compute per-cycle p50/p95 on each row from its joined raw per-DECISION latencies (one per
+    alive episode per solve — `src.eval_latency`), AFTER truncating every track to the common
+    min-n across tracks per precision (equal-n, SPEC §Interface Contracts). A single-track render
+    truncates to that track's own n."""
     for prec in _PRECISIONS:
         lat_by_track = {
             t: bench[t][prec]["_per_cycle_latencies_ms"]

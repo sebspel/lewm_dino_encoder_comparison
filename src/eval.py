@@ -1,15 +1,16 @@
 """Owned thin eval driver.
 
 Runs the byte-unmodified vendored eval entrypoint (``scripts.plan.eval_wm.run``) under its
-own Hydra composition, then logs the Push-T success rate and the CEM-solve latency median
-to one W&B run (owned helper, shared project).
+own Hydra composition, then logs the Push-T success rate and the per-decision planning-latency
+median to one W&B run (owned helper, shared project).
 
     uv run python -m src.eval --config-dir conf +experiment=eval_<lewm|dino>
 
 No monkeypatch, no class shadow:
-  * CEM-solve latency rides in via ``cfg.solver.callbacks`` (the eval overlay injects the
-    owned :class:`~src.eval_latency.SolveLatencyRecorder`); the driver reads the records
-    back through that module's registry.
+  * Per-decision latency rides in via ``cfg.solver.callbacks`` (the eval overlay injects the
+    owned :class:`~src.eval_latency.SolveLatencyRecorder`, which brackets one episode's
+    decision — NOT a whole solve, which plans every alive episode); the driver reads the
+    records back through that module's registry.
   * Success rate is read observation-only from the results file the entrypoint writes —
     the driver points ``output.filename`` at a fresh, driver-owned path so the parse is
     deterministic (the entrypoint appends, so a shared file would accumulate runs).
@@ -125,26 +126,29 @@ def main():
         eval_wm.run(cfg)
 
         latency = eval_latency.pop_records()
-        if latency["n_solves"] == 0:
+        if latency["n_cycles"] == 0:
             raise RuntimeError(
-                "the latency callback recorded no CEM solves — is it injected via "
+                "the latency callback recorded no decisions — is it injected via "
                 "cfg.solver.callbacks in the eval overlay?"
             )
         success_rate = _parse_success_rate(out_file.read_text())
 
         import wandb
 
+        # Keys renamed from `cem_solve_*`: the callback now brackets per DECISION, not per
+        # solve (a solve plans every alive episode), so the number is ~1/n_envs of the old
+        # one. A rename keeps the shared W&B project from silently plotting the two together.
         wandb.log(
             {
                 "success_rate": success_rate,
-                "cem_solve_latency_median_ms": latency["median_ms"],
-                "cem_solve_n": latency["n_solves"],
+                "per_cycle_latency_median_ms": latency["median_ms"],
+                "per_cycle_n": latency["n_cycles"],
             }
         )
         print(
             f"[eval:{experiment}] success_rate={success_rate} "
-            f"cem_solve_latency_median_ms={latency['median_ms']:.2f} "
-            f"(n_solves={latency['n_solves']})"
+            f"per_cycle_latency_median_ms={latency['median_ms']:.2f} "
+            f"(n_cycles={latency['n_cycles']})"
         )
     finally:
         run.finish()

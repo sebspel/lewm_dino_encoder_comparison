@@ -132,6 +132,12 @@ post-training; it also satisfies the §2 slot-in "import + one forward".
   zero-pad for non-`Actionable` LeWM/DINO-WM (`get_cost` only, no `get_action` — confirmed in
   `stable_worldmodel` 0.1.1), hence negligible and model-independent. Eager baseline (median
   of a few solves); the rigorous p50/p95 rig is Phase 5.
+  → **SUPERSEDED (Phase 5, 2026-07-15) — this box records Phase 3 as shipped; the bracket has
+  since changed.** `reset → end_solve` spans the whole solve, which plans EVERY alive episode,
+  so it measured N decisions, not one. Re-bracketed **per env** (per-decision) — see the
+  "Per-decision latency bracket" box in Phase 5. The W&B keys moved `cem_solve_*` →
+  `per_cycle_*` because the number's meaning changed (~1/n_envs of the old one), so the Phase-3
+  baseline value logged under the old keys is **not comparable** to anything logged since.
 
 - [x] Owned **eval driver** (`src/eval.py`): thin driver that (a) opens the W&B run via the
   owned helper, (b) invokes the vendored `eval_wm.run` (byte-unmodified), (c) captures
@@ -396,15 +402,54 @@ Contracts, `src/interfaces.py`.)
   **Call count confirmed against source (2026-07-15):** traced `CEMSolver.solve` → `get_cost` →
   `rollout` in the installed swm 0.1.1 (both `wm/prejepa/prejepa.py` and `wm/lewm/lewm.py`) — the
   `candidates` tensor CEMSolver samples is `horizon`-long only, not `n_obs + horizon`, so `rollout`
-  drives `(horizon − n_obs) + 1` predict calls per solve, not `horizon + 1`. Was 180 (`(5+1)×30`,
-  unconfirmed guess); corrected to **150** (`((5−1)+1)×30 = 5×30`). `ENCODER_CALLS_PER_CYCLE=2`
-  unaffected (goal + initial-obs encode, unrelated to the horizon/n_obs split). Negative-overhead
-  warning + Amdahl in `report.decompose`/`dilution_disclosure`; `test_profile.py` removed, covered
-  by `tests/test_report.py` (expected values updated for the 150 constant). Still pod-run pending:
-  this confirms the call-count *weighting*, not the real per-cycle wall-clock measurement.
+  drives `(horizon − n_obs) + 1` predict calls **per decision**, not `horizon + 1`. Was 180
+  (`(5+1)×30`, unconfirmed guess); corrected to **150** (`((5−1)+1)×30 = 5×30`).
+  `ENCODER_CALLS_PER_CYCLE=2` unaffected (goal + initial-obs encode, unrelated to the horizon/n_obs
+  split). Negative-overhead warning + Amdahl in `report.decompose`/`dilution_disclosure`;
+  `test_profile.py` removed, covered by `tests/test_report.py` (expected values updated for 150).
+  **Both counts are PER-DECISION** (one episode's plan) — the measured cycle must use the same unit;
+  see the per-decision latency box below, which fixes the measurement side. Still pod-run pending:
+  the above confirms the call-count *weighting*, not the real wall-clock measurement.
+- [ ] 🔴 **Per-decision latency bracket — unit mismatch in the decomposition + headline.**
+  `SolveLatencyRecorder` brackets `reset → end_solve`, but both hooks sit OUTSIDE `solve`'s env
+  loop (`cem.py:148` / `152` / `279`), so one record times **every still-alive episode**, while
+  `ENCODER/PREDICTOR_CALLS_PER_CYCLE` count **one** decision. `report.decompose` divides across that
+  gap → overhead absorbs ~98% of the cycle, `p≈0.02`, Amdahl ceiling ≈1.02 (a false "quantization
+  can't help"). **Silent** — the error inflates overhead, so the negative-overhead alarm cannot fire.
+  Traced on source (2026-07-15): `world.num_envs = eval.num_eval = 50`; dataset eval asserts
+  `num_envs == len(episodes_idx)` (`world/world.py:503`) and freezes terminated envs
+  (`reset_mode='wait'`), so env *i* ≡ episode *i* for the run; `policy.py:379-404` passes every
+  alive episode to ONE `solver()` call; `batch_size=1` (pinned; `LeWM.criterion` errors B>1) makes
+  the env loop sequential. Nothing runs in parallel — `EnvPool.step` is a Python for-loop over
+  in-process envs (`world/env_pool.py:134`); "parallel envs" in the platform docstrings names a
+  vectorized interface, not concurrency. So one solve = N decisions back-to-back, wall clock = their
+  **sum**; only the 300-candidate fan-out inside one `get_cost` is batched.
+  - [x] `src/eval_latency.py` — bracket **per env** via consecutive `start_batch` hooks (the last
+    closing at `end_solve`), one record per decision; sync per span. Guard `current_bs == 1` off the
+    per-step `__call__`'s `candidates` (fails loud if `batch_size` ever ≠ 1, which would silently
+    restore the mismatch). `n_solves` → `n_cycles`; consumers (`src/eval.py`, `src/sr_eval.py`)
+    updated. Constants unchanged — the measurement moves to the counts, not the reverse.
+    → done: `src/eval_latency.py` (per-env bracket + `batch_size==1` guard + `n_cycles`),
+    `src/eval.py` + `src/sr_eval.py` (key rename; W&B `cem_solve_*` → `per_cycle_*` since the
+    metric's meaning changed), `tests/test_eval_latency.py` (a 50-env solve must record 50
+    latencies — fails against the old bracket, which recorded 1). Stale "per-solve" wording
+    corrected in `src/report.py`, `src/benchmark.py`, `conf/experiment/eval_{lewm,dino}.yaml`.
+    → verified off-pod: `pytest` 73 passed (was 70; +3 guards).
+  - [ ] 🖥️ **Pod-verify (the real gate):** the per-env spans must **sum to the solver's own printed
+    `CEM solve time`** (`cem.py:282`) less the pre-loop warm-start — the reconciliation proving both
+    measure the same work. → also verify: records per solve == alive-env count; `overhead_ms` lands
+    at a believable fraction, not ~98%.
+  - Rejected alternatives: divide solve by env count (yields a mean; p95 of `solve/n` ≠ p95 of
+    per-env latency); scale the constants (the factor decays as episodes terminate — not constant);
+    latency-only pass at `num_envs=1` (breaks Phase-3 eval parity + the same-solves SR pairing).
+  - Accepted residuals: each span carries one env's iterations + writeback + the NEXT env's info
+    expansion (the hook fires after it), so boundary attribution shifts by one — the unit stays
+    homogeneous (every env contributes exactly one of each); the last span also absorbs the trailing
+    `outputs` assembly, and the pre-loop warm-start falls outside all spans (negligible +
+    model-independent for non-`Actionable` models, docs/platform_api.md §5).
 - [ ] 🖥️ **Latency benchmark** on the L40S: per model × precision, the
   **headline is latency** — three equal-n p50/p95 distributions (SPEC §Interface Contracts):
-  **per-cycle** (headline) off the observation-only CEM-solve-latency callback over the SR
+  **per-cycle** (headline) off the observation-only per-decision latency callback over the SR
   eval-shim run; **encode-step** + **predictor-step** off isolated per-precision engine loops
   (fixed iters, warm-up dropped). **No fixed-wall-clock rollout-count run** (owner decision).
   **Peak GPU memory** is sampled during these latency runs via `cudaMemGetInfo`/nvidia-smi
@@ -416,8 +461,10 @@ Contracts, `src/interfaces.py`.)
   util/mem to `$STABLEWM_HOME/reports/phase5/gpu_logs/<track>.<precision>.<phase>.dmon.log` so
   the unlocked hardware state is recorded, not assumed.
   **SR** comes from the Phase-3 eval driver re-run on the optimized model, slotted into
-  `CEMSolver(model=...)` through the `get_cost`/`get_action` shim over the engine's
-  `encode`/`predict` — so per-cycle latency and SR come from the **same solves**. The DINO shim
+  `CEMSolver(model=...)` through the **`get_cost`-only** shim over the engine's
+  `encode`/`predict` (NOT `get_cost`/`get_action` — `get_action` must stay absent or the shim
+  becomes `Actionable` and the CEM warm-start stops zero-padding; SPEC §Interface Contracts —
+  SR-per-precision) — so per-cycle latency and SR come from the **same solves**. The DINO shim
   reproduces `PreJEPA.rollout` (full `404` carry, per-step action-replace, proprio+pixels cost).
   Same env/goal/precision across models; only the model differs.
   → **instrument + labeling fixes (plumbing landed, pod-run + gated SR pending):**
@@ -426,14 +473,14 @@ Contracts, `src/interfaces.py`.)
   engine/context arena is counted (was undercounting the optimized path). `rollouts_completed`
   /`throughput` documented as **model-only** (planner-free ceiling; realized = gated eval-shim)
   and `p50/p95` as **predictor-step** latency (encode untimed; LeWM on a launch+sync floor) —
-  in the benchmark docstring + `interfaces.BenchResult`. The `get_cost`/`get_action` SR shim
+  in the benchmark docstring + `interfaces.BenchResult`. The **`get_cost`-only** SR shim
   itself stays 🔴 owner-gated (eval/CEM parity).
   → **latency-methodology rework (landed, pod-run pending):** the fixed-wall-clock loop is
   **removed** from `src/benchmark.py` — `rollouts_completed`/`throughput` and `time_budget_s`
   (`ExportConfig`/`Benchmark`) dropped (owner decision: headline is latency). `src/benchmark.py`
   emits **encode-step + predictor-step** p50/p95 per precision (isolated engine loops, `n_latency_
   iters=100` timed after `warmup=10` dropped) and samples **peak GPU memory** during them; **per-cycle** p50/p95 comes
-  from `src/eval_latency.py`'s per-solve records (now full distribution + raw list) over the
+  from `src/eval_latency.py`'s per-decision records (full distribution + raw list) over the
   `src/sr_eval.py` run, truncated to common min-n in `src/report.py` (equal-n). GPU clocks are
   **not** locked (SPEC §Parity).
   `interfaces.BenchResult` carries the three latency distributions + peak mem (no rollouts/throughput).
@@ -502,8 +549,9 @@ Contracts, `src/interfaces.py`.)
   `{track:{precision:{success_rate, per_cycle_latencies_ms}}}` `sr.json` that `src.study`/`src.report`
   join via `sr=<file>` (read-modify-write per track key → separate lewm/dino pod sessions don't
   clobber, CLAUDE.md §8). **Per-cycle latency rides the SAME run** — the eval overlay's
-  `SolveLatencyRecorder` (full distribution + raw list) records one latency per CEM solve, so the
-  headline per-cycle latency and the SR come from the same solves (SPEC §Interface Contracts).
+  `SolveLatencyRecorder` (full distribution + raw list) records one latency per **decision** (per
+  alive episode per solve, NOT per solve), so the headline per-cycle latency and the SR come from
+  the same solves (SPEC §Interface Contracts).
   **Seam** (rationale in SPEC §Interface Contracts — "Injection seam"): `eval_wm.run` has no config
   seam for a model object, so the driver runs it byte-unmodified and slots the shim in by a scoped
   `load_pretrained` patch (swaps only the model object → parity preserved). Reuses `src.eval`'s
@@ -608,8 +656,10 @@ W&B; adapter target modules confirmed real.
 - `src/gpu_clocks.py` — owned passive `nvidia-smi dmon` GPU-telemetry observer
   (clock/power/temp/util/mem) bracketing each timed engine run; logs to
   `$STABLEWM_HOME/reports/phase5/gpu_logs/` (Phase 5, SPEC §Parity).
-- `src/eval_latency.py` — owned observation-only CEM-solve-latency callback (`CEMSolver.Callback`
-  subclass, injected via `cfg.solver.callbacks`; Phase 3).
+- `src/eval_latency.py` — owned observation-only **per-decision** planning-latency callback
+  (`CEMSolver.Callback` subclass, injected via `cfg.solver.callbacks`; Phase 3, re-bracketed in
+  Phase 5). One record per episode's decision (per `start_batch` span), NOT per solve — a solve
+  plans every alive episode sequentially.
 - `src/eval.py` — owned thin Phase-3 eval driver: runs the byte-unmodified `eval_wm.run`,
   captures `World.evaluate`'s SR, and logs SR + latency to W&B (no monkeypatch/vendored edit).
 - `conf/` — owned Hydra overlays (`conf/experiment/{lewm,dinov3}.yaml` train,

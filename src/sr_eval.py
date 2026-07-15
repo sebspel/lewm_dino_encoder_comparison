@@ -115,10 +115,11 @@ def _eval_one(hydra_argv, shim):
     The shim rides in by patching `load_pretrained` (the only seam — see module docstring);
     the patch is scoped to the run and restored after. `output.filename` points at a fresh,
     driver-owned results file (the entrypoint appends, so a shared file would accumulate runs).
-    The **per-cycle (CEM-solve) latency** rides in on the SAME run via the eval overlay's
+    The **per-cycle (per-decision) latency** rides in on the SAME run via the eval overlay's
     observation-only `SolveLatencyRecorder` (`cfg.solver.callbacks`), so per-cycle latency and
-    SR come from the same solves (SPEC §Interface Contracts). The raw per-solve list is returned
-    so `src.report` can truncate to the common min-n across tracks (equal-n percentiles)."""
+    SR come from the same solves (SPEC §Interface Contracts). One record per alive episode per
+    solve — NOT one per solve, which would time every episode at once. The raw per-decision list
+    is returned so `src.report` can truncate to the common min-n across tracks (equal-n)."""
     import stable_worldmodel as swm
 
     from scripts.plan import eval_wm
@@ -131,9 +132,9 @@ def _eval_one(hydra_argv, shim):
     with patch.object(swm.wm.utils, "load_pretrained", return_value=shim):
         eval_wm.run(cfg)
     latency = eval_latency.pop_records()
-    if latency["n_solves"] == 0:
+    if latency["n_cycles"] == 0:
         raise RuntimeError(
-            "the latency callback recorded no CEM solves — is SolveLatencyRecorder injected "
+            "the latency callback recorded no decisions — is SolveLatencyRecorder injected "
             "via cfg.solver.callbacks in the eval overlay?"
         )
     return _parse_success_rate(out_file.read_text()), latency["latencies_ms"]
@@ -185,7 +186,7 @@ def main():
             # recorded, not merely assumed (SPEC §Parity).
             with log_gpu(f"{track}.{precision}.sr_eval", out_dir / "gpu_logs"):
                 sr, per_cycle_ms = _eval_one(hydra_argv, shim)
-            # Carry the RAW per-solve latencies (not pre-reduced percentiles) so src.report
+            # Carry the RAW per-decision latencies (not pre-reduced percentiles) so src.report
             # truncates to the common min-n across tracks before taking p50/p95 (equal-n).
             sr_by_precision[precision] = {
                 "success_rate": sr,
@@ -197,7 +198,7 @@ def main():
             wandb.log({f"sr/{precision}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)})
             print(
                 f"[sr-eval:{track}] {precision}: success_rate={sr} "
-                f"n_solves={len(per_cycle_ms)}"
+                f"n_cycles={len(per_cycle_ms)}"
             )
     finally:
         run.finish()
