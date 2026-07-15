@@ -40,7 +40,7 @@ that pad REPEATS the last real frame, adding no value outside the `T == HS` wind
 Owner sign-off (OWNER-ONLY silent-failure boundary — a bad calib set degrades every INT8
 number with NO error): calibration method = `max` (the Model-Optimizer analogue of the old
 MinMax calibrator, suited to the ViT activations); 512 clips; strided evenly across all
-episodes; the predictor roll yields 4 windows per clip -> ~2048 predictor samples (owner-
+episodes; the predictor roll yields 3 windows per clip -> ~1536 predictor samples (owner-
 confirmed 2026-07-15: clip coverage held at 512, sample count allowed to grow — coverage is
 the point of the fix). The remaining Model-Optimizer quant knobs (Q/DQ format,
 per-channel-vs-per-tensor, op-type exclusions) stay at the tool's INT8 defaults pending owner
@@ -83,10 +83,13 @@ CALIB_DATASET = "pusht_expert_train.lance"
 CALIB_FRAMESKIP = 5
 DEFAULT_N_CLIPS = 512
 _IMG_SIZE = 224
-# Frames of action the roll needs: the rollout splits `action_sequence` into the n_obs prefix
-# and the predicted remainder, then steps `n_steps + 1` times (= CEM_HORIZON + 1 predict calls,
-# matching PREDICTOR_CALLS_PER_CYCLE = (horizon + 1) × n_steps).
-_ROLL_FRAMES = EVAL_N_OBS + CEM_HORIZON
+# Frames of action the roll needs: CEMSolver's real `candidates` tensor (`solver/cem.py:191-199`)
+# has time-length `horizon` ONLY — NOT `n_obs + horizon` — and `rollout` splits that into the
+# n_obs prefix (tags the current state, no predict call) and a `horizon − n_obs` remainder that
+# drives `n_steps = horizon − n_obs` predict calls, plus one final call (= `(horizon − n_obs) + 1`
+# predict calls, matching PREDICTOR_CALLS_PER_CYCLE = ((horizon − n_obs) + 1) × n_steps). So the
+# roll's action-sequence length must be CEM_HORIZON itself, not EVAL_N_OBS + CEM_HORIZON.
+_ROLL_FRAMES = CEM_HORIZON
 
 
 def _sample_cem_actions(n: int, frames: int, generator: torch.Generator) -> Tensor:
@@ -200,7 +203,7 @@ class CalibrationData:
         drives it — CEM-proposal actions + the predictor's own autoregressive latents (module
         docstring; SPEC §Interface Contracts — calibration distribution). LeWM -> (latent, RAW
         action); DINO -> the assembled 404 embedding. Each clip contributes the roll's
-        `T == HISTORY_SIZE` windows, so the stream is ~4x the clip count.
+        `T == HISTORY_SIZE` windows, so the stream is ~3x the clip count.
 
         The clips' EXPERT actions (`self.action`) are deliberately unused here — feeding them is
         the ~4x under-scale this fix removes. They stay on `CalibrationData` as the reference the

@@ -147,8 +147,11 @@ requirements those signatures must satisfy; it does not restate the signatures.
   side, already fidelity-gated) rather than a re-implementation — that is the line: reuse the rollout,
   never the solver; the proposal is reproduced from a one-line formula read off the source, not a
   dependency on it. **Sample count (owner, 2026-07-15):** clip coverage stays at the signed-off **512**;
-  the roll emits the `T == HS` windows, so the predictor stream grows ~4× to ~2048 samples. Coverage is
-  the point of the fix, so the count was allowed to grow rather than shrinking the clip draw to hold 512.
+  the roll emits the `T == HS` windows, so the predictor stream grows ~3× to ~1536 samples (the roll's
+  action-sequence length is `CEM_HORIZON` — matching the real `CEMSolver` candidates tensor, which is
+  `horizon`-long, not `n_obs + horizon` — yielding `(horizon − n_obs) + 1` predict calls and 3 steady-state
+  windows per clip, not 4). Coverage is the point of the fix, so the count was allowed to grow rather than
+  shrinking the clip draw to hold 512.
   Accepted residuals: (a) calibration rolls the FP32/torch predictor while the INT8 engine drifts
   marginally wider; (b) `max` on a Gaussian grows with draw count, so the calibration max (~4.3σ,
   measured) sits just under a full eval's (~5.5σ) — clipping ~1e-5 of action values against the **32.1%

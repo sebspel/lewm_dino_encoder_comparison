@@ -38,10 +38,17 @@ DINO_PROPRIO_DIM = 4
 # CEM planning-cycle call counts (docs/platform_api.md §5). The measured per-cycle latency is
 # decomposed by weighting the isolated engine-step latencies by these counts and subtracting
 # from the cycle (overhead = cycle − enc·ENC_CALLS − pred·PRED_CALLS; SPEC §Interface
-# Contracts). 🔴 confirm against the installed `CEMSolver.solve` on the pod, not assumed.
+# Contracts). Confirmed against the installed `CEMSolver.solve` → `get_cost` → `rollout`
+# (`solver/cem.py:191-199`, `wm/prejepa/prejepa.py:218-348`, `wm/lewm/lewm.py:58-108`): the
+# `candidates` tensor CEMSolver samples has time-length `horizon` ONLY (not `n_obs + horizon`);
+# `rollout` splits it into an `n_obs`-length prefix (tags the current state, no predict call)
+# and a `horizon − n_obs`-length remainder that drives `n_steps = horizon − n_obs` autoregressive
+# predict calls, plus one final call → `(horizon − n_obs) + 1` predict calls per solve, identical
+# in both tracks. NOT `horizon + 1` (that assumes the candidates include the n_obs prefix, which
+# they don't).
 CEM_NUM_SAMPLES = 300  # candidate fan-out — the batch `predict` is timed at
 ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, batch 1)
-PREDICTOR_CALLS_PER_CYCLE = 180  # (horizon 5 + 1) × n_steps 30, batched over the candidates
+PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, batched over the candidates
 
 # CEM action-proposal shape — the distribution `predict` is ACTUALLY driven by at eval, and
 # what the INT8 predictor calibration stream reproduces (SPEC §Interface Contracts —

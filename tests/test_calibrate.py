@@ -29,9 +29,11 @@ from src.fidelity import build_dummy_dino_model
 from src.smoke import build_dummy_lewm
 
 N, BATCH, T = 20, 8, HISTORY_SIZE  # 20 clips, batch 8 -> trims to 16 (two full batches)
-# The roll emits one window per predict call and keeps the `T == HS` ones. At eval n_obs=1 the
-# windows are 1,2,3,3,3,3 over CEM_HORIZON+1 calls -> 4 kept per clip-chunk.
-STEADY_PER_CHUNK = CEM_HORIZON + 1 - (HISTORY_SIZE - 1)
+# The roll emits one window per predict call and keeps the `T == HS` ones. The roll's
+# action-sequence length is CEM_HORIZON (matching the real CEMSolver candidates tensor, which
+# is `horizon`-long, NOT `n_obs + horizon`); at eval n_obs=1 the windows are 1,2,3,3,3 over
+# (CEM_HORIZON - 1) + 1 = CEM_HORIZON calls -> 3 kept per clip-chunk.
+STEADY_PER_CHUNK = CEM_HORIZON - HISTORY_SIZE + 1
 
 
 def _clips(n=N):

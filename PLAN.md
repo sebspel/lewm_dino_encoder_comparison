@@ -324,6 +324,12 @@ Contracts, `src/interfaces.py`.)
     repeat-padded by `_predict_hist_adapt`, adding no new range). `encoder_batches` unchanged.
     → verified off-pod: `pytest` 70 passed; measured expert bound 1.0 vs proposal max **4.34**
     (~4×) and **32.1%** of action values clipped at the old scale.
+    **Correction (2026-07-15):** `_ROLL_FRAMES` was `EVAL_N_OBS + CEM_HORIZON` (= 6), silently
+    inheriting the same `horizon + 1` predict-call assumption flagged below as unconfirmed. Traced
+    `CEMSolver.solve` → `get_cost` → `rollout` (both tracks): the real `candidates` tensor is
+    `horizon`-long only, not `n_obs + horizon`, giving `(horizon − n_obs) + 1` predict calls per
+    solve (5, not 6). Fixed to `_ROLL_FRAMES = CEM_HORIZON`; the roll now yields 3 steady-state
+    (`T == HISTORY_SIZE`) windows per clip, not 4 (~1536 predictor samples, not ~2048).
   - [x] `src/probe_ranges.py` — read-only range probe (`uv run python -m src.probe_ranges
     [track=<lewm|dino>] [n_clips=<int>]`): calib vs eval max-abs per predictor input + ratio.
     Measures INPUT tensors only — a mismatch confirms; a clean result does not exonerate
@@ -331,7 +337,12 @@ Contracts, `src/interfaces.py`.)
   - [ ] 🖥️ **Run the probe on the pod (real checkpoints + dataset), both tracks** — the one
     remaining assumption is that the DRAWN expert actions really sit in `Box(-1,1)`, and the
     latent axis is not derivable from source.
-    → verify: pre-fix ratios > 1 (confirms); post-fix calib column ≥ eval column on every row.
+    → verify: action ratio ≈ 4x → mechanism confirmed on real data, proceed. Ratio ≈ 1 → the
+    drawn actions are NOT box-bounded, the ~4x premise is wrong → STOP and re-diagnose.
+    Latent ratio sizes the second axis (>1 → the autoregressive roll is load-bearing too).
+    **Diagnostic only, NOT a post-fix check:** it reports expert-vs-proposal and encoder-vs-
+    rolled, i.e. the gap the fix closes; after the fix the "calib" column IS the eval column,
+    so the comparison is tautological. **SR is the post-fix verifier.**
   - [ ] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks:
     `uv run python -m src.export model=<lewm|dino> precision=int8`.
     → verify: quantized ONNX carries QuantizeLinear; INT8 engine builds.
@@ -375,15 +386,22 @@ Contracts, `src/interfaces.py`.)
   benchmark's isolated engine-step p50s × the CEM per-cycle call counts give the enc/pred cycle
   shares, and **overhead = measured per-cycle − enc − pred** (SPEC §Interface Contracts —
   subtraction, not a solver mirror); a **negative overhead is surfaced loudly**, never clamped.
-  **Confirm the call counts against the installed `CEMSolver.solve`** (encode, predict, n_steps);
-  do not assume 180/2. Reports the per-component shares + **optimizable fraction**
-  `p=(enc+pred)/cycle` + Amdahl ceiling `1/(1-p)`, per model × precision.
+  **Confirm the call counts against the installed `CEMSolver.solve`** (encode, predict, n_steps).
+  Reports the per-component shares + **optimizable fraction** `p=(enc+pred)/cycle` + Amdahl
+  ceiling `1/(1-p)`, per model × precision.
   → **landed (pod-run pending):** `src/profile.py` + its CEM-iteration mirror **retired** — the
   PyTorch per-call timing couldn't reconcile with the engine-context cycle, so the decomposition
   now lives in `src/report.py::decompose` off the benchmark engine-step latencies
-  (`ENCODER/PREDICTOR_CALLS_PER_CYCLE` moved to `interfaces.py`, 🔴 confirm vs source). Negative-
-  overhead warning + Amdahl in `report.decompose`/`dilution_disclosure`; `test_profile.py` removed,
-  covered by `tests/test_report.py`.
+  (`ENCODER/PREDICTOR_CALLS_PER_CYCLE` moved to `interfaces.py`).
+  **Call count confirmed against source (2026-07-15):** traced `CEMSolver.solve` → `get_cost` →
+  `rollout` in the installed swm 0.1.1 (both `wm/prejepa/prejepa.py` and `wm/lewm/lewm.py`) — the
+  `candidates` tensor CEMSolver samples is `horizon`-long only, not `n_obs + horizon`, so `rollout`
+  drives `(horizon − n_obs) + 1` predict calls per solve, not `horizon + 1`. Was 180 (`(5+1)×30`,
+  unconfirmed guess); corrected to **150** (`((5−1)+1)×30 = 5×30`). `ENCODER_CALLS_PER_CYCLE=2`
+  unaffected (goal + initial-obs encode, unrelated to the horizon/n_obs split). Negative-overhead
+  warning + Amdahl in `report.decompose`/`dilution_disclosure`; `test_profile.py` removed, covered
+  by `tests/test_report.py` (expected values updated for the 150 constant). Still pod-run pending:
+  this confirms the call-count *weighting*, not the real per-cycle wall-clock measurement.
 - [ ] 🖥️ **Latency benchmark** on the L40S: per model × precision, the
   **headline is latency** — three equal-n p50/p95 distributions (SPEC §Interface Contracts):
   **per-cycle** (headline) off the observation-only CEM-solve-latency callback over the SR

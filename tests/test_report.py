@@ -60,14 +60,14 @@ def test_fp32_relative_speed_and_sr():
 
 
 def test_decompose_overhead_by_subtraction():
-    """overhead = cycle − enc·2 − pred·180; p = (enc+pred)/cycle."""
+    """overhead = cycle − enc·2 − pred·150; p = (enc+pred)/cycle."""
     bench = _synthetic()
     d = report.decompose(bench["lewm"]["fp32"])
-    # enc_cyc = 1.0*2 = 2; pred_cyc = 0.25*180 = 45; model = 47; cycle = 100
+    # enc_cyc = 1.0*2 = 2; pred_cyc = 0.25*150 = 37.5; model = 39.5; cycle = 100
     assert math.isclose(d["enc_cyc_ms"], 2.0)
-    assert math.isclose(d["pred_cyc_ms"], 45.0)
-    assert math.isclose(d["overhead_ms"], 53.0)  # 100 - 47
-    assert math.isclose(d["optimizable_fraction"], 0.47)
+    assert math.isclose(d["pred_cyc_ms"], 37.5)
+    assert math.isclose(d["overhead_ms"], 60.5)  # 100 - 39.5
+    assert math.isclose(d["optimizable_fraction"], 0.395)
 
 
 def test_decompose_cycle_none_until_joined():
@@ -75,17 +75,17 @@ def test_decompose_cycle_none_until_joined():
     bench["lewm"]["fp32"]["per_cycle_p50_ms"] = math.nan
     d = report.decompose(bench["lewm"]["fp32"])
     assert d["overhead_ms"] is None and d["optimizable_fraction"] is None
-    assert math.isclose(d["model_cyc_ms"], 47.0)  # enc/pred model shares still stand
+    assert math.isclose(d["model_cyc_ms"], 39.5)  # enc/pred model shares still stand
 
 
 def test_dilution_disclosure_model_only_and_realized():
     bench = _synthetic()
     d = report.dilution_disclosure(bench, "lewm")
-    assert math.isclose(d["optimizable_fraction"], 0.47)
+    assert math.isclose(d["optimizable_fraction"], 0.395)
     assert d["amdahl_ceiling"] > 1.0
     fp16 = d["per_precision"]["fp16"]
-    # model-only speedup = 47 / (0.6*2 + 0.15*180) = 47 / 28.2
-    assert math.isclose(fp16["model_only_speedup"], 47.0 / 28.2)
+    # model-only speedup = 39.5 / (0.6*2 + 0.15*150) = 39.5 / 23.7
+    assert math.isclose(fp16["model_only_speedup"], 39.5 / 23.7)
     # measured realized = per-cycle p50 ratio = 100 / 60
     assert math.isclose(fp16["measured_realized_speedup"], 100.0 / 60.0)
     # predicted realized diluted below the model-only speedup by the overhead floor
