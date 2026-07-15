@@ -303,6 +303,37 @@ Contracts, `src/interfaces.py`.)
     EP affects calibration speed only, not scales (rationale in SPEC). Verify: quantized ONNX
     carries QuantizeLinear + INT8 engine builds; encoder calibration binds CUDA EP, predictor
     binds CPU EP — pod-only (needs dataset + `tensorrt` + `modelopt`).
+- [ ] 🔴🖥️ **Calibration-distribution fix — INT8 SR collapse (reopens the INT8 box above).**
+  Observed: lewm FP32 94% / FP16 96% / **INT8 48%**. Cause: the predictor calibration stream is drawn
+  single-step from **expert** actions, but `CEMSolver.solve` drives `predict` with an **unclamped
+  N(0,1)** proposal (`randn * var + mean`; `var_scale=1.0`, mean 0 — installed swm 0.1.1
+  `solver/cem.py:191-207`) and with its **own autoregressive latents** → `max` scales fit ~4× too
+  tight → saturation (SPEC §Interface Contracts — calibration distribution). Owner-chosen
+  (2026-07-15): reproduce the distribution in the builder; do **not** harvest a live CEM/eval rollout.
+  - [ ] 🖥️ **Range probe first (read-only — no calibrate/PTQ edit)**: max-abs of (a) encoder vs
+    autoregressive-predicted latents and (b) expert action packs vs CEM-proposal samples, both
+    tracks. (b) is near-free and confirms the drawn expert actions really sit in `Box(-1,1)` — the
+    mechanism is settled from the solver source, the expert *bound* is the one assumption left.
+    → verify: probe reports whether rollout latent / CEM action ranges exceed the calibration maxima.
+  - [ ] `src/interfaces.py` — add `CEM_VAR_SCALE = 1.0` + `CEM_HORIZON = 5` beside `CEM_NUM_SAMPLES`,
+    read from vendored `scripts/plan/config/solver/cem.yaml` + the eval config. 🔴 confirm vs source.
+  - [ ] `src/calibrate.py::CalibrationData.predictor_batches` — replace the clip's expert `a` with
+    CEM-proposal samples (`randn * CEM_VAR_SCALE`, zero mean, **unclamped**, fixed seed →
+    deterministic), packed env→model as the shim packs (`MODEL_ACTION_DIM=10`); roll `predict`
+    autoregressively over `CEM_HORIZON` so the stream carries predicted latents, not only encoder
+    latents. `encoder_batches` (strided expert obs) **unchanged**.
+    → verify: `uv run pytest -v` green off-pod; drawn action/latent max-abs ≥ the probe's ranges.
+  - [ ] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks:
+    `uv run python -m src.export model=<lewm|dino> precision=int8`.
+    → verify: quantized ONNX carries QuantizeLinear; INT8 engine builds.
+  - [ ] 🖥️🔴 Re-run `uv run python -m src.precision_match track=<lewm|dino>` → new INT8 drift rows;
+    owner sign-off. **Not the arbiter** — it runs on nominal inputs and rated lewm INT8 "borderline"
+    while SR collapsed (SPEC §Requirements — engine-fidelity gate).
+  - [ ] 🖥️ Re-run `uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
+    precision=int8`, both tracks.
+    → verify (**the real gate**): lewm INT8 SR recovers toward FP16 (96%). Still collapsed →
+    **FP16-only fallback** (SPEC §Execution Rules): record the INT8 row as degraded and advance.
+  - ⏱️ 3-attempt debugging cap (CLAUDE.md §7); fallback = FP16-only.
 - [x] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** run
   `uv run python -m src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8
   engines (INT8 from the Model-Optimizer Q/DQ ONNX) → engine-vs-PyTorch drift table. 🔴 OWNER

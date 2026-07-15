@@ -104,7 +104,7 @@ source (.venv/...) and scripts/train/*.py before wiring to it. When unsure, read
 source or ask — never call a platform method from memory.
 
 ## 12. Plan vs Spec Separation
-`PLAN.md` carries execution steps only — ordered checkboxes, commands, file paths, owner
-gates, and verify criteria. Rationale, justification, and design reasoning belong in
-`SPEC.md` (and `docs/`), never in `PLAN.md`. Keep PLAN steps terse; if a "why" is worth
-recording, put it in `SPEC.md` and reference it from PLAN if needed.
+`PLAN.md` carries execution steps only — ordered checkboxes, commands, file paths, owner gates, and verify criteria.
+`SPEC.md` carries the stable contract — requirements, invariants, scope, and ownership boundaries.
+Rationale, design reasoning, and tradeoffs belong in `docs/architecture.md` and `docs/adr/`, never in `PLAN.md`.
+Keep PLAN steps terse; if a "why" is worth recording, put it in architecture/ADR docs and reference them from SPEC or PLAN if needed.

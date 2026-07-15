@@ -104,6 +104,44 @@ requirements those signatures must satisfy; it does not restate the signatures.
   delta the marginal benefit of pushing the heavy layers to INT8 on the same FP16 backbone.
   Owner-accepted trade-off: the FP16 cast of the remainder can under/overflow a few initializers;
   keeping the remainder FP32 is the documented fallback if that drift proves unacceptable.
+- **The INT8 calibration set must match the *inference-time* input distribution, not the expert one.**
+  `max` calibration bakes **fixed per-tensor scales** from the largest absolute activation seen during
+  the calibration pass; anything outside that range **saturates** at inference. FP16 carries no fixed
+  clip, so a calibration/inference distribution gap is **invisible in FP16 and catastrophic in INT8** —
+  the observed LeWM signature (FP32 94% / FP16 96% / **INT8 48%**). That FP32≈FP16 is itself the
+  expected result, not a finding: the checkpoints are **BF16-trained**, and FP16's 10-bit mantissa
+  exceeds BF16's 7, so FP16 reproduces the trained weights' precision fully (its only risk is range, and
+  no overflow is occurring) — the 2pp is eval noise. The **encoder** calibration stream is genuinely the
+  dataset's observation distribution (strided expert clips — unchanged). The **predictor** stream is
+  not, on two axes:
+  - **Actions — established from the solver source, not inferred.** `CEMSolver.solve` (installed swm
+    0.1.1, `solver/cem.py`) draws `candidates = randn(...) * var + mean` with **no clamp to the action
+    space**, from `var_scale = 1.0` and `mean = 0` (the zero-pad warm start for non-`Actionable`
+    LeWM/DINO-WM). So `predict` is driven by an **unbounded N(0,1)** proposal reaching ≈±4 across 300
+    samples × horizon, while expert actions are bounded by `Box(-1, 1)`. Calibrating on expert actions
+    therefore under-estimates the inference action range by **~4×** and clips most of the proposal's
+    dynamic range. Under Design A, LeWM's `action_encoder` sits **inside** the predict engine, so the raw
+    action tensor and every action-encoder activation are quantized on that under-scaled range. The
+    clipped tensors are precisely the candidates CEM is trying to rank, so what breaks is the **planning
+    signal**, not merely accuracy — which is why SR collapses to near the non-planning floor rather than
+    degrading gracefully. Variance only shrinks across the 30 CEM iterations (`var = topk.std`), so
+    **iteration 0 at `var_scale` is the widest and bounds the whole run**.
+  - **Latents — autoregressive drift.** `predict` is called autoregressively over the horizon: only step
+    0 consumes an encoder latent; steps 1…H−1 consume the predictor's **own predicted latents**, which
+    drift off the encoder-latent manifold. A single-step encode→predict draw observes none of them, so
+    the latent-input scale is fit to the encoder range and clips the rollout, compounding down the
+    horizon.
+
+  **Owner decision (2026-07-15) — reproduce the distribution in the builder; do not harvest a live
+  rollout.** The predictor calibration stream samples actions from the CEM proposal (`randn * var_scale`,
+  zero mean, **unclamped** — matching the source) and rolls `predict` autoregressively over the horizon so
+  it consumes its own predicted latents. It is deliberately **not** sourced from an actual CEM/eval run:
+  that would make the INT8 scales depend on the **eval seed and sample draws** (the clip draw is
+  deterministic by design — no RNG) and would couple the quantization pipeline to the CEM solver + SR shim
+  + eval config, an owner-gated parity surface. Accepted residual: calibration rolls the FP32/torch
+  predictor while the INT8 engine drifts marginally wider — second-order against the ~4× gap it closes.
+  If matching the distribution does not recover INT8 SR, the loss is inherent to per-tensor INT8 on these
+  predictors and the documented **FP16-only fallback** applies.
 - **Every speed result carries the SR for that engine config** — no speed number is reported
   without its task-quality counterpart. **Per-cycle planning latency (p50/p95) is the headline
   speed measure** — there is no fixed-wall-clock rollout-count run (serial planning makes
@@ -300,7 +338,12 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   table** — deliberately **not** coded into a tolerance object or automated gate. The match must
   exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
   the traced `HS`): a fixed-`HS`-only check passes a hist-mismatched predict engine (SPEC
-  §Interface Contracts — fixed-history predict engine).
+  §Interface Contracts — fixed-history predict engine). It is measured on **nominal, dataset-drawn
+  inputs**, so it does **not** exercise the unbounded CEM action proposal that drives INT8 saturation:
+  the drift table rated LeWM INT8 merely "borderline" (enc_abs ~0.6–1.0) while its SR collapsed to 48%.
+  **INT8's calibration health is judged by SR, not by the drift table** (§Interface Contracts —
+  calibration distribution). Same class of blind spot as the fixed-`HS` gate: a check drawn from the
+  dataset cannot see a failure driven by the *solver's* distribution.
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8
   (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
