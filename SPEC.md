@@ -3,7 +3,7 @@
 The source of truth for **what** this project must satisfy. `PLAN.md` carries the ordered
 execution steps and progress; `CLAUDE.md` holds behavioral rules; `src/interfaces.py` is the
 typed contract in code for the owned export/benchmark/QLoRA layer. Design rationale that runs
-longer than a couple of sentences lives in `docs/` (see `docs/adr/`).
+longer than a couple of sentences lives in `docs/architecture.md` and `docs/adr/`.
 
 ---
 
@@ -30,6 +30,8 @@ contribution is the optimization + QLoRA layer above a trained checkpoint.
 ---
 
 ## Scope & Boundaries with the Platform
+
+Layering rationale: `docs/architecture.md` §1.
 
 - **Use `stable-worldmodel` as the foundation.** Training, the Push-T env, the CEM solver,
   dataset tooling, and closed-loop MPC evaluation come from the package. Do not reimplement them.
@@ -61,8 +63,8 @@ contribution is the optimization + QLoRA layer above a trained checkpoint.
   gitignored, never committed. They are **saved to and loaded from the network volume by
   default** (`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<precision>.plan`; repo-local
   `engines/` fallback only off-pod where `STABLEWM_HOME` is unset), so a pod session's built
-  engines survive teardown and are not rebuilt each session. Living on the volume does not make
-  them durable *artifacts* — they stay regenerable and are re-derived if the L40S class changes.
+  engines survive teardown. Living on the volume does not make them durable *artifacts* — they
+  stay regenerable and are re-derived if the L40S class changes.
 - **Durable artifacts persist on the persistent network volume, never in git:** datasets,
   checkpoints, exports, and the Phase-5 headline reports all live under the persistent root
   (`STABLEWM_HOME`, e.g. `$STABLEWM_HOME/reports/`). The root must point at the network volume
@@ -70,15 +72,15 @@ contribution is the optimization + QLoRA layer above a trained checkpoint.
 - Datasets are loaded via the platform (streamed from object storage or cached under the root).
 - Runtime secrets/env (`WANDB_API_KEY`, `HF_TOKEN`, `STABLEWM_HOME`) are passed at runtime.
 
-The pinned dependency set (CUDA-12 export stack, TensorRT/modelopt out of uv) and the reasons
-for those pins are recorded in `docs/adr/0001-cuda12-export-stack.md`; the executable form is
+The pinned dependency set (CUDA-12 export stack, TensorRT/modelopt out of uv) and the reasons for
+those pins are recorded in `docs/adr/0001-cuda12-export-stack.md`; the executable form is
 `pyproject.toml` + `setup.sh`. Concrete run commands live in `PLAN.md`.
 
 ### W&B logging discipline
 
-Every phase logs to the **same** W&B project. Training uses the platform's Lightning logger;
-the non-training phases (eval/benchmark/QLoRA) open the run through an owned helper that reads
-the project/entity from the same config block — no second source of truth.
+Every phase logs to the **same** W&B project. Training uses the platform's Lightning logger; the
+non-training phases (eval/benchmark/QLoRA) open the run through an owned helper that reads the
+project/entity from the same config block — no second source of truth.
 
 ---
 
@@ -88,253 +90,122 @@ the project/entity from the same config block — no second source of truth.
 owns, runtime-checked via jaxtyping + beartype. This section states the **behavioral**
 requirements those signatures must satisfy; it does not restate the signatures.
 
+### Export shape
+
 - **Export produces separate encoder and predictor engines.** The adapter's `encode` and
-  `predict` are traced and built **separately** (one ONNX graph / TensorRT engine each). The CEM
-  rollout encodes the observation **once**, caches the latent, then calls `predict`
-  autoregressively over the horizon for every candidate — a single fused `obs → latent` graph
-  could not reproduce that call pattern and would re-encode on every predictor call, inflating
-  encoder cost and erasing the encoder-cached / predictor-dominates asymmetry the study measures.
-  FP32 and FP16 share the base graph (FP16 is a build flag); **INT8 is a separately quantized
-  graph** with Q/DQ and per-tensor scales baked in from a calibration pass. Only the **model**
-  (encoder + predictor) is exported; the **CEM planner is never compiled in** — it stays in
-  Python around the engines.
+  `predict` are traced and built **separately** (one ONNX graph / TensorRT engine each), because
+  the CEM rollout encodes once, caches the latent, then calls `predict` autoregressively for
+  every candidate. FP32 and FP16 share the base graph (FP16 is a build flag); **INT8 is a
+  separately quantized graph** with Q/DQ and per-tensor scales baked in from a calibration pass.
+  Only the **model** (encoder + predictor) is exported; the **CEM planner is never compiled in**
+  — it stays in Python around the engines. (Rationale: `docs/architecture.md` §2.)
 - **"INT8" means INT8 + FP16.** The Model Optimizer quantizes only the heavy layers
   (MatMul/Gemm/Conv) to INT8 and casts the non-quantized remainder to FP16, so the engine builds
-  with both flags set. This is the realistic TRT INT8 deployment, and it makes the INT8-vs-FP16
-  delta the marginal benefit of pushing the heavy layers to INT8 on the same FP16 backbone.
-  Owner-accepted trade-off: the FP16 cast of the remainder can under/overflow a few initializers;
-  keeping the remainder FP32 is the documented fallback if that drift proves unacceptable.
-- **The INT8 calibration set must match the *inference-time* input distribution, not the expert one.**
-  `max` calibration bakes **fixed per-tensor scales** from the largest absolute activation seen during
-  the calibration pass; anything outside that range **saturates** at inference. FP16 carries no fixed
-  clip, so a calibration/inference distribution gap is **invisible in FP16 and catastrophic in INT8** —
-  the observed LeWM signature (FP32 94% / FP16 96% / **INT8 48%**). That FP32≈FP16 is itself the
-  expected result, not a finding: the checkpoints are **BF16-trained**, and FP16's 10-bit mantissa
-  exceeds BF16's 7, so FP16 reproduces the trained weights' precision fully (its only risk is range, and
-  no overflow is occurring) — the 2pp is eval noise, and with `eval.num_eval = 50` it is literally one
-  episode (47/50 vs 48/50). INT8's 48% is 24/50 — a real collapse, not noise. The **encoder** stream
-  keeps the strided expert clips: at eval the env is stepped by **CEM-planned** actions, so the encoder
-  sees planner-visited states rather than expert-demo states, but its input is a normalized image whose
-  range is bounded by construction, so the input-side `max` scale is safe. That argument does **not**
-  extend to the encoder's internal activations under off-distribution states — an accepted **lower-risk
-  residual**, not a non-issue (LeWM's encoder INT8 drift is already the "borderline" 0.6–1.0). The
-  **predictor** stream is the one that is wrong, on two axes:
-  - **Actions — established from the solver source, not inferred.** `CEMSolver.solve` (installed swm
-    0.1.1, `solver/cem.py`) draws `candidates = randn(...) * var + mean` with **no clamp to the action
-    space**, from `var_scale = 1.0` and `mean = 0`. **That `mean = 0` is a CONJUNCTION of two
-    independent conditions — both must hold, and neither is sufficient alone** (`prepare_init_action`,
-    `solver/utils.py`): (i) the models are **non-`Actionable`** — neither `LeWM` nor `PreJEPA` defines
-    `get_action`, so no actor generates a warm start (were one Actionable, it would fill the horizon
-    and `mean ≠ 0`); **and** (ii) `horizon == receding_horizon == 5`, so the policy consumes the whole
-    plan and `rest` is empty — `warm_start` (default **True**) never populates `_next_init`, so
-    `init_action=None` reaches the solver (were `receding_horizon < horizon`, the carried plan tail
-    would be **kept** and only the missing steps zero-padded → `mean = [tail, 0…] ≠ 0`). Condition (ii)
-    is a **config coincidence, not a property of these models**: lowering `receding_horizon` — e.g. to
-    raise the per-cycle sample count — would silently make the real proposal non-zero-mean while
-    `calibrate._sample_cem_actions` still draws zero-mean, re-opening this exact calibration gap with no
-    error. Both conditions are therefore **parity-gated** and pinned by tests
-    (`tests/test_sr_shim.py` — `not isinstance(shim, Actionable)`). So `predict` is driven by an
-    **unbounded N(0,1)** proposal reaching ≈±4 across 300
-    samples × horizon, while expert actions are bounded by `Box(-1, 1)`. Calibrating on expert actions
-    therefore under-estimates the inference action range by **~4×** and clips most of the proposal's
-    dynamic range. Under Design A, LeWM's `action_encoder` sits **inside** the predict engine, so the raw
-    action tensor and every action-encoder activation are quantized on that under-scaled range. The
-    clipped tensors are precisely the candidates CEM is trying to rank, so what breaks is the **planning
-    signal**, not merely accuracy — which is why SR collapses to near the non-planning floor rather than
-    degrading gracefully. Variance only shrinks across the 30 CEM iterations (`var = topk.std`), so
-    **iteration 0 at `var_scale` is the widest and bounds the whole run**.
-  - **Latents — autoregressive drift.** `predict` is called autoregressively over the horizon: only step
-    0 consumes an encoder latent; steps 1…H−1 consume the predictor's **own predicted latents**, which
-    drift off the encoder-latent manifold. A single-step encode→predict draw observes none of them, so
-    the latent-input scale is fit to the encoder range and clips the rollout, compounding down the
-    horizon.
+  with both flags set. This makes the INT8-vs-FP16 delta the marginal benefit of pushing the
+  heavy layers to INT8 on the same FP16 backbone. Owner-accepted trade-off: the FP16 cast of the
+  remainder can under/overflow a few initializers; keeping the remainder FP32 is the documented
+  fallback if that drift proves unacceptable.
+- **The INT8 calibration set must match the *inference-time* input distribution, not the expert
+  one.** The predictor calibration stream samples actions from the CEM proposal (`randn *
+  var_scale`, zero mean, **unclamped**) and rolls `predict` autoregressively so it consumes its
+  own predicted latents; it is reproduced in the builder, never harvested from a live CEM/eval
+  run. **INT8's calibration health is judged by SR, not by the drift table.**
+  (Full derivation, the two failure axes, and accepted residuals: `docs/adr/0002`.)
 
-  **Owner decision (2026-07-15) — reproduce the distribution in the builder; do not harvest a live
-  rollout.** The predictor calibration stream samples actions from the CEM proposal (`randn * var_scale`,
-  zero mean, **unclamped** — matching the source) and rolls `predict` autoregressively over the horizon so
-  it consumes its own predicted latents. It is deliberately **not** sourced from an actual CEM/eval run:
-  that would make the INT8 scales depend on the **eval seed and sample draws** (the clip draw is
-  deterministic by design — no RNG) and would couple the quantization pipeline to the CEM solver + SR shim
-  + eval config, an owner-gated parity surface. The roll is driven through the **real rollout** (model-
-  side, already fidelity-gated) rather than a re-implementation — that is the line: reuse the rollout,
-  never the solver; the proposal is reproduced from a one-line formula read off the source, not a
-  dependency on it. **Sample count (owner, 2026-07-15):** clip coverage stays at the signed-off **512**;
-  the roll emits the `T == HS` windows, so the predictor stream grows ~3× to ~1536 samples (the roll's
-  action-sequence length is `CEM_HORIZON` — matching the real `CEMSolver` candidates tensor, which is
-  `horizon`-long, not `n_obs + horizon` — yielding `(horizon − n_obs) + 1` predict calls and 3 steady-state
-  windows per clip, not 4). Coverage is the point of the fix, so the count was allowed to grow rather than
-  shrinking the clip draw to hold 512.
-  Accepted residuals: (a) calibration rolls the FP32/torch predictor while the INT8 engine drifts
-  marginally wider; (b) `max` on a Gaussian grows with draw count, so the calibration max (~4.3σ,
-  measured) sits just under a full eval's (~5.5σ) — clipping ~1e-5 of action values against the **32.1%
-  clipped (measured)** when the scale was fit to expert actions at 1.0. Both second-order against the
-  ~4× gap closed. If matching the distribution still does not recover INT8 SR, the loss is inherent to
-  per-tensor INT8 on these predictors and the documented **FP16-only fallback** applies.
+### Latency & profiling
+
 - **Every speed result carries the SR for that engine config** — no speed number is reported
-  without its task-quality counterpart. **Per-cycle planning latency is the headline
-  speed measure**, reported p50/p95 and **compared at p50** — there is no fixed-wall-clock
-  rollout-count run (serial planning makes rollouts/sec ≈ 1/per-cycle-latency, so it is redundant
-  with the equal-n latency measurement).
-- **Three statistics, three jobs — never substituted for one another** (owner ruling, 2026-07-15):
-  - **p50 — the COMPARISON basis.** The LeWM-vs-DINOv3 headline ratio and the FP32-relative
-    speedup are quoted at p50. The headline is a *mechanistic* claim (encoder compute asymmetry:
-    LeWM's single token vs DINOv3's 196-patch grid), i.e. a central-tendency question, and per-cycle
-    n is 50–100 (below) — p50 is the statistic that sample supports.
-  - **p95 — the reported tail, never a comparison basis.** Kept for all three distributions as a
-    descriptive figure. At n = 50–100 a p95 is roughly the 3rd-to-10th largest sample and its
-    interval reaches the maximum, so it is **not** load-bearing for any claim. Compounding this:
-    the per-cycle path has **no warm-up drop** (the vendored eval's warm-up pass is gated on
-    `compile`, which is `false`), so cold engine-context cost lands in exactly the samples p95
-    reads. Whether to drop a per-cycle warm-up is **owner-gated and open** — it would shrink an
-    already-small n and discard the only solve where all 50 episodes are alive.
-  - **mean — the DECOMPOSITION basis ONLY** (below); never a reported headline.
+  without its task-quality counterpart. **Per-cycle planning latency is the headline speed
+  measure**, reported p50/p95 and **compared at p50**. There is no fixed-wall-clock rollout-count
+  run.
+- **Three statistics, three jobs — never substituted for one another** (owner ruling, 2026-07-15;
+  `docs/adr/0003`): **p50** is the comparison basis (headline ratio, FP32-relative speedup);
+  **p95** is the reported tail and carries no claim; **mean** is the decomposition basis **only**
+  and is never a reported headline.
+- **A "cycle" is ONE episode's decision, not the span of one `CEMSolver.solve` call.** A solve
+  plans every still-alive episode sequentially, so its wall clock is the sum of N decisions. The
+  latency callback therefore brackets **per env** (consecutive `start_batch` hooks, the last
+  closing at `end_solve`) and **never `reset → end_solve`**. Bracketing per solve while weighting
+  by per-decision call counts inflates `overhead_ms` silently and would make the headline scale
+  with how many episodes are alive — SR-dependent, therefore track-dependent: a parity break.
+  (`docs/adr/0004`.)
+- **Per-cycle n is 50–100 per track per precision, not thousands** — establish this before
+  reading any per-cycle percentile. It is SR-dependent hence track-dependent, which is what the
+  equal-n truncation neutralises. This n is why p50 carries the comparison and p95 does not.
+- **Three latency distributions, each REPORTED as p50/p95**, mapping to the three profile slices.
+  A mean is never *reported* for any of them.
+  1. **per-cycle** — the **headline**, compared at p50: full per-decision planning latency
+     (encode + predict + overhead), measured on the real solve.
+  2. **encode-step** — a component exposing the LeWM-vs-DINOv3 encoder token-count asymmetry
+     (wall-clock-diluted in the cycle because encode is cached and runs ~twice).
+  3. **predictor-step** — a component: quantization's kernel target. Any unqualified
+     "p50/p95 latency" means **predictor-step**.
+  Percentiles are harvested from **fixed-iteration** loops (100 timed iters per step, 10 warm-up
+  iters dropped), so n is equal across tracks and the tail is not boundary-censored. encode-/
+  predict-step ride isolated per-precision engine loops; per-cycle rides the observation-only
+  per-decision latency callback over the SR eval-shim run, so **per-cycle latency and SR come
+  from the same solves**. Per-cycle samples are truncated to a common minimum n for an equal-n
+  comparison; the reported p50/p95 **and** the decomposition mean are taken off that *same*
+  truncated sample. A dedicated latency-only pass is **not** an alternative — it would break the
+  same-solves pairing.
 - **Peak memory is sampled from the driver/runtime** (`cudaMemGetInfo`/nvidia-smi), **not** the
-  torch caching allocator: TensorRT's engine and execution-context device allocations bypass
-  torch's allocator, so `torch.cuda.max_memory_allocated` would systematically undercount exactly
-  the optimized path.
+  torch caching allocator, which would systematically undercount the optimized path.
 - **The per-component profile slices are mutually exclusive and additive, by subtraction from the
-  measured cycle — and the decomposition runs on MEANS, not percentiles.** The full planning-cycle
-  time is **measured on the real CEM solve** (not
-  reconstructed from a hand-rolled solver mirror); encoder and predictor are timed in isolation and
-  weighted by their real per-cycle call counts (**confirmed against the installed `CEMSolver.solve`,
-  not assumed** — `ENCODER_CALLS_PER_CYCLE = 2`, `PREDICTOR_CALLS_PER_CYCLE = ((horizon − n_obs) + 1)
-  × n_steps = 150; the solver's `candidates` tensor is `horizon`-long, **not** `n_obs + horizon`, so
-  the rollout drives `(horizon − n_obs) + 1` predict calls, not `horizon + 1`). **Those counts are
-  per-decision, so the measured cycle must be per-decision too** — see the per-cycle definition
-  below; pairing a per-solve measurement with per-decision counts is a unit mismatch, and the
-  remainder is `overhead_ms = cycle − encoder − predictor` — the
-  un-optimizable floor (CEM sampling/topk/mean-var **plus** the criterion, the 384→404 assembly,
-  per-step action-replace/proprio-carry, and host/Python glue).
-  **Why means (owner ruling, 2026-07-15):** the slices are additive **only in expectation**.
-  `cycle = enc·calls + pred·calls + overhead` is exact for means by linearity of expectation —
-  unconditionally, for any distribution and any correlation between the terms — whereas
-  `p50(a + b) ≠ p50(a) + p50(b)` in general. A percentile decomposition therefore books its own
-  non-additivity error as "planner overhead", inflating the Amdahl denominator. Amdahl's law is
-  itself an expectation model, so the optimizable fraction `p` and the ceiling are mean-derived
-  too, and the *realized* speedup they reconcile against must be mean-based to match. This is the
-  one place a mean is used; nothing mean-based is ever reported as a headline.
-  **Accepted residual (unquantified until the pod run):** the isolated engine loops drop warm-up
-  iters but the per-cycle callback records from the first decision of the first solve, so
-  cold-start cost sits in the cycle mean and **not** in the component means — the difference is
-  booked as overhead. Means are outlier-sensitive, so this bites harder than it would at p50, and
-  because it inflates overhead the **negative-overhead alarm cannot catch it**. A
-  negative `overhead_ms` is **surfaced loudly** as a sign the call-count weighting or the isolated
-  measurement is off — never clamped. Only then are the FP32 baseline **time shares** meaningful —
-  load-bearing for the dilution disclosure below.
-- **Three latency distributions, each REPORTED as p50/p95, mapping to the three profile slices.**
-  A mean is never *reported* for any of them — it exists only as the decomposition basis above.
-  (1) **per-cycle** p50/p95 — the **headline**, compared at p50: the full per-decision planning
-  latency (encode + predict + overhead), measured on the real solve. **A "cycle" is ONE episode's decision, which is
-  not the span of one `CEMSolver.solve` call.** At eval the 50 episodes are 50 env instances held
-  **in flight together and advanced in lockstep** (`world.num_envs = eval.num_eval`; dataset-driven
-  eval asserts `num_envs == len(episodes_idx)` and *freezes* rather than auto-resets terminated
-  envs, so env *i* hosts episode *i* for the whole run). **In flight is not "in parallel": nothing
-  here executes concurrently.** `EnvPool.step` loops the envs in-process, and the policy hands every
-  still-alive episode to a **single** `solve` call whose env loop is likewise sequential at the
-  pinned `batch_size = 1` (`LeWM.criterion` errors for B>1). One solve is therefore **N independent
-  decisions computed back-to-back, and its wall clock is their sum**. The only genuinely batched
-  axis is the `num_samples` candidate fan-out *within* one episode's `get_cost`. (The platform's own
-  docstrings call the pool "parallel envs" and `batch_size` the envs "to process in parallel" —
-  that names a *vectorized interface*, not parallel execution; do not read it as concurrency.) The
-  latency callback therefore brackets **per env** — consecutive `start_batch` hooks, the last
-  closing at `end_solve` — and **never `reset → end_solve`**, which spans the whole batch. Bracketing
-  per solve while weighting components by per-decision call counts inflates `overhead_ms` toward the
-  entire cycle, and because that error makes overhead *more* positive, **the negative-overhead alarm
-  cannot catch it**. It would also make the headline scale with how many episodes are still alive —
-  SR-dependent, therefore track-dependent: a parity break; (2) **encode-step** p50/p95 — a component that
-  exposes the LeWM-vs-DINOv3 encoder token-count asymmetry (wall-clock-diluted in the cycle because
-  encode is cached and runs ~twice, so it does **not** dominate the headline); (3) **predictor-step**
-  p50/p95 — a component: quantization's kernel target. Any unqualified "p50/p95 latency" means
-  **predictor-step**. Percentiles are harvested from **fixed-iteration** loops (100 timed iters per
-  step, 10 warm-up iters dropped) — so n is equal across tracks and the tail is not boundary-censored (there is no
-  wall-clock-limited run). encode-/predict-step ride isolated
-  per-precision engine loops (timing is data-independent); per-cycle rides the observation-only
-  per-decision latency callback over the SR eval-shim run, so **per-cycle latency and SR come from the
-  same solves**. Per-cycle samples accrue one **per alive episode per solve**, and — because
-  SR-driven episodes terminate at different step counts, so both the sample count and the per-solve
-  env count vary per track — its samples are truncated to a common minimum n for an equal-n
-  comparison. The reported p50/p95 **and** the decomposition mean are all taken off that *same*
-  truncated sample, so the headline and the decomposition describe the same decisions.
-  A dedicated latency-only pass is **not** an alternative: it would break the
-  same-solves pairing above.
-  **Per-cycle n is 50–100 per track per precision, not thousands** — establish this before reading
-  any per-cycle percentile. `eval_budget = 50` policy steps, and one plan fills the action buffer
-  with `receding_horizon × action_block = 25` env actions, so the solver is called on exactly **two**
-  steps (t=0 and t=25) and is not called at all in between. Decisions therefore total
-  `50 + alive_at_25` ≤ 100: solve 0 plans all 50 episodes, solve 1 only those not yet terminated.
-  Because Push-T terminates on success, **a higher-SR track contributes fewer decisions** — n is
-  SR-dependent hence track-dependent, which is what the equal-n truncation neutralises. This n is
-  why p50 carries the comparison and p95 does not.
+  measured cycle — and the decomposition runs on MEANS, not percentiles.** The cycle is measured
+  on the real CEM solve; encoder and predictor are timed in isolation and weighted by their real
+  per-cycle call counts (**confirmed against the installed `CEMSolver.solve`, not assumed** —
+  `ENCODER_CALLS_PER_CYCLE = 2`, `PREDICTOR_CALLS_PER_CYCLE = ((horizon − n_obs) + 1) × n_steps =
+  150`). **Those counts are per-decision, so the measured cycle must be per-decision too.** The
+  remainder is `overhead_ms = cycle − encoder − predictor` — the un-optimizable floor (CEM
+  sampling/topk/mean-var, the criterion, the 384→404 assembly, per-step action-replace/
+  proprio-carry, and host/Python glue). A negative `overhead_ms` is **surfaced loudly** — never
+  clamped. (`docs/architecture.md` §6, `docs/adr/0003`.)
+
+### Adapter, rollout & shim
+
 - **One adapter Protocol, two concrete tracks.** A common two-method `encode`/`predict` interface
   (not a fused `__call__`) so export and benchmark treat both tracks identically; the latent shape
   and how the action enters `predict` differ per track (LeWM: a separate AdaLN-conditioning
   argument; DINO-WM: concatenated onto the predictor embedding — see Constants).
 - **DINO-WM `predict` is a faithful, dim-preserving `404 → 404` reconstruction of the platform
-  predictor.** It is **not** sliced back to 384: the predicted **proprio** must survive, because
-  the CEM criterion scores predicted proprio *and* pixels against the goal and the autoregressive
-  state carried across the horizon is the full `404`. The extras embedding, the initial
-  `384 → 404` assembly, and the per-step action-replacement + proprio-carry live in the **Python
-  rollout/shim**, not the compiled engine.
+  predictor.** It is **not** sliced back to 384: the predicted **proprio** must survive. The
+  extras embedding, the initial `384 → 404` assembly, and the per-step action-replacement +
+  proprio-carry live in the **Python rollout/shim**, not the compiled engine.
+  (`docs/architecture.md` §3.)
 - **LeWM `predict`'s action conditioning is per-frame, so the per-step engine boundary is
-  faithful.** LeWM's action encoder has no receptive field along the macro-step axis, so a
-  per-step `predict` is numerically identical to the platform's whole-sequence pre-encode, and the
-  action encoder may live inside the compiled per-step engine. This is an **owner-gated
-  silent-failure boundary**: a temporal (kernel > 1) action-encoder config would make the per-step
-  boundary wrong with no error, so it is guarded by a runtime assertion on the real checkpoint.
+  faithful** — the action encoder has no receptive field along the macro-step axis, so it may live
+  inside the compiled per-step engine. This is an **owner-gated silent-failure boundary**: a
+  temporal (kernel > 1) action-encoder config would make the per-step boundary wrong with no
+  error, so it is guarded by a runtime assertion on the real checkpoint.
 - **The per-step `predict` engine traces a FIXED history axis, but the platform `rollout` feeds a
-  GROWING history window.** Unlike the action encoder, the predictor *does* mix across the
-  macro-step (history) axis, and the export traces only a dynamic batch axis with the history axis
-  frozen at `HS` (= `predictor.num_frames` = 3). The platform rollout, however, hands `predict` a
-  window that grows `min(n_obs, HS) → HS` — with `n_obs = 1` at eval the lengths are 1, 2, 3, 3, …
-  — so the first steps give the fixed-`HS` engine a `T < HS` window it cannot bind (a negative-dim
-  output; the hist mismatch surfaces loudly at bind time, not as a wrong number). The shim serves a
-  `T < HS` window by **right-padding the history axis up to `HS`, running the engine, and slicing
-  the first `T` frames back** — the predictor analogue of the encoder's static-hist repeat-pad, and
-  the documented TensorRT best practice (static sequence axis + dynamic batch) that keeps the
+  GROWING history window.** The shim serves a `T < HS` window by right-padding the history axis up
+  to `HS`, running the engine, and slicing the first `T` frames back — keeping the
   precision-match-gated engine byte-for-byte (no re-export / re-quantize). This is **exact only
   under a model-specific mask-free-padding exception**: it holds iff the predictor is **causal**
-  with **prefix positional embeddings** and the padded (tail) frames' outputs are discarded, so no
-  real read position ever attends a pad frame. (The general case — right-padding a causal
-  transformer — *does* need an attention mask; this one does not, precisely because the pad sits
-  after every position we read.) Because that exactness is a silent-failure assumption, the
-  boundary is **owner-gated** and must be **proven by a variable-window (`T ∈ {1, 2}`)
-  engine-vs-torch parity check**: the fixed-`HS` precision-match and SR-cost-parity gates never
-  exercise `T < HS`, which is why the mismatch passed every gate yet crashed the SR run. **Both
-  tracks' predictors are owner-confirmed causal with prefix positional embeddings, so the identical
-  right-pad/slice fix applies to LeWM and DINO-WM alike — there is no per-track gating.** DINO-WM's
-  predict engine has the same fixed-`HS`/variable-window structure (`rollout` calls
-  `predict(z[:, -HS:])`); the fix is applied to it exactly as to LeWM, guarded by the same
-  variable-window parity check. (Were a predictor ever *not* causal, the exception would not hold
-  and the transient `T < HS` steps would fall back to the torch predictor or a dynamic-hist
-  re-export — not the case here.)
+  with **prefix positional embeddings** and the padded tail frames' outputs are discarded. Because
+  that exactness is a silent-failure assumption, the boundary is **owner-gated** and must be
+  **proven by a variable-window (`T ∈ {1, 2}`) engine-vs-torch parity check** — the fixed-`HS`
+  gates never exercise `T < HS`. **Both tracks' predictors are owner-confirmed causal with prefix
+  positional embeddings, so the identical fix applies to LeWM and DINO-WM — no per-track gating.**
+  (`docs/architecture.md` §4.)
 - **SR-per-precision re-runs the platform eval on the optimized model.** The CEM solver calls the
-  world model via **`get_cost`**, not `encode`/`predict`. So to produce the SR that pairs
-  with each precision's speed number, the exported adapter is re-wrapped in a thin **Python** shim
-  exposing **`get_cost` only** (which calls the engine's `encode`/`predict` underneath) and
-  slotted into the CEM solver, letting the platform's eval logic re-run unchanged. The shim stays
-  in Python; only `encode`/`predict` lives in the engine.
-  - **`get_action` must stay ABSENT from the shim — it is not a second method to implement.** Two
-    unrelated platform methods share that name: a **policy**-side `get_action(info_dict, **kwargs)`
-    (`WorldModelPolicy` — the *replanner*, which is not a model method at all) and the **model**-side
-    `Actionable.get_action(info, horizon, prefix_actions)` (only `TDMPC2`/`GCRL` define it; `LeWM` and
-    `PreJEPA` do **not**). `CEMSolver` touches the latter only via `prepare_init_action`'s
-    `isinstance(model, Actionable)` branch, which our non-`Actionable` tracks never take — that is
-    precisely what makes the warm start a zero-pad (`mean = 0`), load-bearing for both eval parity and
-    the INT8 calibration distribution above. Because `Actionable` is `@runtime_checkable`, `isinstance`
-    matches on **method presence, not signature**: adding *any* `get_action` to the shim — even a
-    policy-shaped one — silently flips it to `Actionable` and replaces the zero-pad with a generated
-    warm start. Pinned by `tests/test_sr_shim.py` (`not isinstance(shim, Actionable)`,
-    `not hasattr(shim, "get_action")`, both tracks). For DINO-WM the shim must reproduce the
-  platform rollout faithfully (full `404` carry, per-step action-replace, proprio+pixels cost) or
-  the SR is not comparable to the Phase-3 baseline — a silent parity break.
+  world model via **`get_cost`**, not `encode`/`predict`, so the exported adapter is re-wrapped in
+  a thin **Python** shim exposing **`get_cost` only** and slotted into the CEM solver, letting the
+  platform's eval logic re-run unchanged. The shim stays in Python; only `encode`/`predict` lives
+  in the engine. For DINO-WM the shim must reproduce the platform rollout faithfully (full `404`
+  carry, per-step action-replace, proprio+pixels cost) or the SR is not comparable to the Phase-3
+  baseline — a silent parity break.
+  - **`get_action` must stay ABSENT from the shim.** `Actionable` is `@runtime_checkable`, so
+    `isinstance` matches on **method presence, not signature**: adding *any* `get_action` — even a
+    policy-shaped one — silently flips the shim to `Actionable` and replaces the CEM zero-pad warm
+    start with a generated one, breaking both eval parity and the INT8 calibration premise. Pinned
+    by `tests/test_sr_shim.py`. (`docs/architecture.md` §5.)
   - **Injection seam (the one specified exception to the no-monkeypatch eval stance).** Model
     injection has no platform config seam, so the SR re-run uses a dedicated driver that slots the
     shim in by a **scoped patch of the checkpoint loader** around the run — swapping only which
     model the loader returns. The vendored eval entrypoint and the solver/CEM logic stay
-    byte-unmodified, and no CEM config, seed, sample count, or plan changes, so eval/CEM parity is
-    preserved (the SR differs from the FP32 baseline only by the engines' quantization drift).
-    Because it touches the model boundary the eval runs on, this seam is **owner-gated** (see
-    Implementation Boundaries — eval/CEM parity).
+    byte-unmodified, and no CEM config, seed, sample count, or plan changes. Because it touches
+    the model boundary the eval runs on, this seam is **owner-gated**.
 
 **Constants** are defined once in `src/interfaces.py` (platform-native dims are read from config,
 not re-guessed) and are **owner-gated** because a wrong value fails silently: `LATENT_DIM = 192`
@@ -354,28 +225,24 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   precision** on the **same L40S**, same env/goal, and the **same shared inference batch size**.
   There is no fixed-wall-clock budget run; **latency is the headline** and the model is the only
   difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
-  measured in equal-n fixed-iteration loops (§Interface
-  Contracts): the headline is **per-cycle latency, reported p50/p95 and compared at p50**, with
-  **encode-step** and **predictor-step** p50/p95 as components. **GPU clocks are not locked** —
-  the study runs both tracks back-to-back at the same precision on the same L40S with warm-up
-  dropped, and the LeWM-vs-DINOv3 comparison is a *ratio* on that shared hardware state, so any
-  residual boost/thermal drift applies to both tracks alike rather than to one. To make that
-  shared-state assumption **verifiable rather than asserted**, an `nvidia-smi dmon` observer logs
-  per-sample GPU telemetry (SM/mem **clock (MHz)**, **power (W)**, **temperature (C)**, utilization,
-  memory) alongside every timed engine run — both the isolated component-latency loops and the
-  per-cycle eval-shim run. Its logs persist to the network volume
-  (`$STABLEWM_HOME/reports/phase5/gpu_logs/`), the same durability contract as the headline
-  artifacts. The observer is passive (a separate `nvidia-smi` subprocess, like the `cudaMemGetInfo`
-  peak-mem sampling) and does not touch seeds, samples, or the plan. Training batch
-  size is held equal across tracks
-  (128, LeWM's paper value) and does **not** carry into inference. **Every speed figure is reported
-  with its SR**, and FP16/INT8 results quote **SR and latency degradation relative to FP32** — a
-  precision that is faster but degrades task quality must be visible.
+  measured in equal-n fixed-iteration loops (§Interface Contracts).
+- **GPU clocks are not locked** — the comparison is a *ratio* on shared back-to-back hardware
+  state, so residual boost/thermal drift applies to both tracks alike. To make that assumption
+  **verifiable rather than asserted**, a passive `nvidia-smi dmon` observer logs per-sample GPU
+  telemetry (SM/mem clock, power, temperature, utilization, memory) alongside every timed engine
+  run — both the isolated component loops and the per-cycle eval-shim run. Its logs persist to
+  `$STABLEWM_HOME/reports/phase5/gpu_logs/` (same durability contract as the headline artifacts).
+  The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
+- Training batch size is held equal across tracks (128, LeWM's paper value) and does **not** carry
+  into inference.
+- **Every speed figure is reported with its SR**, and FP16/INT8 results quote **SR and latency
+  degradation relative to FP32** — a precision that is faster but degrades task quality must be
+  visible.
 - **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap comes from the
   encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
-  DINOv3's large backbone exposing the full patch-token grid (so the predictor and planner also
-  operate over `N_patches` tokens for DINO vs one for LeWM). No batch or precision mismatch may
-  confound it; the encoder/predictor/overhead profile must attribute the gap to the right component.
+  DINOv3's large backbone exposing the full patch-token grid. No batch or precision mismatch may
+  confound it; the encoder/predictor/overhead profile must attribute the gap to the right
+  component.
 - **QLoRA comes after the frozen baseline**, and the delta is reported against frozen DINOv3-WM.
 
 ---
@@ -399,19 +266,16 @@ touching:
 
 - Dockerfile, compose, uv/pyproject scaffolding.
 - Hydra / W&B wiring around the platform entrypoints, including the owned W&B helper and the
-  **observation-only** per-decision latency **callback** — injected through the platform's own config
-  seam, so the vendored eval and solver stay byte-untouched. It may only read/record timing
-  (bracketing each env's solve span with an optional `cuda.synchronize` barrier — one barrier per
-  env, each closing the span of the env whose work it waits on) and must leave seeds, sample draws,
-  and the plan byte-identical; perturbing any of those crosses into the eval/CEM parity gate above
-  and is OWNER-ONLY. **What the callback measures is a unit, not a free choice** — it must match the
-  per-decision call counts the report weights by (§Interface Contracts — per-cycle).
+  **observation-only** per-decision latency **callback** — injected through the platform's own
+  config seam, so the vendored eval and solver stay byte-untouched. It may only read/record timing
+  (bracketing each env's solve span with an optional `cuda.synchronize` barrier) and must leave
+  seeds, sample draws, and the plan byte-identical; perturbing any of those crosses into the
+  eval/CEM parity gate above and is OWNER-ONLY. **What the callback measures is a unit, not a free
+  choice** — it must match the per-decision call counts the report weights by.
 - The DINOv3 encoder config (model string; dims read from config).
 - Export-script and benchmark-harness *plumbing* (trace call, Model-Optimizer PTQ invocation
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory
-  logging, the passive `nvidia-smi dmon` GPU-telemetry logging around each timed engine run
-  (clock/power/temp/util/mem, a separate observer subprocess that never perturbs the timed loop or
-  the plan), table/plot runners).
+  logging, the passive `nvidia-smi dmon` GPU-telemetry logging, table/plot runners).
 - The QLoRA training-loop wiring (owner specifies the targeting config).
 - The tracer-bullet smoke script.
 
@@ -440,49 +304,36 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   Drift is measured and reported only; the pass/fail is an **owner sign-off on the measured drift
   table** — deliberately **not** coded into a tolerance object or automated gate. The match must
   exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
-  the traced `HS`): a fixed-`HS`-only check passes a hist-mismatched predict engine (SPEC
-  §Interface Contracts — fixed-history predict engine). It is measured on **nominal, dataset-drawn
-  inputs**, so it does **not** exercise the unbounded CEM action proposal that drives INT8 saturation:
-  the drift table rated LeWM INT8 merely "borderline" (enc_abs ~0.6–1.0) while its SR collapsed to 48%.
-  **INT8's calibration health is judged by SR, not by the drift table** (§Interface Contracts —
-  calibration distribution). Same class of blind spot as the fixed-`HS` gate: a check drawn from the
-  dataset cannot see a failure driven by the *solver's* distribution.
+  the traced `HS`). It is measured on **nominal, dataset-drawn inputs**, so it does **not**
+  exercise the unbounded CEM action proposal that drives INT8 saturation — **INT8's calibration
+  health is judged by SR, not by the drift table** (`docs/adr/0002`).
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8
   (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
   per precision**, with encoder/predictor/overhead profiled separately to locate bottlenecks. Only
-  the model is TRT-optimized; the CEM planner stays in Python around it. Headline: the LeWM-vs-DINOv3
-  **per-cycle latency ratio at p50** (p95 reported alongside as the tail) + per-model
-  FP32→FP16→INT8 delta in **both speed and SR** (degradation quoted vs FP32 — the p50 speedup and
-  the SR delta in the **same row**, so a precision that is faster but degrades task quality cannot
-  be read as a win; speed plotted against SR).
+  the model is TRT-optimized; the CEM planner stays in Python around it. Headline: the
+  LeWM-vs-DINOv3 **per-cycle latency ratio at p50** (p95 reported alongside as the tail) +
+  per-model FP32→FP16→INT8 delta in **both speed and SR** (degradation quoted vs FP32 — the p50
+  speedup and the SR delta in the **same row**; speed plotted against SR).
   - **Headline-artifact durability.** The headline tables (serialized to text) **and** plots (PNG)
-    are persisted to the persistent network volume, the same durability contract as checkpoints and
-    engines, so a completed study survives pod teardown. W&B logging is **additive, never the sole
-    copy**. The **canonical** artifact is the raw **per-track results** (benchmark + profile numbers
-    plus the run's fairness conditions — batch, seed); tables and plots are regenerable
-    **views** of it. It is written **per track** so LeWM and DINOv3 can be benchmarked in separate
-    pod sessions without clobbering each other, and it decouples the expensive pod-only benchmark
-    from the cheap render — the report re-renders **off-pod** from the saved results, which is how
-    the separately-gated SR-per-precision is joined in without re-running the L40S benchmark. A
-    single-track render omits the two cross-track ratio plots, which need both tracks.
+    are persisted to the persistent network volume, the same durability contract as checkpoints
+    and engines. W&B logging is **additive, never the sole copy**. The **canonical** artifact is
+    the raw **per-track results** (benchmark + profile numbers plus the run's fairness conditions —
+    batch, seed); tables and plots are regenerable **views** of it. It is written **per track** so
+    LeWM and DINOv3 can be benchmarked in separate pod sessions without clobbering each other, and
+    it decouples the expensive pod-only benchmark from the cheap render — the report re-renders
+    **off-pod** from the saved results, which is how the separately-gated SR-per-precision is
+    joined in without re-running the L40S benchmark. A single-track render omits the two
+    cross-track ratio plots, which need both tracks.
   - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and the Python
-    overhead (CEM planner + criterion + assembly + glue) is precision-invariant, the per-precision
-    **wall-clock** delta is capped by the model's share of the cycle. So the study also reports, per
-    model: the **FP32 baseline per-component time shares** (encoder + predictor + `overhead_ms`, the
-    last derived by subtraction from the measured cycle) and the derived **optimizable fraction**
-    `p = (encoder+predictor)/cycle`, which sets the Amdahl ceiling on end-to-end speedup `1/(1−p)`;
-    and — per precision — **both** the *model-only* speedup (overhead treated as free, from the
-    encode+predict component times) **and** the *realized* speedup (the measured FP32-vs-precision
-    **per-cycle ratio**), whose gap is the overhead floor and should match the Amdahl
-    prediction `1/((1−p) + p/s)`. Reporting per-component *relative* speedup alone
-    hides this dilution. **This whole block is mean-based**, `p` included, so the realized speedup
-    it reconciles against is the mean per-cycle ratio — matching the prediction's basis. It is
-    therefore **a different number from the reported p50 FP32-relative speedup**, which answers the
-    comparison question rather than the reconciliation one; the two are rendered in separate tables
-    and must not be conflated or averaged. That the optimizable fraction is itself model-dependent (LeWM's single token
-    is overhead/launch-latency-bound, DINO's 196-token grid is model-bound) is what explains why the
-    same precision helps the two tracks differently — a result, not bookkeeping.
+    overhead is precision-invariant, the per-precision wall-clock delta is capped by the model's
+    share of the cycle. The study reports, per model: the FP32 baseline per-component time shares
+    and the derived **optimizable fraction** `p = (encoder+predictor)/cycle`, which sets the
+    Amdahl ceiling `1/(1−p)`; and per precision, **both** the *model-only* speedup and the
+    *realized* speedup (measured FP32-vs-precision per-cycle ratio), whose gap is the overhead
+    floor and should match `1/((1−p) + p/s)`. **This whole block is mean-based**, `p` included, so
+    it is a **different number** from the reported p50 FP32-relative speedup — rendered in separate
+    tables, never conflated or averaged. (`docs/architecture.md` §7, `docs/adr/0003`.)
 - **QLoRA delta:** the task-quality metric re-run on a QLoRA-tuned DINOv3 backbone (backbone
   QLoRA-adapted, **predictor unfrozen and co-trained**), reported as a delta against the frozen
   baseline, with adapters confirmed to target real modules.
