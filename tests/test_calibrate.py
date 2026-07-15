@@ -13,8 +13,10 @@ import pytest
 import torch
 from onnx import TensorProto, helper
 
-from src.calibrate import CalibrationData, make_calibration_dict
+from src.calibrate import CalibrationData, _sample_cem_actions, make_calibration_dict
 from src.interfaces import (
+    CEM_HORIZON,
+    CEM_VAR_SCALE,
     HISTORY_SIZE,
     DINO_N_PATCHES,
     DINO_PREDICTOR_DIM,
@@ -23,9 +25,13 @@ from src.interfaces import (
     DINO_PROPRIO_DIM,
 )
 from src.adapter import LeWMAdapter, DINOWMAdapter
-from src.smoke import build_dummy_lewm, build_dummy_dino
+from src.fidelity import build_dummy_dino_model
+from src.smoke import build_dummy_lewm
 
 N, BATCH, T = 20, 8, HISTORY_SIZE  # 20 clips, batch 8 -> trims to 16 (two full batches)
+# The roll emits one window per predict call and keeps the `T == HS` ones. At eval n_obs=1 the
+# windows are 1,2,3,3,3,3 over CEM_HORIZON+1 calls -> 4 kept per clip-chunk.
+STEADY_PER_CHUNK = CEM_HORIZON + 1 - (HISTORY_SIZE - 1)
 
 
 def _clips(n=N):
@@ -72,7 +78,8 @@ def test_lewm_predictor_stream_is_latent_action():
     data = _clips()
     adapter = LeWMAdapter(build_dummy_lewm())
     batches = data.predictor_batches(adapter)
-    assert len(batches) == 2
+    # 2 chunks x the roll's steady-state windows (no longer 1 sample per chunk)
+    assert len(batches) == 2 * STEADY_PER_CHUNK
     latent, action = batches[0]  # LeWM predict is 2-arity
     assert latent.shape == (BATCH, T, LATENT_DIM)
     assert action.shape == (BATCH, T, MODEL_ACTION_DIM)
@@ -80,11 +87,38 @@ def test_lewm_predictor_stream_is_latent_action():
 
 def test_dino_predictor_stream_is_404_embedding():
     data = _clips()
-    adapter = DINOWMAdapter(build_dummy_dino())
+    adapter = DINOWMAdapter(build_dummy_dino_model())
     batches = data.predictor_batches(adapter)
-    assert len(batches) == 2
+    assert len(batches) == 2 * STEADY_PER_CHUNK
     (embedding,) = batches[0]  # DINO predict is a single assembled 404 embedding
     assert embedding.shape == (BATCH, T, DINO_N_PATCHES, DINO_PREDICTOR_DIM)
+
+
+def test_every_captured_window_binds_the_static_hist_engine():
+    """The predictor engine's frame axis is static at HS, so every emitted window must be
+    exactly HS — a T<HS window would negative-dim-bind, the crash that killed the SR run."""
+    for adapter in (LeWMAdapter(build_dummy_lewm()), DINOWMAdapter(build_dummy_dino_model())):
+        for batch in _clips().predictor_batches(adapter):
+            assert all(t.shape[1] == HISTORY_SIZE for t in batch)
+
+
+def test_predictor_actions_are_cem_proposal_not_expert():
+    """The whole fix: the stream's actions must come from the unclamped CEM proposal, not the
+    clips' Box(-1,1) expert actions. Expert-scaled actions are the ~4x under-scale that
+    saturated INT8, so a regression here silently restores the SR collapse."""
+    data = _clips()
+    data.action.clamp_(-1.0, 1.0)  # expert actions are bounded; the proposal is not
+    batches = data.predictor_batches(LeWMAdapter(build_dummy_lewm()))
+    assert max(a.abs().max().item() for _, a in batches) > 1.0
+
+
+def test_cem_action_sample_is_deterministic_and_unclamped():
+    a = _sample_cem_actions(64, 6, torch.Generator().manual_seed(0))
+    b = _sample_cem_actions(64, 6, torch.Generator().manual_seed(0))
+    assert torch.equal(a, b)  # seeded -> the calibration draw stays reproducible
+    assert a.shape == (64, 6, MODEL_ACTION_DIM)  # CEM samples the 10-wide pack directly
+    assert a.abs().max().item() > 1.0  # unclamped: no projection into Box(-1, 1)
+    assert abs(a.std().item() - CEM_VAR_SCALE) < 0.1  # matches the solver's var_scale
 
 
 def test_encoder_calib_dict_keyed_by_onnx_input(tmp_path):
@@ -103,17 +137,24 @@ def test_lewm_predictor_calib_dict_keyed_and_ordered(tmp_path):
     onnx_path = _tiny_onnx(tmp_path, ["latent", "action"])  # LeWM predict is 2-arity
     d = make_calibration_dict(onnx_path, data.predictor_batches(adapter))
     assert list(d) == ["latent", "action"]  # positional zip preserves order
-    assert d["latent"].shape == (16, T, LATENT_DIM)
-    assert d["action"].shape == (16, T, MODEL_ACTION_DIM)
+    # the roll emits STEADY_PER_CHUNK windows per chunk -> the stream is that much longer
+    n = 16 * STEADY_PER_CHUNK
+    assert d["latent"].shape == (n, T, LATENT_DIM)
+    assert d["action"].shape == (n, T, MODEL_ACTION_DIM)
 
 
 def test_dino_predictor_calib_dict_is_404(tmp_path):
     data = _clips()
-    adapter = DINOWMAdapter(build_dummy_dino())
+    adapter = DINOWMAdapter(build_dummy_dino_model())
     onnx_path = _tiny_onnx(tmp_path, ["embedding"])
     d = make_calibration_dict(onnx_path, data.predictor_batches(adapter))
     assert list(d) == ["embedding"]
-    assert d["embedding"].shape == (16, T, DINO_N_PATCHES, DINO_PREDICTOR_DIM)
+    assert d["embedding"].shape == (
+        16 * STEADY_PER_CHUNK,
+        T,
+        DINO_N_PATCHES,
+        DINO_PREDICTOR_DIM,
+    )
 
 
 def test_calib_dict_input_count_mismatch_raises(tmp_path):

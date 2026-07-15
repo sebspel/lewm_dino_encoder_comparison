@@ -10,18 +10,47 @@ inference exactly:
     loaded via `swm.data.load_dataset` with the SAME ImageNet `img_transform` the vendored
     `eval_wm` applies (single source of truth for normalization).
   * clips  — history-windows (`num_steps=HISTORY_SIZE`, `frameskip=CALIB_FRAMESKIP`), so each
-    clip yields pixels `(hist, 3, 224, 224)`, proprio `(hist, 4)`, action `(hist, 10)` —
-    exactly the encode / predict inputs the CEM rollout drives.
+    clip yields pixels `(hist, 3, 224, 224)`, proprio `(hist, 4)`, action `(hist, 10)`.
   * two streams — the encoder sees obs; the predictor sees the per-track predict input,
     produced by running the clips through the REAL adapter (`encode` [+ `assemble_embedding`
     for DINO]) so it observes true predict activations, not synthetic ones.
 
+**The predictor stream reproduces the EVAL-TIME distribution, not the expert one** (SPEC
+§Interface Contracts — calibration distribution). `max` calibration bakes fixed per-tensor
+scales from the largest activation it observes, so anything wider at inference SATURATES —
+invisible in FP16 (no fixed clip), catastrophic in INT8. A single-step draw off expert clips
+mismatches the rollout on two axes, and did: lewm scored FP32 94% / FP16 96% / **INT8 48%**.
+
+  * actions  — `CEMSolver.solve` drives `predict` with `randn(...) * var + mean`, **unclamped**
+    (`solver/cem.py:191-204`; `var_scale=1.0`, mean 0 at the zero-pad warm start), and its
+    `action_dim` is already the model-facing 10-wide pack (`cem.py:80` = env 2 × action_block
+    5), so the proposal reaches ~4 sigma while expert actions are bounded by `Box(-1, 1)` —
+    a ~4x under-scale. Under Design A LeWM's `action_encoder` lives INSIDE the predict engine,
+    so the raw action and every action-encoder activation quantize on that range. Reproduced by
+    `_sample_cem_actions` (same formula, fixed seed -> deterministic).
+  * latents  — `predict` runs autoregressively: at eval `n_obs=1`, so a steady-state window
+    holds ZERO encoder latents (`LeWM.rollout` lo=max(0, H+t-HS) -> windows 1,2,3,3,…; ditto
+    `PreJEPA.rollout`). Reproduced by rolling `predict` over `CEM_HORIZON` and capturing its
+    own inputs — via the REAL rollout, never a re-implementation (see `_dino_predictor_stream`).
+
+Only the `T == HISTORY_SIZE` windows are captured: the engine's frame axis is static at `HS`, so
+the rollout's `T < HS` transients reach it right-padded by `sr_shim._predict_hist_adapt` — and
+that pad REPEATS the last real frame, adding no value outside the `T == HS` windows' range.
+
 Owner sign-off (OWNER-ONLY silent-failure boundary — a bad calib set degrades every INT8
 number with NO error): calibration method = `max` (the Model-Optimizer analogue of the old
 MinMax calibrator, suited to the ViT activations); 512 clips; strided evenly across all
-episodes. The remaining Model-Optimizer quant knobs (Q/DQ format, per-channel-vs-per-tensor,
-op-type exclusions) stay at the tool's INT8 defaults pending owner confirmation at the
-pod precision-match gate.
+episodes; the predictor roll yields 4 windows per clip -> ~2048 predictor samples (owner-
+confirmed 2026-07-15: clip coverage held at 512, sample count allowed to grow — coverage is
+the point of the fix). The remaining Model-Optimizer quant knobs (Q/DQ format,
+per-channel-vs-per-tensor, op-type exclusions) stay at the tool's INT8 defaults pending owner
+confirmation at the pod precision-match gate.
+
+Accepted residual (SPEC): `max` on a Gaussian grows with draw count, so the calibration max
+(~4.4 sigma over the whole set) sits just under the eval max (~5.5 sigma over 50 episodes ×
+30 CEM iters). That clips ~1e-5 of action values, against the ~32% clipped when the scale was
+fit to expert actions at 1.0 — benign, and the same tail suppression a percentile calibrator
+does deliberately.
 
 The clip draw (`build_calibration_data`) needs the real dataset -> pod-only. The batching /
 adapter-streaming logic (`CalibrationData`) is pure torch and unit-tested off-pod.
@@ -39,7 +68,13 @@ from types import SimpleNamespace
 import torch
 from torch import Tensor
 
-from src.interfaces import HISTORY_SIZE
+from src.interfaces import (
+    CEM_HORIZON,
+    CEM_VAR_SCALE,
+    EVAL_N_OBS,
+    HISTORY_SIZE,
+    MODEL_ACTION_DIM,
+)
 
 # Owner-set: the calibration set is the eval dataset (representative Push-T), history-windows
 # spaced by the frameskip/action_block (5) so obs history + the 10-wide action pack match the
@@ -48,6 +83,49 @@ CALIB_DATASET = "pusht_expert_train.lance"
 CALIB_FRAMESKIP = 5
 DEFAULT_N_CLIPS = 512
 _IMG_SIZE = 224
+# Frames of action the roll needs: the rollout splits `action_sequence` into the n_obs prefix
+# and the predicted remainder, then steps `n_steps + 1` times (= CEM_HORIZON + 1 predict calls,
+# matching PREDICTOR_CALLS_PER_CYCLE = (horizon + 1) × n_steps).
+_ROLL_FRAMES = EVAL_N_OBS + CEM_HORIZON
+
+
+def _sample_cem_actions(n: int, frames: int, generator: torch.Generator) -> Tensor:
+    """The CEM proposal `predict` is actually driven by, reproduced from the solver source:
+    `candidates = randn(...) * var + mean` with `var_scale` and mean 0 (`solver/cem.py:191-204`)
+    — **unclamped**; there is no projection back into the action space. `CEMSolver.action_dim`
+    is already the model-facing 10-wide pack (`cem.py:80`), so this samples `predict`'s input
+    width directly — no env->model packing sits in between. Seeded -> the draw stays
+    deterministic, the property the strided clip draw was built for."""
+    return (
+        torch.randn(n, frames, MODEL_ACTION_DIM, generator=generator) * CEM_VAR_SCALE
+    )
+
+
+class _CaptureAdapter:
+    """Records every `predict` input, then delegates to the real adapter.
+
+    Lets the REAL rollout drive the capture, so this module never re-implements the
+    orchestration around `predict` (for DINO that is the 404 assembly / action-replace /
+    proprio-carry — precisely the logic whose duplication the adapter-fidelity gate exists to
+    catch). Everything except `predict` falls through to the wrapped adapter."""
+
+    def __init__(self, adapter):
+        self._adapter = adapter
+        self.captured: list[tuple[Tensor, ...]] = []
+
+    def __getattr__(self, name):
+        return getattr(self._adapter, name)
+
+    def predict(self, *inputs: Tensor) -> Tensor:
+        self.captured.append(tuple(i.detach() for i in inputs))
+        return self._adapter.predict(*inputs)
+
+
+def _steady_windows(captured: list[tuple[Tensor, ...]]) -> list[tuple[Tensor, ...]]:
+    """Keep only the `T == HISTORY_SIZE` windows — the shape the static-hist engine binds. The
+    rollout's `T < HS` transients reach it repeat-padded (`sr_shim._predict_hist_adapt`), which
+    adds no value outside these windows' range, so they contribute nothing to a `max` scale."""
+    return [c for c in captured if c[0].shape[1] == HISTORY_SIZE]
 
 
 def _pixel_transform():
@@ -117,26 +195,71 @@ class CalibrationData:
         """Encoder calibration stream: obs batches, one input per batch."""
         return [(o,) for o in self._chunks(self.obs)]
 
-    def predictor_batches(self, adapter) -> list[tuple[Tensor, ...]]:
-        """Predictor calibration stream: the per-track predict input, produced by running the
-        clips through the REAL adapter so TensorRT observes true predict activations. LeWM ->
-        (cached latent, action); DINO -> the assembled 404 embedding."""
+    def predictor_batches(self, adapter, seed: int = 0) -> list[tuple[Tensor, ...]]:
+        """Predictor calibration stream: the per-track predict input as the CEM rollout ACTUALLY
+        drives it — CEM-proposal actions + the predictor's own autoregressive latents (module
+        docstring; SPEC §Interface Contracts — calibration distribution). LeWM -> (latent, RAW
+        action); DINO -> the assembled 404 embedding. Each clip contributes the roll's
+        `T == HISTORY_SIZE` windows, so the stream is ~4x the clip count.
+
+        The clips' EXPERT actions (`self.action`) are deliberately unused here — feeding them is
+        the ~4x under-scale this fix removes. They stay on `CalibrationData` as the reference the
+        range probe (`src.probe_ranges`) compares the proposal against."""
         from src.adapter import DINOWMAdapter
 
         adapter.eval()
+        gen = torch.Generator().manual_seed(seed)
         batches: list[tuple[Tensor, ...]] = []
         with torch.no_grad():
-            for o, p, a in zip(
-                self._chunks(self.obs),
-                self._chunks(self.proprio),
-                self._chunks(self.action),
-            ):
-                latent = adapter.encode(o)
+            for o, p in zip(self._chunks(self.obs), self._chunks(self.proprio)):
+                actions = _sample_cem_actions(len(o), _ROLL_FRAMES, gen)
                 if isinstance(adapter, DINOWMAdapter):
-                    batches.append((adapter.assemble_embedding(latent, p, a),))
+                    batches.extend(_dino_predictor_stream(adapter, o, p, actions))
                 else:
-                    batches.append((latent, a))
+                    batches.extend(_lewm_predictor_stream(adapter, o, actions))
         return batches
+
+
+def _lewm_predictor_stream(adapter, obs: Tensor, actions: Tensor) -> list[tuple[Tensor, ...]]:
+    """Roll LeWM's predictor and capture its own inputs.
+
+    A line-map of `LeWM.rollout`'s window loop (installed swm 0.1.1 `wm/lewm/lewm.py:94-100`):
+    `lo = max(0, H + t - HS)` over an emb_list that grows with PREDICTED frames. Mirrored rather
+    than driven, because `rollout` is a method on the LeWM *model* while this boundary only has
+    the adapter; the loop is plain windowing (no per-track carry), and only the resulting input
+    *distribution* — not bit-exactness — feeds a `max` scale.
+
+    `actions` are RAW: Design A puts LeWM's `action_encoder` inside the engine, so `rollout`
+    windows raw actions through an Identity passthrough (`sr_shim.LeWMSRShim`)."""
+    z = adapter.encode(obs[:, :EVAL_N_OBS])  # eval encodes ONE frame; the rest are predicted
+    emb_list = list(z.unbind(dim=1))
+    n_steps = actions.shape[1] - EVAL_N_OBS
+    captured: list[tuple[Tensor, ...]] = []
+    for t in range(n_steps + 1):
+        lo = max(0, EVAL_N_OBS + t - HISTORY_SIZE)
+        emb_trunc = torch.stack(emb_list[lo:], dim=1)
+        act_trunc = actions[:, lo : EVAL_N_OBS + t]
+        captured.append((emb_trunc.detach(), act_trunc.detach()))
+        emb_list.append(adapter.predict(emb_trunc, act_trunc)[:, -1])
+    return _steady_windows(captured)
+
+
+def _dino_predictor_stream(
+    adapter, obs: Tensor, proprio: Tensor, actions: Tensor
+) -> list[tuple[Tensor, ...]]:
+    """Roll DINO-WM's predictor and capture its own inputs, by driving the REAL rollout
+    (`src.shim.dino_rollout` — the fidelity-gated port of `PreJEPA.rollout`) through
+    `_CaptureAdapter`. Nothing about the 404 assembly / action-replace / proprio-carry is
+    re-implemented here; the rollout does it and the proxy just records."""
+    from src.shim import dino_rollout
+
+    proxy = _CaptureAdapter(adapter)
+    info = {
+        "pixels": obs[:, :EVAL_N_OBS].unsqueeze(1),  # (B, N=1, n_obs, C, H, W)
+        "proprio": proprio[:, :EVAL_N_OBS].unsqueeze(1),  # (B, N=1, n_obs, dp)
+    }
+    dino_rollout(proxy, info, actions.unsqueeze(1), HISTORY_SIZE)
+    return _steady_windows(proxy.captured)
 
 
 def build_calibration_data(

@@ -43,6 +43,25 @@ CEM_NUM_SAMPLES = 300  # candidate fan-out — the batch `predict` is timed at
 ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, batch 1)
 PREDICTOR_CALLS_PER_CYCLE = 180  # (horizon 5 + 1) × n_steps 30, batched over the candidates
 
+# CEM action-proposal shape — the distribution `predict` is ACTUALLY driven by at eval, and
+# what the INT8 predictor calibration stream reproduces (SPEC §Interface Contracts —
+# calibration distribution). Read from the vendored configs + `CEMSolver` source, not assumed:
+#   `solver/cem.py:191-204`  candidates = randn(B, num_samples, horizon, action_dim) * var + mean
+#                            -> an UNCLAMPED N(0, var_scale) about `mean` (0 at the zero-pad
+#                            warm start); there is NO clamp to the action space.
+#   `solver/cem.py:80`       action_dim = env_action_dim (2) * action_block (5) = 10, i.e. CEM
+#                            samples the MODEL-facing 10-wide frameskip pack DIRECTLY — no
+#                            env->model packing sits between the proposal and `predict`.
+# Expert dataset actions are bounded by Box(-1, 1); the proposal reaches ~4 sigma. Calibrating
+# on expert actions therefore under-scales the action tensor ~4x and saturates INT8 — invisible
+# in FP16 (no fixed clip). 🔴 confirm against the installed solver on the pod, not assumed.
+CEM_VAR_SCALE = 1.0  # scripts/plan/config/solver/cem.yaml `var_scale` — initial proposal std
+CEM_HORIZON = 5  # scripts/plan/config/pusht.yaml `plan_config.horizon`
+# n_obs at eval: the rollout starts from ONE encoded frame and fills the rest of the window
+# with its OWN predictions, so a steady-state `predict` window holds ZERO encoder latents
+# (`LeWM.rollout` lo=max(0, H+t-HS) with H=1 -> windows 1,2,3,3,…; same for `PreJEPA.rollout`).
+EVAL_N_OBS = 1
+
 
 class WMStepAdapter(Protocol):
     """Common two-method boundary the export/benchmark/profile plumbing binds to, so it

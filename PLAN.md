@@ -310,19 +310,28 @@ Contracts, `src/interfaces.py`.)
   `solver/cem.py:191-207`) and with its **own autoregressive latents** → `max` scales fit ~4× too
   tight → saturation (SPEC §Interface Contracts — calibration distribution). Owner-chosen
   (2026-07-15): reproduce the distribution in the builder; do **not** harvest a live CEM/eval rollout.
-  - [ ] 🖥️ **Range probe first (read-only — no calibrate/PTQ edit)**: max-abs of (a) encoder vs
-    autoregressive-predicted latents and (b) expert action packs vs CEM-proposal samples, both
-    tracks. (b) is near-free and confirms the drawn expert actions really sit in `Box(-1,1)` — the
-    mechanism is settled from the solver source, the expert *bound* is the one assumption left.
-    → verify: probe reports whether rollout latent / CEM action ranges exceed the calibration maxima.
-  - [ ] `src/interfaces.py` — add `CEM_VAR_SCALE = 1.0` + `CEM_HORIZON = 5` beside `CEM_NUM_SAMPLES`,
-    read from vendored `scripts/plan/config/solver/cem.yaml` + the eval config. 🔴 confirm vs source.
-  - [ ] `src/calibrate.py::CalibrationData.predictor_batches` — replace the clip's expert `a` with
-    CEM-proposal samples (`randn * CEM_VAR_SCALE`, zero mean, **unclamped**, fixed seed →
-    deterministic), packed env→model as the shim packs (`MODEL_ACTION_DIM=10`); roll `predict`
-    autoregressively over `CEM_HORIZON` so the stream carries predicted latents, not only encoder
-    latents. `encoder_batches` (strided expert obs) **unchanged**.
-    → verify: `uv run pytest -v` green off-pod; drawn action/latent max-abs ≥ the probe's ranges.
+  - [x] `src/interfaces.py` — `CEM_VAR_SCALE=1.0` (`solver/cem.yaml`), `CEM_HORIZON=5`
+    (`pusht.yaml plan_config.horizon`), `EVAL_N_OBS=1` beside `CEM_NUM_SAMPLES`. 🔴 confirm vs
+    source on pod. **Correction:** CEM's `action_dim` is ALREADY the 10-wide pack
+    (`cem.py:80` = env 2 × action_block 5) → **no env→model packing step** (an earlier draft of
+    this box wrongly specified one).
+  - [x] `src/calibrate.py::predictor_batches` — expert `a` replaced with `_sample_cem_actions`
+    (`randn * CEM_VAR_SCALE`, zero mean, **unclamped**, seeded → deterministic); rolls `predict`
+    over `CEM_HORIZON` and captures its own inputs. DINO drives the REAL `shim.dino_rollout`
+    via `_CaptureAdapter` (no re-implementation of the 404 carry); LeWM mirrors
+    `LeWM.rollout`'s window loop (`lewm.py:94-100` — plain windowing, no carry). Only
+    `T == HISTORY_SIZE` windows are kept (engine binds static `HS`; `T<HS` transients reach it
+    repeat-padded by `_predict_hist_adapt`, adding no new range). `encoder_batches` unchanged.
+    → verified off-pod: `pytest` 70 passed; measured expert bound 1.0 vs proposal max **4.34**
+    (~4×) and **32.1%** of action values clipped at the old scale.
+  - [x] `src/probe_ranges.py` — read-only range probe (`uv run python -m src.probe_ranges
+    [track=<lewm|dino>] [n_clips=<int>]`): calib vs eval max-abs per predictor input + ratio.
+    Measures INPUT tensors only — a mismatch confirms; a clean result does not exonerate
+    (internals unsampled).
+  - [ ] 🖥️ **Run the probe on the pod (real checkpoints + dataset), both tracks** — the one
+    remaining assumption is that the DRAWN expert actions really sit in `Box(-1,1)`, and the
+    latent axis is not derivable from source.
+    → verify: pre-fix ratios > 1 (confirms); post-fix calib column ≥ eval column on every row.
   - [ ] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks:
     `uv run python -m src.export model=<lewm|dino> precision=int8`.
     → verify: quantized ONNX carries QuantizeLinear; INT8 engine builds.
@@ -571,7 +580,9 @@ W&B; adapter target modules confirmed real.
 - `src/interfaces.py` — typed contract (declares the three-distribution latency benchmark +
   the CEM per-cycle call counts; dim constants filled in Phase 4 from Phase-1 values).
 - `src/adapter.py`, `src/export.py` (incl. the Model-Optimizer INT8 Q/DQ step),
-  `src/calibrate.py` (calibration-data construction feeding the Model Optimizer),
+  `src/calibrate.py` (calibration-data construction feeding the Model Optimizer — the predictor
+  stream reproduces the CEM proposal + autoregressive latents),
+  `src/probe_ranges.py` (read-only calib-vs-eval range probe; diagnoses/verifies INT8 saturation),
   `src/benchmark.py` (component latency + peak mem), `src/report.py` (per-cycle headline +
   overhead-by-subtraction decomposition), `src/qlora.py`, `src/smoke.py` — the owned layer
   (Phases 4–6).

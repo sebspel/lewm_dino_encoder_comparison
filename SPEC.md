@@ -111,9 +111,14 @@ requirements those signatures must satisfy; it does not restate the signatures.
   the observed LeWM signature (FP32 94% / FP16 96% / **INT8 48%**). That FP32≈FP16 is itself the
   expected result, not a finding: the checkpoints are **BF16-trained**, and FP16's 10-bit mantissa
   exceeds BF16's 7, so FP16 reproduces the trained weights' precision fully (its only risk is range, and
-  no overflow is occurring) — the 2pp is eval noise. The **encoder** calibration stream is genuinely the
-  dataset's observation distribution (strided expert clips — unchanged). The **predictor** stream is
-  not, on two axes:
+  no overflow is occurring) — the 2pp is eval noise, and with `eval.num_eval = 50` it is literally one
+  episode (47/50 vs 48/50). INT8's 48% is 24/50 — a real collapse, not noise. The **encoder** stream
+  keeps the strided expert clips: at eval the env is stepped by **CEM-planned** actions, so the encoder
+  sees planner-visited states rather than expert-demo states, but its input is a normalized image whose
+  range is bounded by construction, so the input-side `max` scale is safe. That argument does **not**
+  extend to the encoder's internal activations under off-distribution states — an accepted **lower-risk
+  residual**, not a non-issue (LeWM's encoder INT8 drift is already the "borderline" 0.6–1.0). The
+  **predictor** stream is the one that is wrong, on two axes:
   - **Actions — established from the solver source, not inferred.** `CEMSolver.solve` (installed swm
     0.1.1, `solver/cem.py`) draws `candidates = randn(...) * var + mean` with **no clamp to the action
     space**, from `var_scale = 1.0` and `mean = 0` (the zero-pad warm start for non-`Actionable`
@@ -138,10 +143,18 @@ requirements those signatures must satisfy; it does not restate the signatures.
   it consumes its own predicted latents. It is deliberately **not** sourced from an actual CEM/eval run:
   that would make the INT8 scales depend on the **eval seed and sample draws** (the clip draw is
   deterministic by design — no RNG) and would couple the quantization pipeline to the CEM solver + SR shim
-  + eval config, an owner-gated parity surface. Accepted residual: calibration rolls the FP32/torch
-  predictor while the INT8 engine drifts marginally wider — second-order against the ~4× gap it closes.
-  If matching the distribution does not recover INT8 SR, the loss is inherent to per-tensor INT8 on these
-  predictors and the documented **FP16-only fallback** applies.
+  + eval config, an owner-gated parity surface. The roll is driven through the **real rollout** (model-
+  side, already fidelity-gated) rather than a re-implementation — that is the line: reuse the rollout,
+  never the solver; the proposal is reproduced from a one-line formula read off the source, not a
+  dependency on it. **Sample count (owner, 2026-07-15):** clip coverage stays at the signed-off **512**;
+  the roll emits the `T == HS` windows, so the predictor stream grows ~4× to ~2048 samples. Coverage is
+  the point of the fix, so the count was allowed to grow rather than shrinking the clip draw to hold 512.
+  Accepted residuals: (a) calibration rolls the FP32/torch predictor while the INT8 engine drifts
+  marginally wider; (b) `max` on a Gaussian grows with draw count, so the calibration max (~4.3σ,
+  measured) sits just under a full eval's (~5.5σ) — clipping ~1e-5 of action values against the **32.1%
+  clipped (measured)** when the scale was fit to expert actions at 1.0. Both second-order against the
+  ~4× gap closed. If matching the distribution still does not recover INT8 SR, the loss is inherent to
+  per-tensor INT8 on these predictors and the documented **FP16-only fallback** applies.
 - **Every speed result carries the SR for that engine config** — no speed number is reported
   without its task-quality counterpart. **Per-cycle planning latency (p50/p95) is the headline
   speed measure** — there is no fixed-wall-clock rollout-count run (serial planning makes
