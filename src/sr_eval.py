@@ -181,25 +181,42 @@ def main():
                 )
                 continue
             shim = _build_shim(track, model, engines)
-            # Bracket the per-cycle eval-shim run with the dmon telemetry observer so the
-            # unlocked GPU clock/power/temp state during the headline per-cycle solves is
-            # recorded, not merely assumed (SPEC §Parity).
-            with log_gpu(f"{track}.{precision}.sr_eval", out_dir / "gpu_logs"):
-                sr, per_cycle_ms = _eval_one(hydra_argv, shim)
-            # Carry the RAW per-decision latencies (not pre-reduced percentiles) so src.report
-            # truncates to the common min-n across tracks before taking p50/p95 (equal-n).
-            sr_by_precision[precision] = {
-                "success_rate": sr,
-                "per_cycle_latencies_ms": per_cycle_ms,
-            }
+            try:
+                # Bracket the per-cycle eval-shim run with the dmon telemetry observer so the
+                # unlocked GPU clock/power/temp state during the headline per-cycle solves is
+                # recorded, not merely assumed (SPEC §Parity).
+                with log_gpu(f"{track}.{precision}.sr_eval", out_dir / "gpu_logs"):
+                    sr, per_cycle_ms = _eval_one(hydra_argv, shim)
+                # Carry the RAW per-decision latencies (not pre-reduced percentiles) so src.report
+                # truncates to the common min-n across tracks before taking p50/p95 (equal-n).
+                sr_by_precision[precision] = {
+                    "success_rate": sr,
+                    "per_cycle_latencies_ms": per_cycle_ms,
+                }
 
-            import wandb
+                import wandb
 
-            wandb.log({f"sr/{precision}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)})
-            print(
-                f"[sr-eval:{track}] {precision}: success_rate={sr} "
-                f"n_cycles={len(per_cycle_ms)}"
-            )
+                wandb.log({f"sr/{precision}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)})
+                print(
+                    f"[sr-eval:{track}] {precision}: success_rate={sr} "
+                    f"n_cycles={len(per_cycle_ms)}"
+                )
+            finally:
+                # Release THIS precision's engine execution contexts before building the next
+                # precision's. Each EngineRunner holds direct-cudaMalloc'd context activation
+                # memory (~11 GB per engine on DINO) that TensorRT only returns to the driver
+                # when the runner is collected. Without this, fp32+fp16+int8 accumulate — the
+                # next `shim = _build_shim(...)` allocates while the prior shim is still bound —
+                # and the third `create_execution_context` OOMs (DINO only; LeWM's ViT-Tiny
+                # contexts stay under the ceiling). `empty_cache` then returns torch's retained
+                # caching-allocator pool so the next engine's cudaMalloc can reuse it.
+                import gc
+
+                import torch
+
+                del shim
+                gc.collect()
+                torch.cuda.empty_cache()
     finally:
         run.finish()
 

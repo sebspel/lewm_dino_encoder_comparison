@@ -53,6 +53,11 @@ class EngineRunner:
         if self.engine is None:
             raise RuntimeError(f"failed to deserialize engine: {plan_path}")  # -> OWNER
         self.context = self.engine.create_execution_context()
+        if self.context is None:
+            raise RuntimeError(  # -> OWNER
+                f"failed to create execution context for {plan_path}: TensorRT returned None "
+                "(typically GPU out-of-memory when allocating the context's activation memory)"
+            )
 
         # Split the engine's named I/O tensors into inputs vs outputs (order preserved).
         self.input_names: list[str] = []
