@@ -1,4 +1,4 @@
-"""Owned W&B helper for the non-training phases (eval / benchmark / QLoRA).
+"""Owned W&B helper for the non-training phases (eval / benchmark).
 
 Training logs to W&B through the platform's Lightning ``WandbLogger``, driven by the
 ``wandb:`` block in ``conf/experiment/``. The non-training phases have no Lightning

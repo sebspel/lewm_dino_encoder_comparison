@@ -1,4 +1,4 @@
-# PLAN.md — LeWM vs DINOv3-WM: Inference Optimization & QLoRA Study
+# PLAN.md — LeWM vs DINOv3-WM: Inference Optimization Study
 
 > Execution steps only. **What** the project must satisfy → `SPEC.md`. **Why** a design is
 > shaped this way → `docs/architecture.md` + `docs/adr/`. Behavioral rules → `CLAUDE.md`.
@@ -20,8 +20,8 @@ Boundaries). 🖥️ runs on the L40S GPU. ⏱️ capped effort with a stated fa
 ## Phase 0 — Scaffolding & pinned dependencies  🟢
 
 - [x] `pyproject.toml` + `uv.lock` pinning: `stable-worldmodel`, `stable-pretraining`,
-  `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`, `timm`, `peft`,
-  `bitsandbytes`, **torch (cu124 wheel index)** — all uv-managed. **TensorRT NOT in uv**
+  `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`, `timm`,
+  **torch (cu124 wheel index)** — all uv-managed. **TensorRT NOT in uv**
   (installed by `setup.sh`). Versions pinned. → `docs/adr/0001`
 - [x] `setup.sh` — pod bootstrap, idempotent: installs **uv**, runs `uv sync`, then installs
   **TensorRT (cu12, CUDA-12.4)** outside the lock. Secrets from the pod's runtime env.
@@ -29,7 +29,7 @@ Boundaries). 🖥️ runs on the L40S GPU. ⏱️ capped effort with a stated fa
 - [x] **Deferred to project end:** `Dockerfile` + `docker-compose.yml`.
 
 **Verify (on the pod):** `bash setup.sh` succeeds; `uv run python -c "import stable_worldmodel,
-stable_pretraining, tensorrt, peft, torch"`; `uv run pytest -v`.
+stable_pretraining, tensorrt, torch"`; `uv run pytest -v`.
 
 ---
 
@@ -338,18 +338,67 @@ tables produced and logged to W&B.
 
 ---
 
-## Phase 6 — QLoRA delta on DINOv3-WM  🔴 targeting · 🖥️
+## Phase 6 — FP8 precision (L40S)  🔴 quant config · 🟢 wiring · 🖥️ ⏱️
 
-- [ ] 🔴 **OWNER specifies QLoRA targeting:** which DINOv3 modules, rank, what stays frozen.
-  Claude owns the training-loop wiring only.
-- [ ] 🖥️ QLoRA fine-tune the DINOv3 backbone on Push-T (`peft` + `bitsandbytes`): `uv run python
-  -m src.qlora`. **Predictor unfrozen and co-trained.** Confirm adapters target **real** modules
-  (introspect, don't assume).
-- [ ] 🖥️ Re-run the Phase-3 task-quality metric on the tuned backbone; report the **delta vs
-  frozen DINOv3-WM**.
+FP8 (E4M3) is a second explicitly-quantized 8-bit format, built and benchmarked exactly like
+INT8 on the L40S's native FP8 Tensor Cores (Ada 4th-gen / Transformer Engine) — no toolchain or
+hardware change. Owner sets the silent-failure quant config; Claude owns the wiring. It extends
+the Phase-5 sweep to FP32→FP16→INT8→FP8, so every Phase-5 recording, table, and plot gains the
+FP8 rows/points, reported vs FP32 like the others. Methodology → SPEC §Interface Contracts;
+statistic split → `docs/adr/0003`.
 
-**Verify:** tuned checkpoint produced; task-metric delta vs frozen reported and logged to W&B;
-adapter target modules confirmed real.
+- [ ] 🟢 **Precision plumbing:** `Precision` literal + `ExportConfig.precisions` gain `fp8`
+  (`src/interfaces.py`). Audit `src/report.py`, `src/study.py`, `src/benchmark.py`,
+  `src/sr_eval.py` for any hard-coded `{fp32,fp16,int8}` set so FP8 flows through the recordings,
+  tables, and plots off the precision tuple — not a fourth special case.
+  → verify (off-pod): `pytest` green; precision loops iterate the config tuple incl. `fp8`.
+
+- [ ] 🔴 **FP8 export/build wiring (owner sets quant config):** `src/export.py` — `quantize_onnx`
+  gains a quant-mode arg and passes `quantize_mode="fp8"` to the Model Optimizer (E4M3 Q/DQ,
+  `calibration_method="max"` kept); `build_engine` gains an `fp8` branch setting
+  `BuilderFlag.FP8` + `BuilderFlag.FP16` (heavy layers FP8, remainder FP16, mirroring INT8+FP16);
+  the `precision == "int8"` gates in `export`/`main` generalize to the quantized set
+  `{int8, fp8}`. Calibration streams (`src/calibrate.py`) reused unchanged (format-independent).
+  ⏱️ capped, FP16-only fallback (CLAUDE.md §7). → `docs/adr/0001`
+  → verify (off-pod): FP8 base + quantized ONNX trace; `pytest` green. TRT build is pod-only 🔴.
+
+- [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
+  precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
+  → verify: quantized ONNX carries QuantizeLinear (E4M3); FP8 engine builds; **FP8 tactics are
+  actually selected** (verbose build / layer inspection), not a silent FP16 no-op.
+
+- [ ] 🖥️🔴 **Precision-match gate — FP8 rows:** `uv run python -m src.precision_match
+  track=<lewm|dino>` gains FP8 drift rows vs the PyTorch reference (nominal + off-nominal hist
+  `T ∈ {1,2}`). No coded pass/fail — owner sign-off on the drift table. **Not the arbiter**
+  (nominal inputs; SR is — SPEC §Requirements).
+
+- [ ] 🖥️ **SR-per-precision — FP8:** `uv run python -m src.sr_eval --config-dir conf
+  +experiment=eval_<lewm|dino> precision=fp8`, both tracks. Writes the `fp8` key into the
+  per-track `sr.json` (read-modify-write → no clobber, CLAUDE.md §8).
+  → verify: FP8 SR recorded per track, paired with its per-cycle latencies (same solves).
+
+- [ ] 🖥️ **Per-component benchmark — FP8:** `src/benchmark.py` times the FP8 encode-step +
+  predictor-step distributions (equal-n p50/p95, warm-up dropped) + peak mem; `src/report.py
+  ::decompose` derives the FP8 encoder/predictor/overhead split from the FP8 engine-step means ×
+  the CEM call counts. `src/gpu_clocks.py` brackets the FP8 runs.
+  → verify: FP8 per-component + peak-mem rows populated; negative overhead surfaced loudly.
+
+- [ ] **FP8 in the headline artifacts (tables + plots):** the FP32→FP16→INT8→FP8 speed table (all
+  three distributions at p50 **and** p95), the FP32-relative table (p50 speedup + ΔSR per row),
+  the Amdahl dilution table (model-only vs realized at FP8), and the speed-vs-SR plot all gain the
+  FP8 row/point; the canonical per-track `results.<track>.json` records the FP8 numbers + fairness
+  conditions. `src/report.py from=… [sr=…]` re-renders off-pod with FP8 into
+  `$STABLEWM_HOME/reports/phase5/`.
+  → verify: `results.{lewm,dino}.json` round-trips FP8 through `report.load_results`; the rendered
+  tables + speed-vs-SR plot show the FP8 row/point; FP8 `.txt`/`.png` persisted under
+  `$STABLEWM_HOME/reports/phase5/`.
+
+- [ ] ⏱️ **Cap on FP8 export** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback = drop FP8,
+  keep FP32→FP16→INT8. 3-attempt debugging cap (CLAUDE.md §7).
+
+**Verify:** FP8 engines built on the L40S (gitignored, regenerable); FP8 precision-match
+owner-signed-off; FP8 SR + latency + peak mem recorded and joined; every Phase-5 table/plot and
+the per-track results JSON carry the FP8 row/point (quoted vs FP32); all logged to W&B.
 
 ---
 
@@ -358,7 +407,7 @@ adapter target modules confirmed real.
 - `src/interfaces.py` — typed contract; dim constants + CEM per-cycle call counts.
 - `src/adapter.py`, `src/shim.py`, `src/export.py` (incl. the Model-Optimizer INT8 Q/DQ step),
   `src/calibrate.py`, `src/probe_ranges.py`, `src/benchmark.py`, `src/report.py`, `src/study.py`,
-  `src/qlora.py`, `src/smoke.py` — the owned layer (Phases 4–6).
+  `src/smoke.py` — the owned layer (Phases 4–6).
 - `src/precision_match.py`, `src/fidelity.py`, `src/sr_shim.py`, `src/sr_eval.py`,
   `src/trt_runtime.py` — the gates + engine-backed SR path.
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
@@ -381,8 +430,8 @@ adapter target modules confirmed real.
 
 ## Cross-cutting rules
 
-- **Owner gates:** anything 🔴 (export/INT8/Model-Optimizer-PTQ debugging, precision matching,
-  QLoRA targeting, benchmark methodology, adapter dims, eval/CEM parity) → STOP and ask.
+- **Owner gates:** anything 🔴 (export/INT8/FP8/Model-Optimizer-PTQ debugging, precision matching,
+  benchmark methodology, adapter dims, eval/CEM parity) → STOP and ask.
 - **Git:** never run git. On completing a unit of work, output the files to stage and a
   `type(scope): summary` commit message; the owner runs git.
 - **Progress:** each `[x]` records artifact name; tick before advancing.
@@ -400,4 +449,5 @@ adapter target modules confirmed real.
 5. `src.export` builds TRT engines on the L40S; the latency benchmark emits the three p50/p95
    distributions (per-cycle headline) + SR per precision and the encoder/predictor/overhead
    tables (Phase 5).
-6. `src.qlora` produces a tuned backbone; task-metric delta vs frozen reported (Phase 6).
+6. `src.export` builds FP8 engines on the L40S; FP8 rows appear in the SR/latency/peak-mem
+   recordings, tables, and plots, quoted vs FP32 like the other precisions (Phase 6).

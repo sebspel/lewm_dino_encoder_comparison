@@ -1,8 +1,8 @@
-# SPEC: LeWM vs DINOv3-WM — Inference Optimization & QLoRA Study
+# SPEC: LeWM vs DINOv3-WM — Inference Optimization Study
 
 The source of truth for **what** this project must satisfy. `PLAN.md` carries the ordered
 execution steps and progress; `CLAUDE.md` holds behavioral rules; `src/interfaces.py` is the
-typed contract in code for the owned export/benchmark/QLoRA layer. Design rationale that runs
+typed contract in code for the owned export/benchmark layer. Design rationale that runs
 longer than a couple of sentences lives in `docs/architecture.md` and `docs/adr/`.
 
 ---
@@ -16,16 +16,18 @@ platform's DINO-WM predictor (whose reference backbone is **DINOv2**) with the f
 swapped to **DINOv3** — the same training framework, a different encoder.
 
 1. **Inference-optimization study on an L40S:** export both models PyTorch→ONNX→TensorRT with
-   INT8 quantized **explicitly** (Q/DQ), and benchmark planning latency and peak GPU memory
-   across FP32→FP16→INT8. Headline: the **LeWM-vs-DINOv3 per-cycle latency ratio** and the
-   **per-model FP32→FP16→INT8 optimization delta**.
-2. **QLoRA delta on the DINOv3-WM backbone:** fine-tune the frozen DINOv3 backbone with QLoRA
-   on Push-T, re-run the task-quality metric, and report the delta vs the frozen baseline.
+   the 8-bit precisions quantized **explicitly** (Q/DQ), and benchmark planning latency and peak
+   GPU memory across FP32→FP16→INT8→FP8. Headline: the **LeWM-vs-DINOv3 per-cycle latency ratio**
+   and the **per-model FP32→FP16→INT8→FP8 optimization delta**.
+2. **FP8 as a native-L40S precision:** add FP8 (E4M3) to the sweep on the L40S's FP8 Tensor
+   Cores (Ada 4th-gen / Transformer Engine — no hardware or toolchain change), exported,
+   benchmarked, and reported (speed + SR, degradation quoted vs FP32) **exactly like every other
+   precision** — an added precision, not a separate study or a head-to-head against INT8.
 
 **Non-goal:** the training framework, Push-T env, CEM solver, and MPC eval are **provided by
 `stable-worldmodel`** — a foundation, not the contribution. Running them, including swapping
 DINOv3 into the DINO-WM predictor to set up the comparison, is foundation work; the owned
-contribution is the optimization + QLoRA layer above a trained checkpoint.
+contribution is the optimization layer above a trained checkpoint.
 
 ---
 
@@ -50,8 +52,8 @@ Layering rationale: `docs/architecture.md` §1.
   diverge from the paper and erase part of the encoder-compute asymmetry the study measures.
 - **LeWM = the platform's `lewm` training unchanged.** SIGReg and the scratch encoder are the
   platform's; do not reimplement or retune them beyond what training requires.
-- **The contribution lives downstream of a trained checkpoint:** export, quantize, benchmark,
-  and QLoRA-tune. That is where `src/interfaces.py` and the owned code apply.
+- **The contribution lives downstream of a trained checkpoint:** export, quantize, benchmark.
+  That is where `src/interfaces.py` and the owned code apply.
 
 ---
 
@@ -79,7 +81,7 @@ those pins are recorded in `docs/adr/0001-cuda12-export-stack.md`; the executabl
 ### W&B logging discipline
 
 Every phase logs to the **same** W&B project. Training uses the platform's Lightning logger; the
-non-training phases (eval/benchmark/QLoRA) open the run through an owned helper that reads the
+non-training phases (eval/benchmark) open the run through an owned helper that reads the
 project/entity from the same config block — no second source of truth.
 
 ---
@@ -95,8 +97,9 @@ requirements those signatures must satisfy; it does not restate the signatures.
 - **Export produces separate encoder and predictor engines.** The adapter's `encode` and
   `predict` are traced and built **separately** (one ONNX graph / TensorRT engine each), because
   the CEM rollout encodes once, caches the latent, then calls `predict` autoregressively for
-  every candidate. FP32 and FP16 share the base graph (FP16 is a build flag); **INT8 is a
-  separately quantized graph** with Q/DQ and per-tensor scales baked in from a calibration pass.
+  every candidate. FP32 and FP16 share the base graph (FP16 is a build flag); **INT8 and FP8 are
+  each a separately quantized graph** with Q/DQ and per-tensor scales baked in from a calibration
+  pass (INT8 integer, FP8 E4M3 floating-point).
   Only the **model** (encoder + predictor) is exported; the **CEM planner is never compiled in**
   — it stays in Python around the engines. (Rationale: `docs/architecture.md` §2.)
 - **"INT8" means INT8 + FP16.** The Model Optimizer quantizes only the heavy layers
@@ -105,12 +108,20 @@ requirements those signatures must satisfy; it does not restate the signatures.
   heavy layers to INT8 on the same FP16 backbone. Owner-accepted trade-off: the FP16 cast of the
   remainder can under/overflow a few initializers; keeping the remainder FP32 is the documented
   fallback if that drift proves unacceptable.
+- **"FP8" means FP8 + FP16, and follows the exact INT8 pattern.** The Model Optimizer quantizes
+  the same heavy layers to FP8 (E4M3) and casts the remainder to FP16, so its engine builds with
+  the FP8 **and** FP16 flags set. FP8 rides the same Q/DQ export, calibration, precision-match,
+  and SR machinery as INT8 — it is another precision, not a second code path. Its speed and SR are
+  reported and degradation-quoted against FP32, like every other precision.
 - **The INT8 calibration set must match the *inference-time* input distribution, not the expert
   one.** The predictor calibration stream samples actions from the CEM proposal (`randn *
   var_scale`, zero mean, **unclamped**) and rolls `predict` autoregressively so it consumes its
   own predicted latents; it is reproduced in the builder, never harvested from a live CEM/eval
   run. **INT8's calibration health is judged by SR, not by the drift table.**
   (Full derivation, the two failure axes, and accepted residuals: `docs/adr/0002`.)
+- **FP8 draws the identical calibration streams and `max` method** — the per-tensor amax scales
+  come from the same encoder/predictor clips, and its calibration health is likewise judged by
+  SR, not the drift table.
 
 ### Latency & profiling
 
@@ -235,15 +246,16 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
 - Training batch size is held equal across tracks (128, LeWM's paper value) and does **not** carry
   into inference.
-- **Every speed figure is reported with its SR**, and FP16/INT8 results quote **SR and latency
-  degradation relative to FP32** — a precision that is faster but degrades task quality must be
-  visible.
+- **Every speed figure is reported with its SR**, and FP16/INT8/FP8 results quote **SR and
+  latency degradation relative to FP32** — a precision that is faster but degrades task quality
+  must be visible.
 - **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap comes from the
   encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
   DINOv3's large backbone exposing the full patch-token grid. No batch or precision mismatch may
   confound it; the encoder/predictor/overhead profile must attribute the gap to the right
   component.
-- **QLoRA comes after the frozen baseline**, and the delta is reported against frozen DINOv3-WM.
+- **FP8 rides the identical parity conditions as the other precisions** — same CEM config, seeds,
+  normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone.
 
 ---
 
@@ -253,11 +265,9 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
 touching:
 
 - ONNX / Model-Optimizer PTQ / TensorRT export debugging.
-- INT8 calibration set + Model-Optimizer PTQ config (calibration method, Q/DQ format,
-  per-channel-vs-per-tensor, op-type exclusions) + procedure; the FP32/FP16/INT8 precision
-  matching.
-- QLoRA targeting (which DINOv3 modules, rank, what stays frozen — the predictor is unfrozen and
-  co-trained, so only backbone targeting is open).
+- INT8/FP8 calibration set + Model-Optimizer PTQ config (quant mode, calibration method, Q/DQ
+  format, per-channel-vs-per-tensor, op-type exclusions) + procedure; the FP32/FP16/INT8/FP8
+  precision matching.
 - The benchmark fairness conditions (matched precision, env/goal).
 - The model adapter dims (the Constants above).
 - Any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity.
@@ -276,7 +286,6 @@ touching:
 - Export-script and benchmark-harness *plumbing* (trace call, Model-Optimizer PTQ invocation
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory
   logging, the passive `nvidia-smi dmon` GPU-telemetry logging, table/plot runners).
-- The QLoRA training-loop wiring (owner specifies the targeting config).
 - The tracer-bullet smoke script.
 
 ---
@@ -298,23 +307,26 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   within tolerance). A wrong `404` assembly, orientation, or a dropped proprio channel passes
   engine precision-match yet silently corrupts every SR — this gate catches it before any engine
   is built.
-- **Engine-fidelity gate (before benchmarking):** exported FP32/FP16/INT8 engines are
+- **Engine-fidelity gate (before benchmarking):** exported FP32/FP16/INT8/FP8 engines are
   precision-matched against the PyTorch reference on the **real checkpoints** before any
-  profiling/benchmark builds on them (INT8 after its Q/DQ graph is built from the calibration set).
+  profiling/benchmark builds on them (INT8 and FP8 after their Q/DQ graphs are built from the
+  calibration set).
   Drift is measured and reported only; the pass/fail is an **owner sign-off on the measured drift
   table** — deliberately **not** coded into a tolerance object or automated gate. The match must
   exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
   the traced `HS`). It is measured on **nominal, dataset-drawn inputs**, so it does **not**
   exercise the unbounded CEM action proposal that drives INT8 saturation — **INT8's calibration
   health is judged by SR, not by the drift table** (`docs/adr/0002`).
-- **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8
-  (FP32→FP16→INT8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
+- **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8 and FP8
+  (FP32→FP16→INT8→FP8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
   per precision**, with encoder/predictor/overhead profiled separately to locate bottlenecks. Only
   the model is TRT-optimized; the CEM planner stays in Python around it. Headline: the
   LeWM-vs-DINOv3 **per-cycle latency ratio at p50** (p95 reported alongside as the tail) +
-  per-model FP32→FP16→INT8 delta in **both speed and SR** (degradation quoted vs FP32 — the p50
-  speedup and the SR delta in the **same row**; speed plotted against SR).
+  per-model FP32→FP16→INT8→FP8 delta in **both speed and SR** (degradation quoted vs FP32 — the p50
+  speedup and the SR delta in the **same row**; speed plotted against SR). FP8 is a second
+  explicitly-quantized 8-bit precision, native to the L40S; it augments every headline recording,
+  table, and plot rather than forming a separate study.
   - **Headline-artifact durability.** The headline tables (serialized to text) **and** plots (PNG)
     are persisted to the persistent network volume, the same durability contract as checkpoints
     and engines. W&B logging is **additive, never the sole copy**. The **canonical** artifact is
@@ -334,9 +346,9 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     floor and should match `1/((1−p) + p/s)`. **This whole block is mean-based**, `p` included, so
     it is a **different number** from the reported p50 FP32-relative speedup — rendered in separate
     tables, never conflated or averaged. (`docs/architecture.md` §7, `docs/adr/0003`.)
-- **QLoRA delta:** the task-quality metric re-run on a QLoRA-tuned DINOv3 backbone (backbone
-  QLoRA-adapted, **predictor unfrozen and co-trained**), reported as a delta against the frozen
-  baseline, with adapters confirmed to target real modules.
+- **FP8 delta:** FP8 (E4M3) built and benchmarked like INT8 on the L40S's native FP8 Tensor
+  Cores, its speed/SR degradation quoted vs FP32, and its rows/points folded into the same
+  headline recordings, tables, and plots as the other precisions.
 
 ---
 
@@ -345,8 +357,8 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
 The general engineering rules (debugging cap, log-before-delete, never run git, tick-before-advance)
 live in `CLAUDE.md` and govern here too. Project-specific caps:
 
-- **TensorRT/INT8 export is time-capped with an explicit FP16-only fallback** — surface when
-  approaching the cap rather than iterating silently.
+- **TensorRT quantized-export (INT8/FP8) is time-capped with an explicit FP16-only fallback** —
+  surface when approaching the cap rather than iterating silently.
 - **Training is epoch-capped** — 10 epochs for both tracks, batch size 128 — not wall-clock-capped.
 - **Lean on the platform; don't reimplement it.** If a need looks like training, env, CEM, or eval,
   it's the platform's — wire to it.

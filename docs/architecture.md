@@ -10,7 +10,7 @@ decisions live in `docs/adr/`; this file holds the standing structural reasoning
 
 `stable-worldmodel` provides training, the Push-T env, the CEM solver, dataset tooling, and
 closed-loop MPC evaluation. The contribution starts **downstream of a trained checkpoint**:
-export, quantize, benchmark, QLoRA.
+export, quantize, benchmark.
 
 DINOv3-WM is the platform's `prejepa` DINO-WM predictor with the reference DINOv2 backbone
 swapped for a config-injected frozen DINOv3. The only code addition on the model side is one

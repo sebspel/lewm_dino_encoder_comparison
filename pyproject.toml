@@ -1,7 +1,7 @@
 [project]
 name = "lewm-dino-encoder-comparison"
 version = "0.0.0"
-description = "Inference-optimization (PyTorch->ONNX->TensorRT) & QLoRA study over stable-worldmodel's LeWM vs DINOv3-WM"
+description = "Inference-optimization (PyTorch->ONNX->TensorRT) study over stable-worldmodel's LeWM vs DINOv3-WM"
 requires-python = ">=3.10"
 
 # The owned dependency layer, uv-managed. torch is pinned to the CUDA 12.4 (cu124)
@@ -24,8 +24,6 @@ dependencies = [
     "onnx==1.19.1",
     "transformers",
     "timm",
-    "peft",
-    "bitsandbytes",
     # Push-T env runtime deps (swm/PushT-v1) — pulled by stable-worldmodel's `env`
     # extra, declared explicitly here so `uv sync` always installs them.
     "pygame",
