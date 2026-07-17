@@ -38,9 +38,15 @@ from src import wandb_log
 from src.eval import _compose_eval_cfg, _parse_success_rate
 from src.gpu_clocks import log_gpu
 
-# The eval overlay name -> track. The overlay sets `policy=<track>/weights_epoch_10.pt`; the
-# track selects the SR shim class and the engine directory (`engines/<track>/`).
-_TRACK_BY_EXPERIMENT = {"eval_lewm": "lewm", "eval_dino": "dino"}
+# The eval overlay name -> track. The overlay sets `policy=<track>/weights_epoch_<n>.pt`; the
+# track selects the SR shim class and the engine directory (`engines/<track>/`). `dino_ep5` is a
+# DIAGNOSTIC-ONLY track (epoch-5 DINO snapshot) namespaced apart from the headline `dino` engines
+# and SR rows; it reuses the DINO shim (see `_build_shim`).
+_TRACK_BY_EXPERIMENT = {
+    "eval_lewm": "lewm",
+    "eval_dino": "dino",
+    "eval_dino_ep5": "dino_ep5",
+}
 
 
 def _experiment_from_argv(argv):
@@ -89,7 +95,10 @@ def _build_shim(track, model, engines):
     `tensorrt` and allocate CUDA buffers (pod-only)."""
     from src.sr_shim import DINOWMSRShim, LeWMSRShim
 
-    if track == "dino":
+    # DINO-family tracks (`dino`, plus diagnostic snapshots like `dino_ep5`) all use the DINO
+    # shim; only `lewm` uses the LeWM shim. Match on the family prefix so a namespaced diagnostic
+    # track does not silently fall through to the wrong shim.
+    if track.startswith("dino"):
         return DINOWMSRShim.from_engines(model, engines)
     return LeWMSRShim.from_engines(model, engines)
 

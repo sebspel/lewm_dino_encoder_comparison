@@ -222,9 +222,15 @@ def _print_table(rows: list[dict]) -> None:
 # Trained checkpoints, addressed by the explicit epoch-10 .pt (the folder holds earlier
 # snapshots too, so a bare run name is ambiguous — load_pretrained format-1). Same names the
 # eval overlays will need for the SR-per-precision re-run.
+#
+# `dino_ep5` is a DIAGNOSTIC-ONLY track: the epoch-5 DINO snapshot wrapped in the same DINO
+# adapter/shim, but namespaced apart so its engines (`engines/dino_ep5/`) and SR rows never
+# collide with — nor replace — the headline `dino` (epoch-10) track. It is deliberately NOT in
+# `study._TRACKS`, so it never enters the 2-track headline.
 _CHECKPOINTS = {
     "lewm": "lewm/weights_epoch_10.pt",
     "dino": "dino/weights_epoch_10.pt",
+    "dino_ep5": "dino/weights_epoch_5.pt",
 }
 
 
@@ -238,7 +244,9 @@ def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
     from src.adapter import DINOWMAdapter, LeWMAdapter
 
     if track not in _CHECKPOINTS:
-        raise SystemExit(f"unknown track {track!r}; expected 'lewm' or 'dino'")
+        raise SystemExit(
+            f"unknown track {track!r}; expected one of {sorted(_CHECKPOINTS)}"
+        )
     model = swm.wm.utils.load_pretrained(_CHECKPOINTS[track])
     adapter = LeWMAdapter(model) if track == "lewm" else DINOWMAdapter(model)
     return adapter, track

@@ -1,0 +1,37 @@
+# @package _global_
+# DINOv3-WM eval overlay — DIAGNOSTIC epoch-5 snapshot. Composed on top of the vendored
+# scripts/plan/config/pusht.yaml via the SR driver:
+#   uv run python -m src.sr_eval --config-dir conf +experiment=eval_dino_ep5 precision=fp32
+#
+# Identical to eval_dino.yaml except the checkpoint: this points at the epoch-5 DINO snapshot
+# so its SR can be compared against the headline epoch-10 `dino` track under the SAME pipeline
+# (same dataset, CEM config, seeds, latency callback). It maps to the namespaced `dino_ep5`
+# track (src/sr_eval.py::_TRACK_BY_EXPERIMENT), whose engines live in engines/dino_ep5/ and whose
+# SR rows key under "dino_ep5" — so nothing here overwrites the headline `dino` artifacts.
+# The register-slice (196-patch grid) rides in through the checkpoint's saved
+# model._target_ = src.dino_patch.DINOv3PreJEPA (load_pretrained), not from here.
+
+# Trained DINOv3-WM epoch-5 snapshot at $STABLEWM_HOME/checkpoints/dino/. Point at the file
+# directly: training saves at epochs 5 and 10 (weights_epoch_{5,10}.pt), so the bare folder is
+# ambiguous.
+policy: dino/weights_epoch_5.pt
+
+eval:
+  # Same trained dataset as the headline tracks (parity) — overrides pusht.yaml's .h5 default.
+  dataset_name: pusht_expert_train.lance
+
+# Identical latency-callback injection to eval_dino.yaml — same observation-only recorder,
+# same config seam, so the per-decision latency metric is measured identically.
+solver:
+  callbacks:
+    - _target_: src.eval_latency.SolveLatencyRecorder
+      sync_cuda: true
+
+# Same shared W&B project as every other phase (read by src/wandb_log.py; eval_wm.py never
+# touches cfg.wandb). The run name is set by the driver (sr-eval-dino_ep5), distinct from the
+# headline dino run.
+wandb:
+  enabled: true
+  config:
+    entity: null
+    project: lewm-dino-encoder-comparison
