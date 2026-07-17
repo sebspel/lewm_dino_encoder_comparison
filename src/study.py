@@ -24,9 +24,8 @@ by default — the persistent network volume, so a completed study survives pod 
 Engines are NOT built here — run `uv run python -m src.export model=<t> precision=<p>` first
 (after the precision-match gate). A precision whose
 `$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<p>.plan` (repo-local `engines/` fallback
-off-pod) is missing is skipped with a note, which is
-exactly the FP16-only fallback (SPEC §Caps / PLAN §Phase-5 cap). Runs on the L40S (benchmark
-needs CUDA / TensorRT).
+off-pod) is missing is skipped with a note (that precision is reported as absent, not a run
+failure). Runs on the L40S (benchmark needs CUDA / TensorRT).
 """
 
 from __future__ import annotations

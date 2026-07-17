@@ -13,10 +13,13 @@ calibrator: `quantize_onnx` rewrites the base FP32 ONNX into a Q/DQ-annotated ON
 per-tensor scales baked in from the calibration pass (run on the GPU / CUDA EP when
 available), and `build_engine` then parses that
 quantized graph like FP32/FP16 (TRT honors the embedded Q/DQ — no `int8_calibrator`, no
-calibration profile). The calibration set (OWNER-signed-off knobs: `max` method, 512 clips
-strided across all episodes, drawn through the platform at matched ImageNet norm) lives in
-`src.calibrate`; `export` builds a per-method numpy dict (encoder obs / predictor per-track
-input) keyed by ONNX input name and hands it to `quantize_onnx`.
+calibration profile). FP8 (E4M3) rides the EXACT same path — a second quantized format, not a
+second code path: same calibration streams + `max` method, `quantize_mode="fp8"` into the Model
+Optimizer, and a `BuilderFlag.FP8`+FP16 build (SPEC §Export shape). The calibration set
+(OWNER-signed-off knobs: `max` method, 512 clips strided across all episodes, drawn through the
+platform at matched ImageNet norm) lives in `src.calibrate`; `export` builds a per-method numpy
+dict (encoder obs / predictor per-track input) keyed by ONNX input name and hands it to
+`quantize_onnx`.
 
 OWNER-ONLY seams left explicit (fail SILENTLY — STOP and ask before filling):
   - FP32/FP16/INT8 precision matching: `precision_match` reports drift only; the gate is an
@@ -45,7 +48,7 @@ from torch import Tensor, nn
 from torch.export import Dim
 from torch.nn.utils.fusion import fuse_linear_bn_eval
 
-from src.interfaces import Precision, EnginePaths, WMStepAdapter
+from src.interfaces import Precision, EnginePaths, WMStepAdapter, QUANTIZED_PRECISIONS
 
 # The predictor engine must accept the CEM candidate fan-out. The solver loops envs in chunks
 # of batch_size and expands each to (batch_size, num_samples), so predict batch =
@@ -215,6 +218,7 @@ def quantize_onnx(
     calibration_method: str = "max",
     calibration_shapes: str | None = None,
     force_cpu_calibration: bool = False,
+    quant_mode: str = "int8",
 ) -> Path:
     """NVIDIA TensorRT **Model Optimizer** PTQ invocation (owned plumbing; owner sets the
     quant config). Rewrites the base FP32 ONNX into a Q/DQ-annotated ONNX with per-tensor
@@ -258,6 +262,13 @@ def quantize_onnx(
     else:
         calibration_eps = ["cuda:0", "cpu"]
 
+    # `quant_mode` selects the 8-bit format baked into the Q/DQ graph: "int8" (integer, the
+    # tool default) or "fp8" (E4M3 floating-point). Both draw the SAME calibration streams +
+    # `max` method (format-independent — SPEC §Export shape); only the quantized dtype differs.
+    # Threaded to modelopt's `quantize_mode` ONLY for the non-default format so the owner-signed-
+    # off INT8 call stays byte-identical. 🔴 pod-verify: the `quantize_mode` kwarg name + "fp8"
+    # value are the owner-set quant config (PLAN §Phase-6); an unknown kwarg fails loudly here.
+    mode_kwargs = {} if quant_mode == "int8" else {"quantize_mode": quant_mode}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     quantize(
         onnx_path=str(onnx_path),
@@ -267,6 +278,7 @@ def quantize_onnx(
         calibration_shapes=calibration_shapes,
         output_path=str(out_path),
         use_external_data_format=True,
+        **mode_kwargs,
     )
     if not out_path.exists():
         raise RuntimeError(f"Model Optimizer produced no quantized ONNX at {out_path}")  # -> OWNER
@@ -279,13 +291,14 @@ def build_engine(
     out_path: Path,
     example_inputs: tuple[Tensor, ...],
 ) -> Path:
-    """TensorRT-10.7 builder invocation (owned plumbing). FP32 default, FP16 flag; INT8 sets
-    the INT8 **and** FP16 flags and parses the **already-quantized** Q/DQ ONNX (no calibrator,
-    no calibration profile — the scales are baked into the graph by `quantize_onnx`). FP16 is
-    required alongside INT8 because the Model Optimizer casts the non-quantized remainder to
-    FP16, so "INT8" is really INT8+FP16 (see the int8 branch below). Parse/build failures raise
-    loudly (the *judgement* on how to fix them is owner's — ONNX/TRT debugging).
-    Runs ONLY on the L40S (`tensorrt` imported lazily so this module imports off-pod)."""
+    """TensorRT-10.7 builder invocation (owned plumbing). FP32 default, FP16 flag; INT8 and
+    FP8 each set their 8-bit flag **and** FP16 and parse the **already-quantized** Q/DQ ONNX (no
+    calibrator, no calibration profile — the scales are baked into the graph by `quantize_onnx`).
+    FP16 is required alongside the 8-bit flag because the Model Optimizer casts the non-quantized
+    remainder to FP16, so "INT8" is really INT8+FP16 and "FP8" is FP8+FP16 (see the branches
+    below). Parse/build failures raise loudly (the *judgement* on how to fix them is owner's —
+    ONNX/TRT debugging). Runs ONLY on the L40S (`tensorrt` imported lazily so this module imports
+    off-pod)."""
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
@@ -313,6 +326,16 @@ def build_engine(
         # are required. The engine is thus INT8 on the quantized layers + FP16 on the rest —
         # the realistic TRT INT8 deployment (SPEC: "INT8" == INT8+FP16).
         config.set_flag(trt.BuilderFlag.INT8)
+        config.set_flag(trt.BuilderFlag.FP16)
+    elif precision == "fp8":
+        # FP8 mirrors the INT8 branch exactly on the L40S's native FP8 Tensor Cores (Ada
+        # 4th-gen): the quantized ONNX carries E4M3 Q/DQ + per-tensor scales; the FP8 flag lets
+        # TRT pick FP8 tactics for the Q/DQ layers, and FP16 is set for the same reason as INT8
+        # (the Model Optimizer casts the non-quantized remainder to FP16). No calibrator/profile
+        # — scales are in the graph. "FP8" == FP8+FP16 (SPEC §Export shape). 🔴 pod-verify:
+        # `BuilderFlag.FP8` is the owner-set build config (PLAN §Phase-6); build failures raise
+        # loudly here for the owner's judgement.
+        config.set_flag(trt.BuilderFlag.FP8)
         config.set_flag(trt.BuilderFlag.FP16)
 
     # Optimization profile for the dynamic candidate-batch axis (axis 0): min 1, opt at the
@@ -348,8 +371,8 @@ def export(
     """PyTorch -> ONNX -> TensorRT for both methods -> {encoder, predictor} engine paths.
     `encode` and `predict` are traced and built SEPARATELY.
     """
-    if precision == "int8" and calib_loader is None:
-        raise ValueError("int8 export requires a calibration loader (owner-provided)")
+    if precision in QUANTIZED_PRECISIONS and calib_loader is None:
+        raise ValueError(f"{precision} export requires a calibration loader (owner-provided)")
     engine_dir.mkdir(parents=True, exist_ok=True)
 
     predict_arity = len(predict_inputs)
@@ -378,7 +401,7 @@ def export(
     engines: dict[str, Path] = {}
     for name, (module, inputs, dyn) in specs.items():
         onnx_path = export_onnx(module, inputs, dyn, engine_dir / f"{name}.onnx")
-        if precision == "int8":
+        if precision in QUANTIZED_PRECISIONS:
             from src.calibrate import make_calibration_dict
 
             batches = (
@@ -398,12 +421,17 @@ def export(
             onnx_path = quantize_onnx(
                 onnx_path,
                 calib_dict,
-                engine_dir / f"{name}.int8.onnx",
+                # Per-precision filename so int8 + fp8 quantized graphs never collide in the
+                # same engine dir (each is a separately quantized ONNX — SPEC §Export shape).
+                engine_dir / f"{name}.{precision}.onnx",
                 calibration_shapes=shapes,
                 # The predictor's dynamic-batch reshape trips an onnxruntime-gpu CUDA-EP
                 # miscompute in modelopt's MHA probe; calibrate it on CPU. The encoder graph
                 # lacks that pattern, so it keeps the faster GPU (CUDA EP) calibration.
                 force_cpu_calibration=(name == "predictor"),
+                # int8 (integer) vs fp8 (E4M3) — the only per-format difference; the calibration
+                # streams + method are shared.
+                quant_mode=precision,
             )
         engines[name] = build_engine(
             onnx_path,
@@ -431,7 +459,7 @@ def main() -> None:
     owner calibration set and routes through the Model Optimizer (explicit Q/DQ) before the
     TRT build.
 
-        uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8>
+        uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8|fp8>
     """
     from src.interfaces import ExportConfig
     from src.precision_match import _build_adapter, example_inputs
@@ -449,11 +477,11 @@ def main() -> None:
     adapter, name = _build_adapter(model)
     encode_inputs, predict_inputs = example_inputs(adapter, cfg)
 
-    # INT8 draws the calibration set through the platform (the Model Optimizer derives the
-    # scales from it); `batch` is just the internal chunk that streams clips through the
-    # adapter. FP32/FP16 build data-free.
+    # Quantized precisions (int8/fp8) draw the calibration set through the platform (the Model
+    # Optimizer derives the scales from it); `batch` is just the internal chunk that streams
+    # clips through the adapter. FP32/FP16 build data-free.
     calib_loader = None
-    if precision == "int8":
+    if precision in QUANTIZED_PRECISIONS:
         from src.calibrate import build_calibration_data
 
         calib_loader = build_calibration_data(batch=encode_inputs[0].shape[0])

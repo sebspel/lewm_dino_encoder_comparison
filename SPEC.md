@@ -357,8 +357,6 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
 The general engineering rules (debugging cap, log-before-delete, never run git, tick-before-advance)
 live in `CLAUDE.md` and govern here too. Project-specific caps:
 
-- **TensorRT quantized-export (INT8/FP8) is time-capped with an explicit FP16-only fallback** —
-  surface when approaching the cap rather than iterating silently.
 - **Training is epoch-capped** — 10 epochs for both tracks, batch size 128 — not wall-clock-capped.
 - **Lean on the platform; don't reimplement it.** If a need looks like training, env, CEM, or eval,
   it's the platform's — wire to it.

@@ -5,7 +5,7 @@ Consumes the benchmark results (per track × precision) and emits the headline o
     DINOv3 ÷ LeWM full planning-cycle latency, compared at **p50**
   - **Amdahl dilution**: optimizable fraction `p`, ceiling `1/(1-p)`, and per-precision
     model-only vs realized speedup
-  - per-model **FP32→FP16→INT8 delta** in both **speed and SR**, degradation quoted vs FP32
+  - per-model **FP32→FP16→INT8→FP8 delta** in both **speed and SR**, degradation quoted vs FP32
   - **speed-vs-SR** scatter
   - per-component **encoder / predictor / overhead** bottleneck breakdown, derived from the
     engine-step times × CEM call counts minus the measured per-cycle time (overhead by
@@ -55,7 +55,7 @@ from src.interfaces import (  # noqa: E402  — CEM per-cycle call counts (the d
 )
 
 _TRACKS = ("lewm", "dino")
-_PRECISIONS = ("fp32", "fp16", "int8")
+_PRECISIONS = ("fp32", "fp16", "int8", "fp8")
 
 
 def _missing(x) -> bool:
@@ -340,7 +340,7 @@ def render_dilution_table(bench: dict) -> str:
 # --- plots ----------------------------------------------------------------------------
 def plot_speed_vs_sr(bench: dict, out_dir: Path) -> Path:
     fig, ax = plt.subplots(figsize=(6, 4))
-    markers = {"fp32": "o", "fp16": "s", "int8": "^"}
+    markers = {"fp32": "o", "fp16": "s", "int8": "^", "fp8": "D"}
     for track in _TRACKS:
         for prec in _PRECISIONS:
             r = bench.get(track, {}).get(prec)

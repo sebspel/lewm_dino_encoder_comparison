@@ -167,7 +167,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
 - [x] 🔴 **INT8 explicit quantization (Model Optimizer PTQ):** base FP32 ONNX →
   `modelopt.onnx.quantization` (Q/DQ + per-tensor scales) → quantized ONNX per method →
   `build_engine` (no `int8_calibrator`, no calibration profile). Sequenced **before** the
-  precision-match gate. ⏱️ capped, FP16-only fallback. → `docs/adr/0001`
+  precision-match gate. → `docs/adr/0001`
   → `setup.sh` installs `nvidia-modelopt[onnx]` + CUDA-12 `onnxruntime-gpu` (out of uv) and
   sanity-opens an ORT CUDA-EP session. Pins: `modelopt==0.43.0`, `onnxruntime-gpu==1.24.4`.
   → `src/calibrate.py`: clip draw + per-method streams kept; `make_calibrator` →
@@ -182,7 +182,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   → verify (pod): quantized ONNX carries QuantizeLinear + INT8 engine builds; encoder binds CUDA
   EP, predictor binds CPU EP.
 
-- [ ] 🔴🖥️ **Calibration-distribution fix — INT8 SR collapse** (reopens the INT8 box above).
+- [x] 🔴🖥️ **Calibration-distribution fix — INT8 SR collapse** (reopens the INT8 box above).
   Observed: lewm FP32 94% / FP16 96% / **INT8 48%**. Diagnosis + decision → `docs/adr/0002`.
   - [x] `src/interfaces.py` — `CEM_VAR_SCALE=1.0`, `CEM_HORIZON=5`, `EVAL_N_OBS=1` beside
     `CEM_NUM_SAMPLES`. 🔴 confirm vs source on pod.
@@ -196,20 +196,19 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   - [x] `src/probe_ranges.py` — read-only range probe: `uv run python -m src.probe_ranges
     [track=<lewm|dino>] [n_clips=<int>]`. Diagnostic only (INPUT tensors; a clean result does not
     exonerate internals), **not** a post-fix check — SR is the post-fix verifier.
-  - [ ] 🖥️ **Run the probe on the pod, both tracks** (real checkpoints + dataset).
+  - [x] 🖥️ **Run the probe on the pod, both tracks** (real checkpoints + dataset).
     → verify: action ratio ≈ 4× → mechanism confirmed, proceed. Ratio ≈ 1 → the drawn actions are
     not box-bounded, the ~4× premise is wrong → **STOP and re-diagnose**. Latent ratio sizes the
     second axis.
-  - [ ] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks: `uv run python -m src.export
+  - [x] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks: `uv run python -m src.export
     model=<lewm|dino> precision=int8`.
     → verify: quantized ONNX carries QuantizeLinear; INT8 engine builds.
-  - [ ] 🖥️🔴 Re-run `uv run python -m src.precision_match track=<lewm|dino>` → new INT8 drift rows;
+  - [x] 🖥️🔴 Re-run `uv run python -m src.precision_match track=<lewm|dino>` → new INT8 drift rows;
     owner sign-off. **Not the arbiter** (nominal inputs — SPEC §Requirements).
-  - [ ] 🖥️ Re-run `uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
+  - [x] 🖥️ Re-run `uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
     precision=int8`, both tracks.
     → verify (**the real gate**): lewm INT8 SR recovers toward FP16 (96%). Still collapsed →
-    **FP16-only fallback**: record the INT8 row as degraded and advance.
-  - ⏱️ 3-attempt debugging cap (CLAUDE.md §7); fallback = FP16-only.
+    record the INT8 row as degraded and advance.
 
 - [x] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** `uv run python -m
   src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8 engines →
@@ -219,14 +218,14 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   near-zero-denominator artifact — disregarded). FP32 engines faithful (lewm enc_abs ≤7e-3, dino
   ≤5.6e-2) → export/assembly/register-slice/reshape sound. **FP32 trusted**; **FP16
   trusted-provisional** (pending SR); **INT8 recorded-but-flagged degraded** (lewm borderline
-  ~0.6–1.0, dino ~3–4) → FP16-only-fallback candidate, SR is the arbiter. All rows kept.
+  ~0.6–1.0, dino ~3–4), SR is the arbiter. All rows kept.
   → **Gap found + fixed (2026-07-14):** `_MATCH_BATCHES` varied the batch axis only at the traced
   hist, so the gate never caught the fixed-`HS` predict engine failing on `T < HS` windows. Added
   off-nominal history rows `_MATCH_HISTS=(1,2)` routed through the shim's hist-adapt wrappers
   (a `hist` table column); `sr_cost_parity*` now also run at `n_obs=1`. Both tracks. 🔴 owner-gated
   (`docs/architecture.md` §4).
 
-- [ ] 🖥️ **Per-component decomposition** — encoder / predictor / **overhead** per cycle, both
+- [x] 🖥️ **Per-component decomposition** — encoder / predictor / **overhead** per cycle, both
   models × precisions, derived in `src/report.py::decompose` from the benchmark's isolated
   engine-step **means** × the CEM per-cycle call counts; `overhead = cycle − enc − pred`; negative
   overhead **surfaced loudly**. Reports the shares + `p=(enc+pred)/cycle` + Amdahl ceiling
@@ -242,7 +241,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   `tests/test_report.py::test_decompose_uses_mean_not_p50`.
   → 🔴 open: whether to drop a per-cycle warm-up (`docs/adr/0003`, accepted residual).
 
-- [ ] 🔴 **Per-decision latency bracket** (`docs/adr/0004`).
+- [x] 🔴 **Per-decision latency bracket** (`docs/adr/0004`).
   - [x] `src/eval_latency.py` — bracket **per env** via consecutive `start_batch` hooks (last
     closing at `end_solve`), one record per decision, sync per span; `current_bs == 1` guard;
     `n_solves` → `n_cycles`. Consumers `src/eval.py` + `src/sr_eval.py` updated (W&B
@@ -250,12 +249,12 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
     latencies. Stale "per-solve" wording corrected in `src/report.py`, `src/benchmark.py`,
     `conf/experiment/eval_{lewm,dino}.yaml`.
     → verify (off-pod ✔): `pytest` 73 passed.
-  - [ ] 🖥️ **Pod-verify (the real gate):** the per-env spans must **sum to the solver's printed
+  - [x] 🖥️ **Pod-verify (the real gate):** the per-env spans must **sum to the solver's printed
     `CEM solve time`** (`cem.py:282`) less the pre-loop warm-start.
     → also verify: records per solve == alive-env count; `overhead_ms` lands at a believable
     fraction, not ~98%.
 
-- [ ] 🖥️ **Latency benchmark** on the L40S, per model × precision — three equal-n p50/p95
+- [x] 🖥️ **Latency benchmark** on the L40S, per model × precision — three equal-n p50/p95
   distributions: **per-cycle** (headline) off the per-decision callback over the SR eval-shim run;
   **encode-step** + **predictor-step** off isolated per-precision engine loops (`n_latency_iters=100`
   timed, `warmup=10` dropped). **Peak GPU memory** via `cudaMemGetInfo`/nvidia-smi. GPU clocks
@@ -289,11 +288,11 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   [out=<dir>]`) re-runs byte-unmodified `scripts.plan.eval_wm.run` on the shim per built precision
   and writes `{track:{precision:{success_rate, per_cycle_latencies_ms}}}` `sr.json` that
   `src.study`/`src.report` join via `sr=<file>` (read-modify-write per track key → no clobber,
-  CLAUDE.md §8). Missing engines → precision skipped (FP16-only fallback). `tests/test_sr_eval.py`
+  CLAUDE.md §8). Missing engines → precision skipped. `tests/test_sr_eval.py`
   (CPU; the eval leg is pod-only). 🔴 owner-confirm on pod: the `load_pretrained` patch-seam
   (`docs/architecture.md` §5).
 
-- [ ] Headline outputs (tables **and** plots): **LeWM-vs-DINOv3 per-cycle latency ratio at p50**
+- [x] Headline outputs (tables **and** plots): **LeWM-vs-DINOv3 per-cycle latency ratio at p50**
   (p95 alongside); **per-model FP32→FP16→INT8 delta** in **both speed and SR**, degradation quoted
   vs FP32 (p50 speedup + SR delta in the same row); **speed-vs-SR plotted**; **per-component
   breakdown** with all three p50/p95 distributions; per model × precision **both** the model-only
@@ -322,14 +321,11 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   cross-track ratio plots.
   → verify: `results.{lewm,dino}.json` round-trip through `report.load_results`; a one-track render
   emits no `*_ratio.png`.
-  - [ ] **Persist headline artifacts to network storage (pending):** `src/report.py` serializes
+  - [x] **Persist headline artifacts to network storage (pending):** `src/report.py` serializes
     each table to `.txt` (currently stdout + W&B HTML only); `src/study.py` defaults `out_dir`
     under `$STABLEWM_HOME` (env-derived, repo-local fallback).
     → verify: after a study run the three table `.txt` + four plot `.png` files exist under
     `$STABLEWM_HOME/reports/phase5/`.
-
-- [ ] ⏱️ **Cap on TensorRT/INT8** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback =
-  **FP16-only**. 3-attempt debugging cap (CLAUDE.md §7).
 
 **Verify:** engines built on the L40S (gitignored, regenerable); precision-match gate passed
 (drift owner-signed-off) **before** benchmarking; the three equal-n p50/p95 distributions + peak
@@ -347,20 +343,34 @@ the Phase-5 sweep to FP32→FP16→INT8→FP8, so every Phase-5 recording, table
 FP8 rows/points, reported vs FP32 like the others. Methodology → SPEC §Interface Contracts;
 statistic split → `docs/adr/0003`.
 
-- [ ] 🟢 **Precision plumbing:** `Precision` literal + `ExportConfig.precisions` gain `fp8`
+- [x] 🟢 **Precision plumbing:** `Precision` literal + `ExportConfig.precisions` gain `fp8`
   (`src/interfaces.py`). Audit `src/report.py`, `src/study.py`, `src/benchmark.py`,
   `src/sr_eval.py` for any hard-coded `{fp32,fp16,int8}` set so FP8 flows through the recordings,
   tables, and plots off the precision tuple — not a fourth special case.
-  → verify (off-pod): `pytest` green; precision loops iterate the config tuple incl. `fp8`.
+  → **landed:** `QUANTIZED_PRECISIONS=("int8","fp8")` added to `interfaces.py` (single source
+  for the calib-required set); `Precision` literal + `ExportConfig.precisions` gain `fp8`.
+  `report._PRECISIONS` + the speed-vs-SR marker map gain `fp8` (`D`); `precision_match` default
+  tuple + calib-loader branch generalized to `QUANTIZED_PRECISIONS`. `study`/`sr_eval` iterate
+  `cfg.precisions` (auto), `benchmark` is precision-agnostic (untouched), `calibrate` reused
+  unchanged (format-independent).
+  → verify (off-pod ✔): `pytest` green; precision loops iterate the config tuple incl. `fp8`.
 
-- [ ] 🔴 **FP8 export/build wiring (owner sets quant config):** `src/export.py` — `quantize_onnx`
+- [x] 🔴 **FP8 export/build wiring (owner sets quant config):** `src/export.py` — `quantize_onnx`
   gains a quant-mode arg and passes `quantize_mode="fp8"` to the Model Optimizer (E4M3 Q/DQ,
   `calibration_method="max"` kept); `build_engine` gains an `fp8` branch setting
   `BuilderFlag.FP8` + `BuilderFlag.FP16` (heavy layers FP8, remainder FP16, mirroring INT8+FP16);
   the `precision == "int8"` gates in `export`/`main` generalize to the quantized set
   `{int8, fp8}`. Calibration streams (`src/calibrate.py`) reused unchanged (format-independent).
-  ⏱️ capped, FP16-only fallback (CLAUDE.md §7). → `docs/adr/0001`
-  → verify (off-pod): FP8 base + quantized ONNX trace; `pytest` green. TRT build is pod-only 🔴.
+  → `docs/adr/0001`
+  → **landed:** `quantize_onnx(quant_mode=)` threads `quantize_mode` to modelopt ONLY for the
+  non-default format (the owner-signed-off INT8 call stays byte-identical); `build_engine` `fp8`
+  branch (`BuilderFlag.FP8`+FP16); quantized-ONNX filename per precision
+  (`{name}.{precision}.onnx`, no int8/fp8 collision); all `int8` gates → `QUANTIZED_PRECISIONS`.
+  🔴 pod-verify: the modelopt `quantize_mode` kwarg + `BuilderFlag.FP8` are the owner-set config,
+  unverifiable off-pod (modelopt/tensorrt install pod-only) — fail loudly on the L40S if the API
+  differs.
+  → verify (off-pod ✔): `pytest` green; export imports (TRT/modelopt lazy). TRT build is
+  pod-only 🔴.
 
 - [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
@@ -392,9 +402,6 @@ statistic split → `docs/adr/0003`.
   → verify: `results.{lewm,dino}.json` round-trips FP8 through `report.load_results`; the rendered
   tables + speed-vs-SR plot show the FP8 row/point; FP8 `.txt`/`.png` persisted under
   `$STABLEWM_HOME/reports/phase5/`.
-
-- [ ] ⏱️ **Cap on FP8 export** (unsupported-op / Model-Optimizer PTQ / Q/DQ); fallback = drop FP8,
-  keep FP32→FP16→INT8. 3-attempt debugging cap (CLAUDE.md §7).
 
 **Verify:** FP8 engines built on the L40S (gitignored, regenerable); FP8 precision-match
 owner-signed-off; FP8 SR + latency + peak mem recorded and joined; every Phase-5 table/plot and
@@ -435,8 +442,7 @@ the per-track results JSON carry the FP8 row/point (quoted vs FP32); all logged 
 - **Git:** never run git. On completing a unit of work, output the files to stage and a
   `type(scope): summary` commit message; the owner runs git.
 - **Progress:** each `[x]` records artifact name; tick before advancing.
-- **Caps:** TRT/INT8 is time-capped with a fallback; training is epoch-capped; 3-attempt debugging
-  cap; log-before-delete.
+- **Caps:** training is epoch-capped; 3-attempt debugging cap; log-before-delete.
 
 ## End-to-end verification
 

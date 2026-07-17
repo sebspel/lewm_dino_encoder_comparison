@@ -7,7 +7,7 @@ its task-quality counterpart"). The benchmark (`src.benchmark` / `src.study`) le
 `{track: {precision: SR}}` JSON that `src.study` / `src.report` join back in via `sr=<file>`.
 
     uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino> \
-        [precision=fp32,fp16,int8] [out=<dir>]
+        [precision=fp32,fp16,int8,fp8] [out=<dir>]
 
 **How the engine model gets into the eval (the seam).** The CEM solver calls the world model
 through ``get_cost`` — not ``encode`` / ``predict`` — so the exported engines are re-wrapped in
@@ -23,7 +23,7 @@ the model object; no CEM config / seed / sample count / plan changes, so the LeW
 quantization drift, which is exactly the signal being measured).
 
 Runs on the L40S (the shim's engine callables need `tensorrt` + CUDA + the Push-T dataset).
-A precision whose engines `src.export` has not built is skipped — the FP16-only fallback.
+A precision whose engines `src.export` has not built is skipped (reported as absent).
 """
 
 from __future__ import annotations

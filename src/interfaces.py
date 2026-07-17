@@ -11,7 +11,14 @@ if TYPE_CHECKING:
     # -only so this foundation module stays import-light and free of a runtime cycle.
     from src.calibrate import CalibrationData
 
-Precision = Literal["fp32", "fp16", "int8"]
+Precision = Literal["fp32", "fp16", "int8", "fp8"]
+
+# Precisions that require an explicit Q/DQ calibration pass before the TRT build (a separately
+# quantized ONNX per format, scales baked in — SPEC §Export shape). FP32/FP16 build data-free
+# off the shared base graph; INT8 and FP8 each draw the SAME calibration streams (format-
+# independent) and route through the Model-Optimizer PTQ. Single source of truth so the export
+# gates + the precision-match calib-loader branch never re-enumerate this set per module.
+QUANTIZED_PRECISIONS: tuple[str, ...] = ("int8", "fp8")
 
 # --- Dims (owner-confirmed; the 🔴 adapter-dims gate). Defined ONCE here; the platform's
 # own dims are read from its config, never re-guessed. Read from the pinned installed
@@ -121,7 +128,7 @@ class Export(Protocol):
         # example predict inputs: LeWM (cached latent, action); DINO (assembled 404 embedding)
         predict_inputs: tuple[Tensor, ...],
         engine_dir: Path,
-        # required iff precision == "int8": the Model-Optimizer PTQ input (export builds a
+        # required iff precision is quantized (int8/fp8): the Model-Optimizer PTQ input (export builds a
         # per-method numpy dict keyed by ONNX input name from it — explicit Q/DQ, not a TRT
         # build-time calibrator).
         calib_loader: "CalibrationData | None" = None,
@@ -178,7 +185,7 @@ class ExportConfig:
     obs_shape: tuple[int, int, int] = (3, 224, 224)
     action_dim: int = MODEL_ACTION_DIM  # model-facing action fed to predict (frameskip pack)
     proprio_dim: int = DINO_PROPRIO_DIM  # DINO-WM proprio extra fed to predict
-    precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
+    precisions: tuple[str, ...] = ("fp32", "fp16", "int8", "fp8")
     warmup: int = 10  # warm-up iters dropped before timing each engine-step loop
     n_latency_iters: int = 100  # fixed timed iters per engine-step loop (equal-n p50/p95)
     seed: int = 0

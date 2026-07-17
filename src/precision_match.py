@@ -28,7 +28,7 @@ import torch
 from torch import Tensor
 
 from src.export import export, precision_match as engine_drift
-from src.interfaces import ExportConfig, WMStepAdapter
+from src.interfaces import ExportConfig, WMStepAdapter, QUANTIZED_PRECISIONS
 from src.trt_runtime import engine_vs_reference
 
 # Precision-match batches: exercise the engine at the optimization profile's min / opt / max
@@ -123,12 +123,13 @@ def precision_match_track(
     # Trace + build every precision from the CPU opt-batch inputs (unchanged trace behavior).
     opt_encode, opt_predict = example_inputs(adapter, cfg, batch=_MATCH_BATCH)
 
-    # INT8 needs the owner-approved calibration set (drawn ONCE from the real Push-T data and
-    # streamed through this adapter for the predictor). Built here — before `adapter.to(device)`
-    # below — so the calibration encode runs on the same CPU graph the trace/build use, matching
-    # the `src.export` CLI path. FP32/FP16 build data-free (`calib_loader=None`).
+    # Quantized precisions (int8/fp8) need the owner-approved calibration set (drawn ONCE from the
+    # real Push-T data and streamed through this adapter for the predictor). Built here — before
+    # `adapter.to(device)` below — so the calibration encode runs on the same CPU graph the
+    # trace/build use, matching the `src.export` CLI path. FP32/FP16 build data-free
+    # (`calib_loader=None`). One shared loader across int8/fp8 (format-independent streams).
     calib_loader = None
-    if "int8" in precisions:
+    if any(p in QUANTIZED_PRECISIONS for p in precisions):
         from src.calibrate import build_calibration_data
 
         calib_loader = build_calibration_data(batch=_MATCH_BATCH)
@@ -140,7 +141,7 @@ def precision_match_track(
             encode_inputs=opt_encode,
             predict_inputs=opt_predict,
             engine_dir=engine_dir / precision,
-            calib_loader=calib_loader if precision == "int8" else None,
+            calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
         )
         for precision in precisions
     }
@@ -254,7 +255,7 @@ def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
 
 def main() -> None:
     track = "lewm"
-    precisions: tuple[str, ...] = ("fp32", "fp16", "int8")
+    precisions: tuple[str, ...] = ("fp32", "fp16", "int8", "fp8")
     for a in sys.argv[1:]:
         if a.startswith("track="):
             track = a.split("=", 1)[1]
