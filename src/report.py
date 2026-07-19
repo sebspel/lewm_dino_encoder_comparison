@@ -52,6 +52,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 from src.interfaces import (  # noqa: E402  — CEM per-cycle call counts (the decomposition weights)
     ENCODER_CALLS_PER_CYCLE as _ENCODER_CALLS,
     PREDICTOR_CALLS_PER_CYCLE as _PREDICTOR_CALLS,
+    DEFAULT_CALIBRATION_METHOD,
+    check_calibration_method,
 )
 
 _TRACKS = ("lewm", "dino")
@@ -410,16 +412,35 @@ def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32"
 
 
 # --- eval-shim join (SR + per-cycle latency, equal-n) ---------------------------------
-def _join_eval(bench: dict, overrides: dict | None) -> None:
-    """Merge the gated eval-shim results into `bench` in place. `overrides` is
-    `{track: {precision: value}}` where value is either a plain number (SR only, for manual
-    overrides) or `{success_rate, per_cycle_latencies_ms}`. Raw latencies are stashed on the
-    row for `_finalize_per_cycle` to reduce to equal-n percentiles."""
+def _select_method(raw, method: str):
+    """From one sr.json precision entry, return the point for `method` (or None if this precision
+    has no point for it). The entry is one of:
+      - a plain number — a manual SR-only override, method-agnostic (returned for any method);
+      - a legacy flat `{success_rate, ...}` (pre-labelling, always `max`-calibrated) — returned
+        when `method` is the default (`max`), else None (no such method here);
+      - a labelled `{method: {success_rate, ...}}` map — `raw.get(method)`.
+    So `int8` @ `max` and `int8` @ `entropy` coexist under one precision and a render selects one,
+    like-for-like across tracks (SPEC §Parity)."""
+    if not isinstance(raw, dict):
+        return raw  # plain number: method-agnostic manual SR override
+    if "success_rate" in raw:  # legacy flat entry == max-calibrated (pre-labelling)
+        return raw if method == DEFAULT_CALIBRATION_METHOD else None
+    return raw.get(method)  # labelled {method: SR} map
+
+
+def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
+    """Merge the gated eval-shim results into `bench` in place, selecting the `method`-calibrated
+    point for each quantized precision (`_select_method`). `overrides` is
+    `{track: {precision: entry}}`; see `_select_method` for the accepted entry shapes. Raw
+    latencies are stashed on the row for `_finalize_per_cycle` to reduce to equal-n percentiles."""
     if not overrides:
         return
     for track, by_prec in overrides.items():
-        for prec, val in by_prec.items():
+        for prec, raw in by_prec.items():
             if track not in bench or prec not in bench[track]:
+                continue
+            val = _select_method(raw, method)
+            if val is None:  # this precision has no point for the selected method -> leave pending
                 continue
             row = bench[track][prec]
             if isinstance(val, dict):
@@ -479,18 +500,26 @@ def _resolve_result_paths(src) -> list[Path]:
 
 
 def report(
-    bench: dict, out_dir: Path, wandb_run=None, sr_overrides: dict | None = None
+    bench: dict,
+    out_dir: Path,
+    wandb_run=None,
+    sr_overrides: dict | None = None,
+    method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> dict:
     """Emit all headline tables + plots to `out_dir`; optionally log to an open W&B run.
     Returns the artifact paths and the computed ratios for programmatic use.
 
-    `sr_overrides` ({track: {precision: {success_rate, per_cycle_latencies_ms}}}) joins in the
-    gated eval-shim SR + per-cycle latency; any still-unpaired row is flagged loudly (a speed
-    number without its SR is NOT a validated win — SPEC "no speed number without its task-quality
-    counterpart")."""
+    `sr_overrides` ({track: {precision: entry}}) joins in the gated eval-shim SR + per-cycle
+    latency; any still-unpaired row is flagged loudly (a speed number without its SR is NOT a
+    validated win — SPEC "no speed number without its task-quality counterpart").
+
+    `method` (`max` | `entropy`) selects which calibration method's quantized SR to join for
+    int8/fp8, so a render is like-for-like across tracks (SPEC §Parity). sr.json holds both, so
+    switching `method` re-renders the other without rebuilding. FP32/FP16 SR is method-invariant.
+    The cross-track LATENCY headline does not depend on `method`."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    _join_eval(bench, sr_overrides)
+    _join_eval(bench, sr_overrides, method)
     _finalize_per_cycle(bench)
 
     missing_sr = _missing_sr_rows(bench)
@@ -501,6 +530,10 @@ def report(
             "task-quality counterpart).\n  unpaired: " + ", ".join(missing_sr) + "\n"
         )
 
+    print(
+        f"Calibration method for int8/fp8 SR: {method} "
+        "(fp32/fp16 method-invariant; latency headline method-invariant — SPEC §Parity)\n"
+    )
     speed_table = render_speed_table(bench)
     fp32_table = render_fp32_relative_table(bench)
     component_table = render_component_table(bench)
@@ -560,6 +593,7 @@ def report(
                 "headline/component_table": wandb.Html(f"<pre>{component_table}</pre>"),
                 "headline/dilution_table": wandb.Html(f"<pre>{dilution_table}</pre>"),
                 "headline/sr_pending": len(missing_sr),
+                "headline/calibration_method": method,  # which method's int8/fp8 SR is rendered
                 **{f"headline/{k}": wandb.Image(str(v)) for k, v in plots.items()},
                 # p50 is the headline comparison basis; p95 logged alongside as the tail.
                 **{
@@ -579,6 +613,7 @@ def report(
         "ratios": ratios,  # DINOv3 ÷ LeWM per-cycle latency (headline speed ratio)
         "dilution": dilution,
         "sr_pending": missing_sr,
+        "calibration_method": method,  # which method's int8/fp8 SR these artifacts reflect
     }
 
 
@@ -590,11 +625,16 @@ def main() -> None:
         uv run python -m src.report                              # default $STABLEWM_HOME/reports/phase5
         uv run python -m src.report from=<dir|results.json>      # explicit source
         uv run python -m src.report from=<dir> sr=<sr.json> wandb=<eval overlay> out=<dir>
+        uv run python -m src.report from=<dir> sr=<sr.json> calibration_method=entropy
+
+    `calibration_method` (default `max`) selects which method's int8/fp8 SR to render from sr.json
+    (which holds both); re-run with `=entropy` for the entropy view — same sr.json, no rebuild.
     """
     src = None
     out_dir = None
     sr_overrides = None
     wandb_experiment = None
+    method = DEFAULT_CALIBRATION_METHOD
     for a in sys.argv[1:]:
         if a.startswith("from="):
             src = a.split("=", 1)[1]
@@ -602,6 +642,8 @@ def main() -> None:
             out_dir = Path(a.split("=", 1)[1])
         elif a.startswith("sr="):
             sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
+        elif a.startswith("calibration_method="):
+            method = check_calibration_method(a.split("=", 1)[1])
         elif a.startswith("wandb="):
             wandb_experiment = a.split("=", 1)[1]
     if src is None:
@@ -624,11 +666,14 @@ def main() -> None:
             wandb_experiment, name="phase5-report", config={"phase": "phase5-report"}
         )
     try:
-        report(bench, out_dir, wandb_run=run, sr_overrides=sr_overrides)
+        report(bench, out_dir, wandb_run=run, sr_overrides=sr_overrides, method=method)
     finally:
         if run is not None:
             run.finish()
-    print(f"[report] headline artifacts -> {out_dir}  (from {len(paths)} track file(s))")
+    print(
+        f"[report] headline artifacts (method={method}) -> {out_dir}  "
+        f"(from {len(paths)} track file(s))"
+    )
 
 
 if __name__ == "__main__":

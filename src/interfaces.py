@@ -20,22 +20,34 @@ Precision = Literal["fp32", "fp16", "int8", "fp8"]
 # gates + the precision-match calib-loader branch never re-enumerate this set per module.
 QUANTIZED_PRECISIONS: tuple[str, ...] = ("int8", "fp8")
 
-# Per-track PTQ calibration method (owner-set — docs/adr/0002 amendment). HELD CONSTANT across a
-# track's INT8 and FP8 so the INT8->FP8 step isolates the format (SPEC §Parity). LeWM's tame ViT
-# activations calibrate well with per-tensor `max`; DINO's outlier-heavy frozen-DINOv3 activations
-# saturate `max` (one high-norm token pins the amax), so DINO uses `entropy` (KL/histogram tail
-# clipping). A per-model quant knob, NOT a cross-track parity condition — the cross-track headline
-# is latency, which is calibration-method-invariant; per-model SR is a best-achievable
-# quality-retention measure. Recorded per track in results.<track>.json fairness conditions
-# (src.study). A wrong value degrades SR SILENTLY, so this is owner-gated like the dims above.
-CALIBRATION_METHOD: dict[str, str] = {"lewm": "max", "dino": "entropy"}
+# PTQ calibration method — a BUILD OPTION available to BOTH tracks (`max` | `entropy`), not a
+# hidden per-track setting (docs/adr/0002 amendment, 2026-07-19). `max` (ORT MinMax + symmetric)
+# sets each per-tensor scale to the largest abs activation seen — zero outlier rejection; `entropy`
+# (ORT Entropy) picks a KL-optimal threshold that clips the outlier tail. The ONNX int8/fp8 flow
+# supports exactly these two. Which one wins is an SR question, MEASURED per (track, precision,
+# method) — NOT asserted per track: LeWM's action signal (widened by ADR-0002) may prefer `max`;
+# DINO's outlier-heavy frozen-DINOv3 activations may prefer `entropy`'s tail-clip. Held CONSTANT
+# across a track's INT8 and FP8 within a labelled comparison so the INT8->FP8 step isolates the
+# format (SPEC §Parity). Surfaced as a report LABEL (results.<track>.json meta + method-scoped
+# artefact filenames), so `max`- and `entropy`-calibrated points COEXIST and existing artefacts are
+# never rewritten (CLAUDE §8). The cross-track LATENCY headline is method-invariant; per-model SR
+# is a per-(track, precision, method) quality-retention measure. A wrong value degrades SR SILENTLY,
+# so the method set + default are owner-gated like the dims above.
+CALIBRATION_METHODS: tuple[str, ...] = ("max", "entropy")
+# The method every EXISTING artefact was built with; a new method's runs are additive and never
+# overwrite the `max` points (method-scoped filenames — src.study / src.sr_eval).
+DEFAULT_CALIBRATION_METHOD = "max"
 
 
-def calibration_method_for(track: str) -> str:
-    """Resolve a track name to its owner-set PTQ calibration method (above). LeWM is the special
-    case; every other track is DINO-family (mirrors the `name == "lewm"` shim/build split), so the
-    diagnostic `dino_ep5` track shares DINO's `entropy`."""
-    return CALIBRATION_METHOD["lewm"] if track == "lewm" else CALIBRATION_METHOD["dino"]
+def check_calibration_method(method: str) -> str:
+    """Validate a CLI-supplied calibration method against the supported set, failing loudly on a
+    typo (an unknown method would otherwise reach modelopt and fail deep in the quant pass, or
+    silently mislabel an artefact). Returns the method unchanged."""
+    if method not in CALIBRATION_METHODS:
+        raise SystemExit(
+            f"unknown calibration_method {method!r}; expected one of {list(CALIBRATION_METHODS)}"
+        )
+    return method
 
 # --- Dims (owner-confirmed; the 🔴 adapter-dims gate). Defined ONCE here; the platform's
 # own dims are read from its config, never re-guessed. Read from the pinned installed
@@ -149,8 +161,9 @@ class Export(Protocol):
         # per-method numpy dict keyed by ONNX input name from it — explicit Q/DQ, not a TRT
         # build-time calibrator).
         calib_loader: "CalibrationData | None" = None,
-        # per-track PTQ calibration method (`calibration_method_for` above); held constant across
-        # a track's int8/fp8 (owner-set — SPEC §Export shape). Ignored for FP32/FP16.
+        # PTQ calibration method (`max` | `entropy`) — a build option for both tracks, held
+        # constant across a track's int8/fp8 within a labelled comparison (SPEC §Export shape).
+        # Ignored for FP32/FP16.
         calibration_method: str = "max",
     ) -> EnginePaths: ...
 

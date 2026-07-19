@@ -187,6 +187,44 @@ def test_sr_pending_flagged_and_join(tmp_path):
     assert "lewm-fp32" not in out2["sr_pending"]
 
 
+def test_method_labelled_sr_join_selects_and_coexists(tmp_path):
+    """The gated eval-shim sr.json holds int8 SR under BOTH methods
+    (`{track:{precision:{method:SR}}}`); `report(method=…)` selects one for a like-for-like render,
+    and the other stays available (SPEC §Parity, ADR-0002). fp32 stays method-invariant."""
+    overrides = {
+        "lewm": {
+            "fp32": {"max": {"success_rate": 90.0}},
+            "int8": {"max": {"success_rate": 76.0}, "entropy": {"success_rate": 71.0}},
+        }
+    }
+
+    b_max = {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, math.nan),
+                      "int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    report.report(b_max, tmp_path, sr_overrides=overrides, method="max")
+    assert b_max["lewm"]["int8"]["success_rate"] == 76.0
+    assert b_max["lewm"]["fp32"]["success_rate"] == 90.0  # method-invariant fp32 joined
+
+    # The SAME overrides re-rendered under entropy picks the entropy point — no rebuild, no clobber.
+    b_ent = {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, math.nan),
+                      "int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    report.report(b_ent, tmp_path, sr_overrides=overrides, method="entropy")
+    assert b_ent["lewm"]["int8"]["success_rate"] == 71.0
+
+
+def test_legacy_flat_sr_joins_only_under_max(tmp_path):
+    """A legacy flat sr.json entry (pre-labelling) is `max`-calibrated: it joins for method=max and
+    is absent (SR-PENDING) for method=entropy — so an entropy render never mislabels a max point."""
+    overrides = {"lewm": {"int8": {"success_rate": 48.0}}}  # flat == max
+
+    b = {"lewm": {"int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    report.report(b, tmp_path, sr_overrides=overrides, method="max")
+    assert b["lewm"]["int8"]["success_rate"] == 48.0
+
+    b2 = {"lewm": {"int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    out = report.report(b2, tmp_path, sr_overrides=overrides, method="entropy")
+    assert "lewm-int8" in out["sr_pending"]  # no entropy point -> stays pending, not mislabelled
+
+
 def test_join_eval_fills_sr_and_equal_n_per_cycle(tmp_path):
     """The gated eval-shim join fills SR + per-cycle latency; per-cycle p50/p95 are taken after
     truncating each track to the common min-n across tracks (equal-n, SPEC §Interface Contracts)."""

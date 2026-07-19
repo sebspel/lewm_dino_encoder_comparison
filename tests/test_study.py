@@ -73,15 +73,36 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
     meta = json.loads(path.read_text())["meta"]
     assert meta["num_samples"] == study.CEM_NUM_SAMPLES
     assert meta["n_latency_iters"] == 2
-    # per-track PTQ calibration method (owner-set — ADR-0002): LeWM = max
+    # PTQ calibration method label — a build option for both tracks (ADR-0002), default `max`
     assert meta["calibration_method"] == "max"
 
 
-def test_calibration_method_is_per_track():
-    """Owner-set per-track PTQ method (ADR-0002): LeWM `max`, DINO `entropy`; the diagnostic
-    dino_ep5 track shares DINO's method. Held constant across a track's int8/fp8."""
-    from src.interfaces import calibration_method_for
+def test_check_calibration_method_validates():
+    """Calibration method is a build option for BOTH tracks (`max` | `entropy`); an unknown value
+    fails loudly rather than mislabelling an artefact or crashing deep in modelopt (ADR-0002)."""
+    import pytest
 
-    assert calibration_method_for("lewm") == "max"
-    assert calibration_method_for("dino") == "entropy"
-    assert calibration_method_for("dino_ep5") == "entropy"
+    from src.interfaces import check_calibration_method
+
+    assert check_calibration_method("max") == "max"
+    assert check_calibration_method("entropy") == "entropy"
+    with pytest.raises(SystemExit):
+        check_calibration_method("minmax")  # not one of the supported ORT methods
+
+
+def test_dump_track_results_is_additive_per_precision(tmp_path):
+    """Benchmarking a precision subset later must NOT discard the track's other precisions — the
+    canonical results file merges per precision (CLAUDE.md §8). Latency is calibration-method-
+    invariant, so one file per track serves every method; the method is recorded as provenance."""
+    cfg = ExportConfig()
+
+    p = study.dump_track_results(
+        "lewm", {"fp32": {"success_rate": 90.0}}, cfg, tmp_path, "max"
+    )
+    # A later fp8-only run (e.g. adding FP8) must leave fp32 on disk intact.
+    study.dump_track_results("lewm", {"fp8": {"success_rate": 80.0}}, cfg, tmp_path, "entropy")
+
+    data = json.loads(p.read_text())
+    assert set(data["bench"]) == {"fp32", "fp8"}  # additive, no silent loss
+    assert data["bench"]["fp32"]["success_rate"] == 90.0
+    assert data["meta"]["calibration_method"] == "entropy"  # latest run's provenance label

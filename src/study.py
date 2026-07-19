@@ -9,6 +9,8 @@ hands the assembled bench dict to `src.report` for the headline tables + plots.
     uv run python -m src.study wandb=eval_lewm  # also log the headline artifacts to that
                                                 # overlay's (shared) W&B project
     uv run python -m src.study out=/some/dir    # override the output dir
+    uv run python -m src.study calibration_method=entropy  # label the run's int8/fp8 engines +
+                                                # render the entropy SR (latency is method-invariant)
 
 **Latency is the headline** (SPEC §Interface Contracts). This driver produces the two COMPONENT
 latency distributions (encode-step + predict-step p50/p95, engine step loops) + peak memory; the
@@ -42,7 +44,8 @@ from src.interfaces import (
     EnginePaths,
     ExportConfig,
     CEM_NUM_SAMPLES,
-    calibration_method_for,
+    DEFAULT_CALIBRATION_METHOD,
+    check_calibration_method,
 )
 from src.export import engine_root as default_engine_root
 from src.benchmark import benchmark
@@ -77,32 +80,50 @@ def engine_paths(
 
 
 def dump_track_results(
-    name: str, bench: dict, cfg: ExportConfig, out_dir: Path
+    name: str,
+    bench: dict,
+    cfg: ExportConfig,
+    out_dir: Path,
+    calibration_method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> Path:
     """Persist one track's canonical raw results to `results.<name>.json` — the machine-
     readable benchmark numbers plus this run's fairness conditions (batch, seed), from which
     the tables/plots are regenerable views (`src.report from=<dir>`). Written PER TRACK so
     lewm/dino can be benchmarked in separate pod sessions without one clobbering the other
     (CLAUDE.md §8, SPEC §Headline-artifact durability). NaN latencies/SRs serialize as the
-    `NaN` token (Python's json round-trips them; `src.report.load_results` reads them back)."""
+    `NaN` token (Python's json round-trips them; `src.report.load_results` reads them back).
+
+    The per-precision benchmark numbers here are LATENCY + peak-mem, which are calibration-method-
+    INVARIANT (SPEC §Parity), so ONE file per track serves every method; `calibration_method` is
+    recorded as provenance for which engines this run benchmarked. This run's precisions are MERGED
+    into any existing file per precision (not a whole-file replace), so benchmarking a precision
+    subset later (e.g. adding fp8) leaves the track's other precisions on disk intact (CLAUDE §8).
+    The method-DEPENDENT quantity — quantized SR — is labelled and kept coexisting in sr.json
+    (`src.sr_eval`), not here."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"results.{name}.json"
+    existing_bench: dict = {}
+    if path.exists():
+        existing_bench = json.loads(path.read_text()).get("bench", {})
+    # New precisions overwrite their own key (fresh measurement); precisions absent from this run
+    # are preserved from disk — additive, no silent loss of a prior precision's numbers.
+    merged_bench = {**existing_bench, **bench}
     payload = {
         "meta": {
             "track": name,
-            "precisions_built": list(bench),
+            "precisions_built": sorted(merged_bench),
             "n_latency_iters": cfg.n_latency_iters,
             "warmup": cfg.warmup,
             "num_samples": CEM_NUM_SAMPLES,
             "seed": cfg.seed,
             "obs_shape": list(cfg.obs_shape),
-            # Per-track PTQ calibration method the int8/fp8 engines were built with (owner-set —
-            # docs/adr/0002). Recorded as a fairness condition so each track's 8-bit SR is
-            # self-describing; it is a per-model quant knob, not a cross-track parity condition.
-            "calibration_method": calibration_method_for(name),
+            # The int8/fp8 PTQ method this run's engines were built with (a build option for both
+            # tracks — docs/adr/0002). Latency is method-invariant, so this is provenance, not a
+            # cross-track parity condition; the method-dependent SR is labelled in sr.json.
+            "calibration_method": calibration_method,
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
-        "bench": bench,
+        "bench": merged_bench,
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
     return path
@@ -154,6 +175,7 @@ def main() -> None:
     wandb_experiment = None
     out_dir = default_out_dir()  # $STABLEWM_HOME/reports/phase5 (repo-local fallback); out= overrides
     sr_overrides = None
+    method = DEFAULT_CALIBRATION_METHOD
     for a in sys.argv[1:]:
         if a.startswith("track="):
             tracks = (a.split("=", 1)[1],)
@@ -161,10 +183,14 @@ def main() -> None:
             wandb_experiment = a.split("=", 1)[1]
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
+        elif a.startswith("calibration_method="):
+            # Provenance label for the int8/fp8 engines this study benchmarked, and which method's
+            # SR to render from sr.json (latency is method-invariant, so this drives no numbers).
+            method = check_calibration_method(a.split("=", 1)[1])
         elif a.startswith("sr="):
             # Optional: join SR + per-cycle latency from the gated eval-shim re-run — a JSON
-            # file {track: {precision: {success_rate, per_cycle_latencies_ms}}}. Absent -> every
-            # row stays SR-PENDING / per-cycle NaN.
+            # file {track: {precision: {method: {success_rate, per_cycle_latencies_ms}}}}. Absent
+            # -> every row stays SR-PENDING / per-cycle NaN.
             sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
 
     cfg = ExportConfig()
@@ -178,7 +204,7 @@ def main() -> None:
         # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
         # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
         # can re-render/join per-cycle latency + SR off-pod without re-running this benchmark.
-        dump_track_results(name, bench, cfg, out_dir)
+        dump_track_results(name, bench, cfg, out_dir, method)
 
     run = None
     if wandb_experiment is not None:
@@ -188,11 +214,11 @@ def main() -> None:
             wandb_experiment, name="phase5-study", config={"phase": "phase5-study"}
         )
     try:
-        report(bench_all, out_dir, wandb_run=run, sr_overrides=sr_overrides)
+        report(bench_all, out_dir, wandb_run=run, sr_overrides=sr_overrides, method=method)
     finally:
         if run is not None:
             run.finish()
-    print(f"[study] headline artifacts -> {out_dir}")
+    print(f"[study] headline artifacts (method={method}) -> {out_dir}")
 
 
 if __name__ == "__main__":

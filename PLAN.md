@@ -381,9 +381,18 @@ statistic split → `docs/adr/0003`.
     **both** tracks and a **labelled result dimension** (track × precision × method); held constant
     across INT8+FP8 within a labelled comparison; existing `max` artefacts preserved (additive, never
     rewritten). → `docs/adr/0002`, SPEC §Parity + §Interface Contracts (Export shape).
-  - [ ] 🟢 **Plumb `calibration_method` (`max` | `entropy`)** as a build option in `src.export` and a
+  - [x] 🟢 **Plumb `calibration_method` (`max` | `entropy`)** as a build option in `src.export` and a
     label recorded in `results.<track>.json` (`src.study::dump_track_results`); a new method's runs
     are additive — do **not** overwrite existing `max`-labelled points (CLAUDE §8).
+    → **landed (off-pod ✔):** `interfaces.calibration_method_for` (hidden per-track map) **retired** →
+    `CALIBRATION_METHODS`+`DEFAULT_CALIBRATION_METHOD`+`check_calibration_method`; `calibration_method=`
+    is a CLI build option for BOTH tracks in `src.export`/`src.precision_match`/`src.study`/`src.sr_eval`
+    (default `max`). SR is method-labelled + additive: `sr.json` re-keyed `{track:{precision:{method:SR}}}`,
+    `_merge_sr_json` now merges per **(track, precision, method)** — this also fixes the observed bug where
+    a precision-subset run (e.g. `precision=fp8`) **replaced the whole track block** and dropped the
+    other precisions. `results.<track>.json` merges per precision + records the method label (latency is
+    method-invariant). `src.report calibration_method=<max|entropy>` selects which method's int8/fp8 SR to
+    render like-for-like (legacy flat sr.json folded under `max`). `tests/{test_sr_eval,test_study,test_report}.py`.
   - [ ] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
     `calibration_method=entropy`, re-run `src.sr_eval +experiment=eval_<lewm|dino> precision=int8` →
     new `entropy`-labelled SR points beside the existing `max` ones.

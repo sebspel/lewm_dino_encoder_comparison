@@ -370,9 +370,9 @@ def export(
     calibration_method: str = "max",
 ) -> EnginePaths:
     """PyTorch -> ONNX -> TensorRT for both methods -> {encoder, predictor} engine paths.
-    `encode` and `predict` are traced and built SEPARATELY. `calibration_method` is the
-    owner-set per-track PTQ method (`interfaces.calibration_method_for`), held constant across a
-    track's int8/fp8 so the format delta stays clean (SPEC §Export shape); FP32/FP16 ignore it.
+    `encode` and `predict` are traced and built SEPARATELY. `calibration_method` (`max` | `entropy`)
+    is the PTQ method — a build option for BOTH tracks, held constant across a track's int8/fp8 so
+    the format delta stays clean (SPEC §Export shape); FP32/FP16 ignore it.
     """
     if precision in QUANTIZED_PRECISIONS and calib_loader is None:
         raise ValueError(f"{precision} export requires a calibration loader (owner-provided)")
@@ -465,18 +465,32 @@ def main() -> None:
     owner calibration set and routes through the Model Optimizer (explicit Q/DQ) before the
     TRT build.
 
-        uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8|fp8>
+        uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8|fp8> \
+            [calibration_method=max|entropy]
+
+    `calibration_method` (default `max`) is the int8/fp8 PTQ method — a build option for BOTH
+    tracks (SPEC §Export shape). Engines for a second method are additive downstream: they carry the
+    same `{encoder,predictor}.<precision>.plan` filenames (regenerable, gitignored), and the SR they
+    yield is recorded under the method LABEL in sr.json (`src.sr_eval calibration_method=…`), so the
+    two methods' SR points coexist without overwriting. FP32/FP16 are method-invariant.
     """
-    from src.interfaces import ExportConfig, calibration_method_for
+    from src.interfaces import (
+        DEFAULT_CALIBRATION_METHOD,
+        ExportConfig,
+        check_calibration_method,
+    )
     from src.precision_match import _build_adapter, example_inputs
 
     model = "lewm"
     precision: Precision = "fp32"
+    calibration_method = DEFAULT_CALIBRATION_METHOD
     for a in sys.argv[1:]:
         if a.startswith("model="):
             model = a.split("=", 1)[1]
         elif a.startswith("precision="):
             precision = a.split("=", 1)[1]  # type: ignore[assignment]
+        elif a.startswith("calibration_method="):
+            calibration_method = check_calibration_method(a.split("=", 1)[1])
 
     cfg = ExportConfig()
     torch.manual_seed(cfg.seed)
@@ -499,10 +513,11 @@ def main() -> None:
         predict_inputs=predict_inputs,
         engine_dir=engine_root() / name,
         calib_loader=calib_loader,
-        calibration_method=calibration_method_for(name),
+        calibration_method=calibration_method,
     )
+    label = f" ({calibration_method})" if precision in QUANTIZED_PRECISIONS else ""
     for method, path in engines.items():
-        print(f"[{name}/{precision}] {method}: {path}")
+        print(f"[{name}/{precision}{label}] {method}: {path}")
 
 
 if __name__ == "__main__":

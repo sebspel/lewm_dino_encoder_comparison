@@ -7,7 +7,15 @@ its task-quality counterpart"). The benchmark (`src.benchmark` / `src.study`) le
 `{track: {precision: SR}}` JSON that `src.study` / `src.report` join back in via `sr=<file>`.
 
     uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino> \
-        [precision=fp32,fp16,int8,fp8] [out=<dir>]
+        [precision=fp32,fp16,int8,fp8] [calibration_method=max|entropy] [out=<dir>]
+
+The quantized (int8/fp8) SR depends on the PTQ **calibration method** (`max` | `entropy`, a build
+option for both tracks — SPEC §Parity), so each SR is tagged with it: the merged sr.json is keyed
+`{track: {precision: {method: SR}}}`, and a run only touches its own (track, precision, method)
+points. So `int8` @ `entropy` for a track lands BESIDE `int8` @ `max` for that track in the SAME
+file — neither overwrites the other. `calibration_method` labels which method's engines this run
+built/evaluated (it must match how `src.export` built them); it defaults to `max`. FP32/FP16 are
+method-invariant and recorded under the `max` label.
 
 **How the engine model gets into the eval (the seam).** The CEM solver calls the world model
 through ``get_cost`` — not ``encode`` / ``predict`` — so the exported engines are re-wrapped in
@@ -37,6 +45,7 @@ from unittest.mock import patch
 from src import wandb_log
 from src.eval import _compose_eval_cfg, _parse_success_rate
 from src.gpu_clocks import log_gpu
+from src.interfaces import DEFAULT_CALIBRATION_METHOD, check_calibration_method
 
 # The eval overlay name -> track. The overlay sets `policy=<track>/weights_epoch_<n>.pt`; the
 # track selects the SR shim class and the engine directory (`engines/<track>/`). `dino_ep5` is a
@@ -72,21 +81,24 @@ def _track_from_experiment(experiment):
 
 
 def _split_argv(argv):
-    """Separate the driver-only args (`precision=`, `out=`) from the Hydra argv passed through
-    to the vendored eval composition (`--config-dir`, `+experiment=`, other overrides). The
-    driver-only args are NOT valid Hydra overrides on the pusht config, so they must not reach
-    `_compose_eval_cfg` (Hydra would error on them)."""
+    """Separate the driver-only args (`precision=`, `out=`, `calibration_method=`) from the Hydra
+    argv passed through to the vendored eval composition (`--config-dir`, `+experiment=`, other
+    overrides). The driver-only args are NOT valid Hydra overrides on the pusht config, so they
+    must not reach `_compose_eval_cfg` (Hydra would error on them)."""
     precisions = None
     out_dir = None
+    method = None
     hydra_argv = []
     for a in argv:
         if a.startswith("precision="):
             precisions = tuple(p for p in a.split("=", 1)[1].split(",") if p)
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
+        elif a.startswith("calibration_method="):
+            method = a.split("=", 1)[1]
         else:
             hydra_argv.append(a)
-    return precisions, out_dir, hydra_argv
+    return precisions, out_dir, method, hydra_argv
 
 
 def _build_shim(track, model, engines):
@@ -103,17 +115,39 @@ def _build_shim(track, model, engines):
     return LeWMSRShim.from_engines(model, engines)
 
 
-def _merge_sr_json(path, track, sr_by_precision):
-    """Read-modify-write the merged `{track: {precision: SR}}` sr.json.
+def _as_method_map(existing):
+    """Normalize one sr.json precision entry into a `{method: SR}` map. `None` -> empty; a legacy
+    flat `{success_rate, ...}` (pre-labelling, always `max`-calibrated) -> wrapped under the
+    explicit `max` label (lossless — the max data is relocated, not changed); an already-labelled
+    `{method: SR}` map -> returned as-is."""
+    if existing is None:
+        return {}
+    if isinstance(existing, dict) and "success_rate" in existing:
+        return {DEFAULT_CALIBRATION_METHOD: existing}
+    return existing
 
-    Written as ONE merged file (the shape `src.study` / `src.report` consume via `sr=<file>`),
-    but updated per track key so LeWM and DINOv3 benchmarked in **separate pod sessions** each
-    touch only their own track (no clobber, CLAUDE.md §8) — the same durability contract as the
-    per-track `results.<track>.json`."""
+
+def _merge_sr_json(path, track, method, sr_by_precision):
+    """Read-modify-write the merged sr.json, keyed `{track: {precision: {method: SR}}}`.
+
+    ONE file across methods (the shape `src.study` / `src.report` consume via `sr=<file>`),
+    updated per **(track, precision, method)** so every partial run is additive and NOTHING already
+    recorded is discarded (CLAUDE.md §8):
+      - LeWM and DINOv3 in separate pod sessions touch only their own track;
+      - a precision subset (`precision=fp8`) touches only those precisions — the earlier whole-
+        -track-block replace discarded a track's other precisions on any subset re-run;
+      - a second calibration method (`int8` @ `entropy`) lands BESIDE the first (`int8` @ `max`)
+        under the same precision, so `max`- and `entropy`-calibrated points coexist in one file.
+    Re-running the SAME (track, precision, method) overwrites only that one point (a re-measurement).
+    Legacy pre-labelling entries are folded under the `max` label on first touch (`_as_method_map`)."""
     data = {}
     if path.exists():
         data = json.loads(path.read_text())
-    data[track] = sr_by_precision
+    track_block = data.setdefault(track, {})
+    for precision, val in sr_by_precision.items():
+        method_map = _as_method_map(track_block.get(precision))
+        method_map[method] = val
+        track_block[precision] = method_map
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
@@ -153,7 +187,8 @@ def main():
     argv = sys.argv[1:]
     experiment = _experiment_from_argv(argv)
     track = _track_from_experiment(experiment)
-    precisions_arg, out_dir, hydra_argv = _split_argv(argv)
+    precisions_arg, out_dir, method_arg, hydra_argv = _split_argv(argv)
+    method = check_calibration_method(method_arg or DEFAULT_CALIBRATION_METHOD)
 
     import stable_worldmodel as swm
 
@@ -175,8 +210,8 @@ def main():
 
     run = wandb_log.init(
         experiment,
-        name=f"sr-eval-{track}",
-        config={"phase": "phase5-sr-eval", "track": track},
+        name=f"sr-eval-{track}-{method}",
+        config={"phase": "phase5-sr-eval", "track": track, "calibration_method": method},
     )
     sr_by_precision: dict = {}
     try:
@@ -205,9 +240,13 @@ def main():
 
                 import wandb
 
-                wandb.log({f"sr/{precision}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)})
+                # Tag the SR with its calibration method so int8/fp8 @ max vs @ entropy are
+                # distinct series (FP32/FP16 are method-invariant, logged under the run's method).
+                wandb.log(
+                    {f"sr/{precision}.{method}": sr, f"per_cycle_n/{precision}": len(per_cycle_ms)}
+                )
                 print(
-                    f"[sr-eval:{track}] {precision}: success_rate={sr} "
+                    f"[sr-eval:{track}] {precision} ({method}): success_rate={sr} "
                     f"n_cycles={len(per_cycle_ms)}"
                 )
             finally:
@@ -237,10 +276,10 @@ def main():
         )
 
     sr_path = out_dir / "sr.json"
-    _merge_sr_json(sr_path, track, sr_by_precision)
+    _merge_sr_json(sr_path, track, method, sr_by_precision)
     print(
-        f"[sr-eval:{track}] wrote {sr_path} — join the SR into the headline with:\n"
-        f"    uv run python -m src.report from={out_dir} sr={sr_path}"
+        f"[sr-eval:{track}] wrote {sr_path} (method={method}) — join the SR into the headline with:\n"
+        f"    uv run python -m src.report from={out_dir} sr={sr_path} calibration_method={method}"
     )
 
 

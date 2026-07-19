@@ -32,7 +32,8 @@ from src.interfaces import (
     ExportConfig,
     WMStepAdapter,
     QUANTIZED_PRECISIONS,
-    calibration_method_for,
+    DEFAULT_CALIBRATION_METHOD,
+    check_calibration_method,
 )
 from src.trt_runtime import engine_vs_reference
 
@@ -113,6 +114,7 @@ def precision_match_track(
     precisions: tuple[str, ...],
     cfg: ExportConfig,
     engine_dir: Path,
+    calibration_method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> list[dict]:
     """Export each precision (traced ONCE at the profile opt batch) and measure engine-vs-
     PyTorch drift for both methods at each of `_MATCH_BATCHES` (profile min/opt/max), PLUS the
@@ -147,9 +149,10 @@ def precision_match_track(
             predict_inputs=opt_predict,
             engine_dir=engine_dir / precision,
             calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
-            # Per-track PTQ method (max/entropy — owner-set, ADR-0002), so the drift table the
-            # owner signs off is measured on the engine that SR-eval will build.
-            calibration_method=calibration_method_for(name),
+            # PTQ method (`max` | `entropy`, a build option for both tracks — ADR-0002), so the
+            # drift table the owner signs off is measured on the engine SR-eval will build with the
+            # same method. Drift IS method-dependent (different scales), so this run is labelled.
+            calibration_method=calibration_method,
         )
         for precision in precisions
     }
@@ -264,15 +267,23 @@ def _build_adapter(track: str) -> tuple[WMStepAdapter, str]:
 def main() -> None:
     track = "lewm"
     precisions: tuple[str, ...] = ("fp32", "fp16", "int8", "fp8")
+    calibration_method = DEFAULT_CALIBRATION_METHOD
     for a in sys.argv[1:]:
         if a.startswith("track="):
             track = a.split("=", 1)[1]
+        elif a.startswith("calibration_method="):
+            calibration_method = check_calibration_method(a.split("=", 1)[1])
 
     torch.manual_seed(0)
     adapter, name = _build_adapter(track)
     cfg = ExportConfig()
     with tempfile.TemporaryDirectory() as d:
-        rows = precision_match_track(adapter, name, precisions, cfg, Path(d))
+        rows = precision_match_track(
+            adapter, name, precisions, cfg, Path(d), calibration_method
+        )
+    # int8/fp8 drift is method-dependent (the scales differ), so label which method these rows
+    # were measured under — the `max` and `entropy` drift tables are distinct, both owner-signed.
+    print(f"calibration_method (int8/fp8): {calibration_method}")
     _print_table(rows)
 
 
