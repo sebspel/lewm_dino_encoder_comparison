@@ -216,12 +216,15 @@ def main():
     sr_by_precision: dict = {}
     try:
         for precision in precisions:
-            engines = engine_paths(track, precision)
+            # SR is method-DEPENDENT, so load the engine tagged with THIS run's method (int8/fp8);
+            # fp32/fp16 are method-invariant and ignore it (study.engine_paths).
+            engines = engine_paths(track, precision, method=method)
             if not (engines["encoder"].exists() and engines["predictor"].exists()):
                 print(
-                    f"[sr-eval:{track}] {precision}: engines missing under "
+                    f"[sr-eval:{track}] {precision} ({method}): engines missing under "
                     f"{engines['encoder'].parent} — skipped "
-                    f"(build with `src.export model={track} precision={precision}`)"
+                    f"(build with `src.export model={track} precision={precision} "
+                    f"calibration_method={method}`)"
                 )
                 continue
             shim = _build_shim(track, model, engines)

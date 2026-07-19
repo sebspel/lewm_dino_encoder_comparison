@@ -48,7 +48,13 @@ from torch import Tensor, nn
 from torch.export import Dim
 from torch.nn.utils.fusion import fuse_linear_bn_eval
 
-from src.interfaces import Precision, EnginePaths, WMStepAdapter, QUANTIZED_PRECISIONS
+from src.interfaces import (
+    Precision,
+    EnginePaths,
+    WMStepAdapter,
+    QUANTIZED_PRECISIONS,
+    DEFAULT_CALIBRATION_METHOD,
+)
 
 # The predictor engine must accept the CEM candidate fan-out. The solver loops envs in chunks
 # of batch_size and expands each to (batch_size, num_samples), so predict batch =
@@ -360,6 +366,20 @@ def build_engine(
     return out_path
 
 
+def engine_filename(
+    component: str, precision: str, method: str = DEFAULT_CALIBRATION_METHOD
+) -> str:
+    """Engine-plan filename for one `component` (`encoder` | `predictor`). Quantized precisions
+    (int8/fp8) are TAGGED with the PTQ calibration method so `int8` @ `max` and `int8` @ `entropy`
+    engines coexist on the volume without overwriting each other (the SR they yield differs —
+    docs/adr/0002); FP32/FP16 carry no scales and are method-invariant, so they stay untagged.
+    Single source of truth for the convention, shared by the writer (`export`) and the loader
+    (`study.engine_paths`)."""
+    if precision in QUANTIZED_PRECISIONS:
+        return f"{component}.{precision}.{method}.plan"
+    return f"{component}.{precision}.plan"
+
+
 def export(
     adapter: WMStepAdapter,
     precision: Precision,
@@ -424,9 +444,10 @@ def export(
             onnx_path = quantize_onnx(
                 onnx_path,
                 calib_dict,
-                # Per-precision filename so int8 + fp8 quantized graphs never collide in the
-                # same engine dir (each is a separately quantized ONNX — SPEC §Export shape).
-                engine_dir / f"{name}.{precision}.onnx",
+                # Per-(precision, method) filename so int8/fp8 × max/entropy quantized graphs
+                # never collide in the same engine dir (each is a separately quantized ONNX —
+                # SPEC §Export shape); mirrors the method-tagged .plan below.
+                engine_dir / f"{name}.{precision}.{calibration_method}.onnx",
                 # Per-track method (max for LeWM, entropy for DINO — owner-set, ADR-0002); the
                 # same for this track's int8 and fp8 so only the format differs.
                 calibration_method=calibration_method,
@@ -442,7 +463,9 @@ def export(
         engines[name] = build_engine(
             onnx_path,
             precision,
-            engine_dir / f"{name}.{precision}.plan",
+            # Method-tagged for int8/fp8 (untagged for fp32/fp16), so a second calibration
+            # method's engines are additive and never overwrite the first's (docs/adr/0002).
+            engine_dir / engine_filename(name, precision, calibration_method),
             inputs,
         )
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
@@ -469,10 +492,11 @@ def main() -> None:
             [calibration_method=max|entropy]
 
     `calibration_method` (default `max`) is the int8/fp8 PTQ method — a build option for BOTH
-    tracks (SPEC §Export shape). Engines for a second method are additive downstream: they carry the
-    same `{encoder,predictor}.<precision>.plan` filenames (regenerable, gitignored), and the SR they
-    yield is recorded under the method LABEL in sr.json (`src.sr_eval calibration_method=…`), so the
-    two methods' SR points coexist without overwriting. FP32/FP16 are method-invariant.
+    tracks (SPEC §Export shape). Engines for a second method are additive: the quantized plans are
+    method-TAGGED (`{encoder,predictor}.<precision>.<method>.plan`, `engine_filename`), so int8/fp8
+    @ max and @ entropy coexist on the volume without overwriting (fp32/fp16 stay untagged —
+    method-invariant). The SR they yield is likewise recorded under the method LABEL in sr.json
+    (`src.sr_eval calibration_method=…`), so the two methods' points coexist end-to-end.
     """
     from src.interfaces import (
         DEFAULT_CALIBRATION_METHOD,

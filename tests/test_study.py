@@ -30,9 +30,42 @@ def test_default_out_dir_uses_stablewm_home(monkeypatch, tmp_path):
 
 
 def test_engine_paths_convention(tmp_path):
+    # fp32/fp16 are method-invariant -> untagged plan names.
     p = study.engine_paths("dino", "fp16", engine_root=tmp_path)
     assert p["encoder"] == tmp_path / "dino" / "encoder.fp16.plan"
     assert p["predictor"] == tmp_path / "dino" / "predictor.fp16.plan"
+
+
+def test_engine_paths_quantized_are_method_tagged(tmp_path):
+    """int8/fp8 plans are TAGGED with the calibration method so max/entropy engines coexist without
+    overwriting (docs/adr/0002); the loader selects by method."""
+    mx = study.engine_paths("dino", "int8", engine_root=tmp_path, method="max")
+    assert mx["encoder"] == tmp_path / "dino" / "encoder.int8.max.plan"
+
+    ent = study.engine_paths("dino", "fp8", engine_root=tmp_path, method="entropy")
+    assert ent["predictor"] == tmp_path / "dino" / "predictor.fp8.entropy.plan"
+    # max and entropy resolve to DIFFERENT files -> no overwrite
+    assert mx["encoder"] != study.engine_paths(
+        "dino", "int8", engine_root=tmp_path, method="entropy"
+    )["encoder"]
+
+
+def test_engine_paths_max_falls_back_to_legacy_untagged(tmp_path):
+    """Engines built before method-tagging are untagged + `max`-calibrated: a `method=max` request
+    resolves to the legacy `…<precision>.plan` when the tagged file is absent (no orphaning); a
+    non-default method never falls back."""
+    d = tmp_path / "lewm"
+    d.mkdir()
+    (d / "encoder.int8.plan").write_bytes(b"legacy")  # pre-tagging max engine
+    (d / "predictor.int8.plan").write_bytes(b"legacy")
+
+    mx = study.engine_paths("lewm", "int8", engine_root=tmp_path, method="max")
+    assert mx["encoder"] == d / "encoder.int8.plan"  # legacy resolved
+
+    # entropy must NOT pick up the legacy (max) engine — it stays the tagged, here-missing name.
+    ent = study.engine_paths("lewm", "int8", engine_root=tmp_path, method="entropy")
+    assert ent["encoder"] == d / "encoder.int8.entropy.plan"
+    assert not ent["encoder"].exists()
 
 
 def test_run_track_skips_missing_engines(tmp_path, monkeypatch):

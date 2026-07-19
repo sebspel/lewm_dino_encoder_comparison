@@ -392,7 +392,11 @@ statistic split → `docs/adr/0003`.
     a precision-subset run (e.g. `precision=fp8`) **replaced the whole track block** and dropped the
     other precisions. `results.<track>.json` merges per precision + records the method label (latency is
     method-invariant). `src.report calibration_method=<max|entropy>` selects which method's int8/fp8 SR to
-    render like-for-like (legacy flat sr.json folded under `max`). `tests/{test_sr_eval,test_study,test_report}.py`.
+    render like-for-like (legacy flat sr.json folded under `max`). **Engine plans method-TAGGED:** int8/fp8
+    `.plan`+quantized `.onnx` now `…<precision>.<method>.plan` (`export.engine_filename`, single source
+    shared with `study.engine_paths`), so a second method's engines are additive on the volume;
+    `study`/`sr_eval` load by method (fp32/fp16 untagged/method-invariant; `method=max` falls back to the
+    legacy untagged plan so pre-tagging engines aren't orphaned). `tests/{test_sr_eval,test_study,test_report}.py`.
   - [ ] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
     `calibration_method=entropy`, re-run `src.sr_eval +experiment=eval_<lewm|dino> precision=int8` →
     new `entropy`-labelled SR points beside the existing `max` ones.

@@ -25,8 +25,9 @@ by default — the persistent network volume, so a completed study survives pod 
 
 Engines are NOT built here — run `uv run python -m src.export model=<t> precision=<p>` first
 (after the precision-match gate). A precision whose
-`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<p>.plan` (repo-local `engines/` fallback
-off-pod) is missing is skipped with a note (that precision is reported as absent, not a run
+`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<p>.plan` (int8/fp8 method-tagged
+`…<p>.<method>.plan`; repo-local `engines/` fallback off-pod) is missing is skipped with a note
+(that precision is reported as absent, not a run
 failure). Runs on the L40S (benchmark needs CUDA / TensorRT).
 """
 
@@ -44,10 +45,11 @@ from src.interfaces import (
     EnginePaths,
     ExportConfig,
     CEM_NUM_SAMPLES,
+    QUANTIZED_PRECISIONS,
     DEFAULT_CALIBRATION_METHOD,
     check_calibration_method,
 )
-from src.export import engine_root as default_engine_root
+from src.export import engine_root as default_engine_root, engine_filename
 from src.benchmark import benchmark
 from src.gpu_clocks import log_gpu
 from src.precision_match import _build_adapter, example_inputs
@@ -66,17 +68,37 @@ def default_out_dir() -> Path:
 
 
 def engine_paths(
-    track: str, precision: str, engine_root: Path | None = None
+    track: str,
+    precision: str,
+    engine_root: Path | None = None,
+    method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> EnginePaths:
     """Where `src.export` writes a track's two engines for one precision
     (`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<precision>.plan` by default;
-    repo-local `engines/` fallback off-pod)."""
+    repo-local `engines/` fallback off-pod). For int8/fp8 the plan is METHOD-TAGGED
+    (`…<precision>.<method>.plan`, `export.engine_filename`) so `max`/`entropy` engines coexist;
+    `method` selects which to load (fp32/fp16 ignore it — method-invariant).
+
+    Back-compat: engines built before method-tagging are untagged and were `max`-calibrated, so a
+    `method=max` request falls back to the legacy `…<precision>.plan` when the tagged file is absent
+    (mirrors the sr.json legacy fold). A non-default method never falls back — its engine must be
+    tagged, or it is correctly reported missing."""
     root = engine_root if engine_root is not None else default_engine_root()
     d = Path(root) / track
-    return EnginePaths(
-        encoder=d / f"encoder.{precision}.plan",
-        predictor=d / f"predictor.{precision}.plan",
-    )
+
+    def _resolve(component: str) -> Path:
+        p = d / engine_filename(component, precision, method)
+        if (
+            precision in QUANTIZED_PRECISIONS
+            and method == DEFAULT_CALIBRATION_METHOD
+            and not p.exists()
+        ):
+            legacy = d / f"{component}.{precision}.plan"
+            if legacy.exists():
+                return legacy
+        return p
+
+    return EnginePaths(encoder=_resolve("encoder"), predictor=_resolve("predictor"))
 
 
 def dump_track_results(
@@ -135,6 +157,7 @@ def run_track(
     device: torch.device,
     engine_root: Path | None = None,
     gpu_log_dir: Path | None = None,
+    method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> tuple[str, dict]:
     """Benchmark one track's every built precision. Returns ``(name, bench_by_precision)`` in
     the shape `src.report` consumes.
@@ -142,6 +165,10 @@ def run_track(
     The engine step loops are timed at the CYCLE's real batches so the report's runtime-weighted
     decomposition is honest: **encode** once at batch 1 (single obs), **predict** at the candidate
     fan-out `CEM_NUM_SAMPLES` (the batch the CEM evaluates all candidates in per horizon step).
+
+    Latency is calibration-method-invariant, but int8/fp8 engine plans are method-TAGGED, so
+    `method` selects which quantized engines to locate (fp32/fp16 ignore it). The numbers are the
+    same either way — the label just records which built engines were timed.
 
     Each precision's benchmark run is bracketed by an `nvidia-smi dmon` telemetry observer
     (`gpu_log_dir/<track>.<precision>.benchmark.dmon.log`) so the unlocked GPU clock/power/temp
@@ -155,7 +182,7 @@ def run_track(
 
     bench: dict = {}
     for precision in cfg.precisions:
-        engines = engine_paths(track, precision, root)
+        engines = engine_paths(track, precision, root, method)
         if not (engines["encoder"].exists() and engines["predictor"].exists()):
             print(
                 f"[study:{name}] {precision}: engines missing under "
@@ -199,7 +226,9 @@ def main() -> None:
 
     bench_all: dict = {}
     for track in tracks:
-        name, bench = run_track(track, cfg, device, gpu_log_dir=out_dir / "gpu_logs")
+        name, bench = run_track(
+            track, cfg, device, gpu_log_dir=out_dir / "gpu_logs", method=method
+        )
         bench_all[name] = bench
         # Dump the canonical per-track results BEFORE rendering, so the raw numbers persist
         # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
