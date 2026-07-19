@@ -367,9 +367,12 @@ def export(
     predict_inputs: tuple[Tensor, ...],
     engine_dir: Path,
     calib_loader=None,
+    calibration_method: str = "max",
 ) -> EnginePaths:
     """PyTorch -> ONNX -> TensorRT for both methods -> {encoder, predictor} engine paths.
-    `encode` and `predict` are traced and built SEPARATELY.
+    `encode` and `predict` are traced and built SEPARATELY. `calibration_method` is the
+    owner-set per-track PTQ method (`interfaces.calibration_method_for`), held constant across a
+    track's int8/fp8 so the format delta stays clean (SPEC §Export shape); FP32/FP16 ignore it.
     """
     if precision in QUANTIZED_PRECISIONS and calib_loader is None:
         raise ValueError(f"{precision} export requires a calibration loader (owner-provided)")
@@ -424,6 +427,9 @@ def export(
                 # Per-precision filename so int8 + fp8 quantized graphs never collide in the
                 # same engine dir (each is a separately quantized ONNX — SPEC §Export shape).
                 engine_dir / f"{name}.{precision}.onnx",
+                # Per-track method (max for LeWM, entropy for DINO — owner-set, ADR-0002); the
+                # same for this track's int8 and fp8 so only the format differs.
+                calibration_method=calibration_method,
                 calibration_shapes=shapes,
                 # The predictor's dynamic-batch reshape trips an onnxruntime-gpu CUDA-EP
                 # miscompute in modelopt's MHA probe; calibrate it on CPU. The encoder graph
@@ -461,7 +467,7 @@ def main() -> None:
 
         uv run python -m src.export model=<lewm|dino> precision=<fp32|fp16|int8|fp8>
     """
-    from src.interfaces import ExportConfig
+    from src.interfaces import ExportConfig, calibration_method_for
     from src.precision_match import _build_adapter, example_inputs
 
     model = "lewm"
@@ -493,6 +499,7 @@ def main() -> None:
         predict_inputs=predict_inputs,
         engine_dir=engine_root() / name,
         calib_loader=calib_loader,
+        calibration_method=calibration_method_for(name),
     )
     for method, path in engines.items():
         print(f"[{name}/{precision}] {method}: {path}")

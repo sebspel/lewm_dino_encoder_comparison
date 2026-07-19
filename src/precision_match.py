@@ -28,7 +28,12 @@ import torch
 from torch import Tensor
 
 from src.export import export, precision_match as engine_drift
-from src.interfaces import ExportConfig, WMStepAdapter, QUANTIZED_PRECISIONS
+from src.interfaces import (
+    ExportConfig,
+    WMStepAdapter,
+    QUANTIZED_PRECISIONS,
+    calibration_method_for,
+)
 from src.trt_runtime import engine_vs_reference
 
 # Precision-match batches: exercise the engine at the optimization profile's min / opt / max
@@ -142,6 +147,9 @@ def precision_match_track(
             predict_inputs=opt_predict,
             engine_dir=engine_dir / precision,
             calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
+            # Per-track PTQ method (max/entropy — owner-set, ADR-0002), so the drift table the
+            # owner signs off is measured on the engine that SR-eval will build.
+            calibration_method=calibration_method_for(name),
         )
         for precision in precisions
     }

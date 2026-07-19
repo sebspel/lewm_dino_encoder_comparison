@@ -38,7 +38,12 @@ from pathlib import Path
 
 import torch
 
-from src.interfaces import EnginePaths, ExportConfig, CEM_NUM_SAMPLES
+from src.interfaces import (
+    EnginePaths,
+    ExportConfig,
+    CEM_NUM_SAMPLES,
+    calibration_method_for,
+)
 from src.export import engine_root as default_engine_root
 from src.benchmark import benchmark
 from src.gpu_clocks import log_gpu
@@ -91,6 +96,10 @@ def dump_track_results(
             "num_samples": CEM_NUM_SAMPLES,
             "seed": cfg.seed,
             "obs_shape": list(cfg.obs_shape),
+            # Per-track PTQ calibration method the int8/fp8 engines were built with (owner-set —
+            # docs/adr/0002). Recorded as a fairness condition so each track's 8-bit SR is
+            # self-describing; it is a per-model quant knob, not a cross-track parity condition.
+            "calibration_method": calibration_method_for(name),
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "bench": bench,

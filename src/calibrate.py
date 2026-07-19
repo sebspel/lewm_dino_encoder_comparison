@@ -5,7 +5,7 @@ per-tensor INT8 scales (explicit Q/DQ — it inserts QuantizeLinear/DequantizeLi
 base ONNX and bakes the scales in), drawn **through the platform** so the activations match
 inference exactly:
 
-  * source — Push-T expert data (`pusht_expert_train.lance`, the same set the Phase-3 eval
+  * source — Push-T expert data (https://learncpp.com/`pusht_expert_train.lance`, the same set the Phase-3 eval
     overlays replay — `conf/experiment/eval_*.yaml` override pusht.yaml's `.h5` default),
     loaded via `swm.data.load_dataset` with the SAME ImageNet `img_transform` the vendored
     `eval_wm` applies (single source of truth for normalization).
@@ -38,13 +38,14 @@ the rollout's `T < HS` transients reach it right-padded by `sr_shim._predict_his
 that pad REPEATS the last real frame, adding no value outside the `T == HS` windows' range.
 
 Owner sign-off (OWNER-ONLY silent-failure boundary — a bad calib set degrades every INT8
-number with NO error): calibration method = `max` (the Model-Optimizer analogue of the old
-MinMax calibrator, suited to the ViT activations); 512 clips; strided evenly across all
-episodes; the predictor roll yields 3 windows per clip -> ~1536 predictor samples (owner-
-confirmed 2026-07-15: clip coverage held at 512, sample count allowed to grow — coverage is
-the point of the fix). The remaining Model-Optimizer quant knobs (Q/DQ format,
-per-channel-vs-per-tensor, op-type exclusions) stay at the tool's INT8 defaults pending owner
-confirmation at the pod precision-match gate.
+number with NO error): 512 clips; strided evenly across all episodes; the predictor roll yields
+3 windows per clip -> ~1536 predictor samples (owner-confirmed 2026-07-15: clip coverage held at
+512, sample count allowed to grow — coverage is the point of the fix). This module owns only the
+calibration *streams* (format- AND method-independent); the calibration *method* is applied
+downstream in `export.quantize_onnx` and is set PER TRACK (`max` for LeWM, `entropy` for DINO —
+`interfaces.calibration_method_for`, docs/adr/0002). The remaining Model-Optimizer quant knobs
+(Q/DQ format, per-channel-vs-per-tensor, op-type exclusions) stay at the tool's INT8 defaults
+pending owner confirmation at the pod precision-match gate.
 
 Accepted residual (SPEC): `max` on a Gaussian grows with draw count, so the calibration max
 (~4.4 sigma over the whole set) sits just under the eval max (~5.5 sigma over 50 episodes ×
@@ -99,9 +100,7 @@ def _sample_cem_actions(n: int, frames: int, generator: torch.Generator) -> Tens
     is already the model-facing 10-wide pack (`cem.py:80`), so this samples `predict`'s input
     width directly — no env->model packing sits in between. Seeded -> the draw stays
     deterministic, the property the strided clip draw was built for."""
-    return (
-        torch.randn(n, frames, MODEL_ACTION_DIM, generator=generator) * CEM_VAR_SCALE
-    )
+    return torch.randn(n, frames, MODEL_ACTION_DIM, generator=generator) * CEM_VAR_SCALE
 
 
 class _CaptureAdapter:
@@ -127,7 +126,8 @@ class _CaptureAdapter:
 def _steady_windows(captured: list[tuple[Tensor, ...]]) -> list[tuple[Tensor, ...]]:
     """Keep only the `T == HISTORY_SIZE` windows — the shape the static-hist engine binds. The
     rollout's `T < HS` transients reach it repeat-padded (`sr_shim._predict_hist_adapt`), which
-    adds no value outside these windows' range, so they contribute nothing to a `max` scale."""
+    adds no value outside these windows' range, so they contribute nothing to a `max` scale.
+    """
     return [c for c in captured if c[0].shape[1] == HISTORY_SIZE]
 
 
@@ -187,7 +187,9 @@ class CalibrationData:
     def __init__(self, obs: Tensor, proprio: Tensor, action: Tensor, batch: int):
         n = (len(obs) // batch) * batch
         if n == 0:
-            raise ValueError(f"need >= batch ({batch}) calibration clips, got {len(obs)}")
+            raise ValueError(
+                f"need >= batch ({batch}) calibration clips, got {len(obs)}"
+            )
         self.obs, self.proprio, self.action = obs[:n], proprio[:n], action[:n]
         self.batch = batch
 
@@ -223,7 +225,9 @@ class CalibrationData:
         return batches
 
 
-def _lewm_predictor_stream(adapter, obs: Tensor, actions: Tensor) -> list[tuple[Tensor, ...]]:
+def _lewm_predictor_stream(
+    adapter, obs: Tensor, actions: Tensor
+) -> list[tuple[Tensor, ...]]:
     """Roll LeWM's predictor and capture its own inputs.
 
     A line-map of `LeWM.rollout`'s window loop (installed swm 0.1.1 `wm/lewm/lewm.py:94-100`):
@@ -234,7 +238,9 @@ def _lewm_predictor_stream(adapter, obs: Tensor, actions: Tensor) -> list[tuple[
 
     `actions` are RAW: Design A puts LeWM's `action_encoder` inside the engine, so `rollout`
     windows raw actions through an Identity passthrough (`sr_shim.LeWMSRShim`)."""
-    z = adapter.encode(obs[:, :EVAL_N_OBS])  # eval encodes ONE frame; the rest are predicted
+    z = adapter.encode(
+        obs[:, :EVAL_N_OBS]
+    )  # eval encodes ONE frame; the rest are predicted
     emb_list = list(z.unbind(dim=1))
     n_steps = actions.shape[1] - EVAL_N_OBS
     captured: list[tuple[Tensor, ...]] = []
@@ -273,8 +279,11 @@ def build_calibration_data(
     dataset_name: str = CALIB_DATASET,
 ) -> CalibrationData:
     """Draw the calibration clips and wrap them at the engine's calibration batch size
-    (the export optimization-profile opt point). Pod-only (the draw needs the dataset)."""
-    obs, proprio, action = draw_calibration_clips(n_clips, hist, frameskip, dataset_name)
+    (the export optimization-profile opt point). Pod-only (the draw needs the dataset).
+    """
+    obs, proprio, action = draw_calibration_clips(
+        n_clips, hist, frameskip, dataset_name
+    )
     return CalibrationData(obs, proprio, action, batch)
 
 

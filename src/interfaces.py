@@ -20,6 +20,23 @@ Precision = Literal["fp32", "fp16", "int8", "fp8"]
 # gates + the precision-match calib-loader branch never re-enumerate this set per module.
 QUANTIZED_PRECISIONS: tuple[str, ...] = ("int8", "fp8")
 
+# Per-track PTQ calibration method (owner-set — docs/adr/0002 amendment). HELD CONSTANT across a
+# track's INT8 and FP8 so the INT8->FP8 step isolates the format (SPEC §Parity). LeWM's tame ViT
+# activations calibrate well with per-tensor `max`; DINO's outlier-heavy frozen-DINOv3 activations
+# saturate `max` (one high-norm token pins the amax), so DINO uses `entropy` (KL/histogram tail
+# clipping). A per-model quant knob, NOT a cross-track parity condition — the cross-track headline
+# is latency, which is calibration-method-invariant; per-model SR is a best-achievable
+# quality-retention measure. Recorded per track in results.<track>.json fairness conditions
+# (src.study). A wrong value degrades SR SILENTLY, so this is owner-gated like the dims above.
+CALIBRATION_METHOD: dict[str, str] = {"lewm": "max", "dino": "entropy"}
+
+
+def calibration_method_for(track: str) -> str:
+    """Resolve a track name to its owner-set PTQ calibration method (above). LeWM is the special
+    case; every other track is DINO-family (mirrors the `name == "lewm"` shim/build split), so the
+    diagnostic `dino_ep5` track shares DINO's `entropy`."""
+    return CALIBRATION_METHOD["lewm"] if track == "lewm" else CALIBRATION_METHOD["dino"]
+
 # --- Dims (owner-confirmed; the 🔴 adapter-dims gate). Defined ONCE here; the platform's
 # own dims are read from its config, never re-guessed. Read from the pinned installed
 # source (docs/platform_api.md §2).
@@ -132,6 +149,9 @@ class Export(Protocol):
         # per-method numpy dict keyed by ONNX input name from it — explicit Q/DQ, not a TRT
         # build-time calibrator).
         calib_loader: "CalibrationData | None" = None,
+        # per-track PTQ calibration method (`calibration_method_for` above); held constant across
+        # a track's int8/fp8 (owner-set — SPEC §Export shape). Ignored for FP32/FP16.
+        calibration_method: str = "max",
     ) -> EnginePaths: ...
 
 

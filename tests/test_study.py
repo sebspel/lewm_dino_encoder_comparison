@@ -73,3 +73,15 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
     meta = json.loads(path.read_text())["meta"]
     assert meta["num_samples"] == study.CEM_NUM_SAMPLES
     assert meta["n_latency_iters"] == 2
+    # per-track PTQ calibration method (owner-set — ADR-0002): LeWM = max
+    assert meta["calibration_method"] == "max"
+
+
+def test_calibration_method_is_per_track():
+    """Owner-set per-track PTQ method (ADR-0002): LeWM `max`, DINO `entropy`; the diagnostic
+    dino_ep5 track shares DINO's method. Held constant across a track's int8/fp8."""
+    from src.interfaces import calibration_method_for
+
+    assert calibration_method_for("lewm") == "max"
+    assert calibration_method_for("dino") == "entropy"
+    assert calibration_method_for("dino_ep5") == "entropy"
