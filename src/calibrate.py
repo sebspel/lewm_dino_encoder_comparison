@@ -5,7 +5,7 @@ per-tensor INT8 scales (explicit Q/DQ — it inserts QuantizeLinear/DequantizeLi
 base ONNX and bakes the scales in), drawn **through the platform** so the activations match
 inference exactly:
 
-  * source — Push-T expert data (https://learncpp.com/`pusht_expert_train.lance`, the same set the Phase-3 eval
+  * source — Push-T expert data (`pusht_expert_train.lance`, the same set the Phase-3 eval
     overlays replay — `conf/experiment/eval_*.yaml` override pusht.yaml's `.h5` default),
     loaded via `swm.data.load_dataset` with the SAME ImageNet `img_transform` the vendored
     `eval_wm` applies (single source of truth for normalization).

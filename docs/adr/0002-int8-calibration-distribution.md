@@ -111,9 +111,10 @@ to hold 512.
 
 ---
 
-## Amendment (2026-07-19) — the fix recovered LeWM but not DINO; calibration method goes per-track
+## Amendment (2026-07-19) — calibration method is a labelled build option for both tracks
 
-**Status:** Accepted · extends the decision above to FP8 and to the DINO-WM track.
+**Status:** Accepted · extends the decision above to FP8 and generalizes the calibration method to a
+reported dimension rather than a fixed per-track setting.
 
 ### What the distribution fix did and did not do
 
@@ -121,51 +122,55 @@ The distribution fix above recovered **LeWM** (INT8 48% → ~76%; FP32/FP16 ~98%
 recover **DINO-WM**: INT8 ~20% and FP8 **2%**, against a healthy FP32/FP16 baseline of ~70% (DINO is
 undertrained, but the collapse is entirely in the *quantized* path — FP16 is lossless).
 
-The fix targeted the **action** distribution, which is LeWM's dominant quantization stressor: under
-Design A LeWM's `action_encoder` sits *inside* the predict engine, so the raw unbounded CEM action is
-an engine input the calibration rescaled. **That stressor does not exist at DINO's engine boundary.**
-The DINO action is embedded by `extra_encoders["action"]` and tiled into just 10 of the 404
-predictor-input channels *upstream* of the engine (`adapter.assemble_embedding`, Python-side,
-uncompiled), so where quantization sees it, it is neither raw nor unbounded. DINO's predict engine
-consumes the assembled 404 embedding, which is **384/404 frozen-DINOv3 patch features** — outlier /
-high-norm heavy (the phenomenon register tokens exist to mitigate).
+The fix targeted the **action** distribution — LeWM's dominant stressor, since under Design A LeWM's
+`action_encoder` sits *inside* the predict engine, so the raw unbounded CEM action is an engine input
+the calibration rescaled. **That stressor does not exist at DINO's engine boundary:** the DINO action
+is embedded by `extra_encoders["action"]` and tiled into just 10 of the 404 predictor-input channels
+*upstream* of the engine (`adapter.assemble_embedding`, uncompiled). DINO's engine consumes the
+assembled 404 embedding, **384/404 of it frozen-DINOv3 patch features** — outlier / high-norm heavy
+(the phenomenon register tokens exist to mitigate).
 
-### Why `max` is the wrong method for DINO
+### Why the method matters, and why it is not fixed per track
 
-`max` (→ ORT `CalibrationMethod.MinMax` + `ActivationSymmetric`) sets each **per-tensor activation**
-scale to the single largest absolute value observed — **zero outlier rejection**. In explicit
-quantization activations *must* be per-tensor (TensorRT), so granularity is not a lever; the
-calibration **method** is. On DINO's outlier-heavy activations one high-norm token pins the amax and
-starves the dense bulk — where the CEM candidate-ranking signal lives — of resolution (INT8 leaves the
-bulk ~2–3 levels; E4M3's 3-bit mantissa is coarser still). That is the INT8-20% → FP8-2% cliff. `max`
-was signed off above as suited to LeWM's *tame* ViT activations; it is exactly wrong for DINO.
+`max` (→ ORT `CalibrationMethod.MinMax` + `ActivationSymmetric`) sets each per-tensor activation scale
+to the largest absolute value observed — **zero outlier rejection**. `entropy` (→ ORT
+`CalibrationMethod.Entropy`) picks a KL-optimal threshold that **clips the outlier tail**. In explicit
+quantization activations must be per-tensor (TensorRT), so the method is the lever, not granularity.
+The ONNX int8/fp8 flow supports exactly `{entropy, max}` (`percentile` silently maps to MinMax, so it
+is not offered).
 
-### Decision — calibration method is per-track, held constant across a track's 8-bit precisions
+The two tracks pull in opposite directions, and **which method wins is an SR question, not an
+assertion**:
+- **DINO** — a high-norm patch token pins the per-tensor amax and starves the bulk (where the CEM
+  ranking signal lives); `entropy`'s tail-clip should help. Hypothesis, to be measured.
+- **LeWM** — the wide values *are* the action signal ADR-0002 deliberately widened; `entropy`'s
+  tail-clip could re-clip that range and mildly re-introduce the saturation this ADR removed, so `max`
+  may remain best. Equally a hypothesis — LeWM INT8 is still ~22 pts below FP16, so `entropy` might
+  instead recover ground. Measured, not assumed.
 
-- **LeWM: `max`** (unchanged — its stressor is the action, already fixed; ViT activations are tame).
-- **DINO: `entropy`** (ORT `CalibrationMethod.Entropy` — KL/histogram threshold that clips the outlier
-  tail; modelopt's own default). The ONNX int8/fp8 flow supports exactly `{entropy (default), max}`;
-  `percentile` is not available there (it silently maps to MinMax), so `entropy` is *the* supported
-  outlier-aware lever.
-- The method is **held constant across INT8 and FP8 within each track**, so the INT8→FP8 delta stays
-  "format alone." FP8 is method-agnostic to this choice: the ONNX FP8 path computes INT8 scales with
-  the chosen method, then converts them to E4M3 (`fp8_scale = int8_scale × 448/127`) — so `entropy`
-  carries over to FP8 exactly as to INT8.
+### Decision — expose both methods for both tracks; label them in reporting
+
+- The calibration method (`max` | `entropy`) is a **build option available to both tracks**, not
+  hardcoded per track.
+- It is a **labelled dimension of every quantized result**: `max`- and `entropy`-calibrated engines
+  coexist as separate, comparable points (track × precision × method), recorded in
+  `results.<track>.json`. Cross-track comparisons are drawn **like-for-like** (same method on both
+  tracks).
+- It is **held constant across a track's INT8 and FP8** within any labelled comparison, so the
+  INT8→FP8 step isolates the format. FP8 rides INT8's calibration then converts scales
+  (`fp8_scale = int8_scale × 448/127`), so the method carries over unchanged.
+
+### Artefact preservation
+
+**Existing report artefacts and data points are never rewritten.** The already-collected
+`max`-calibrated results stay as-is; `entropy` runs are **additive**, written as separately-labelled
+points, never overwriting the `max` rows (CLAUDE §8, log-before-delete). If neither method recovers
+DINO's 8-bit SR, those rows are reported **degraded vs FP32** (the FP16-only fallback named in the
+original Consequences was removed in `352018f`; FP8 is now always built and reported, quoted vs FP32).
 
 ### Parity
 
-Calibration method is a **per-track quant knob, not a cross-track parity condition** (SPEC §Parity).
-The cross-track headline is **latency**, which is calibration-method-invariant — scale magnitudes do
-not change quantized-op coverage, granularity, or TensorRT tactic selection. Per-model SR is therefore
-a **best-achievable quality-retention** measure, never a cross-track "which model quantizes better at
-identical settings" claim. The chosen method is recorded per track in `results.<track>.json`'s
-fairness conditions.
-
-### Gate (owner)
-
-The DINO → `entropy` switch is **gated on on-pod SR confirmation**: entropy must move DINO INT8 off
-the ~20% floor (toward the ~70% FP16 baseline) *before* the FP8 engines are rebuilt on it. If entropy
-does **not** recover DINO INT8, the loss is inherent to per-tensor 8-bit on the DINOv3-driven
-predictor, and DINO's 8-bit rows are reported **degraded vs FP32**. (The FP16-only fallback named in
-the original Consequences was removed in `352018f`; FP8 is now always built and reported, quoted vs
-FP32, per SPEC §FP8 delta.)
+Calibration method is a per-engine build knob surfaced as a report label, not a hidden per-track
+setting. The cross-track **latency** headline is calibration-method-invariant (scale magnitudes do not
+change quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is reported per
+(track, precision, method).

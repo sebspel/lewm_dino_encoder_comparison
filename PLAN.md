@@ -372,19 +372,26 @@ statistic split → `docs/adr/0003`.
   → verify (off-pod ✔): `pytest` green; export imports (TRT/modelopt lazy). TRT build is
   pod-only 🔴.
 
-- [ ] 🔴 **Per-track calibration method — DINO INT8/FP8 SR collapse** (`docs/adr/0002` amendment).
-  Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% / INT8 ~76%. The ADR-0002
-  distribution fix recovered LeWM (action stressor, in-engine) but not DINO (stressor is the
-  outlier-heavy frozen-DINOv3 activations; `max` per-tensor amax saturates them).
-  - [x] 🔴 **Decision recorded** — per-track method: LeWM `max`, DINO `entropy`; held constant across
-    a track's INT8+FP8; recorded in `results.<track>.json`. → `docs/adr/0002`, SPEC §Parity +
-    §Interface Contracts (Export shape).
-  - [ ] 🖥️🔴 **Confirm entropy recovers DINO INT8 BEFORE the FP8 rebuild:** rebuild DINO INT8 with
-    `calibration_method="entropy"`, re-run `src.sr_eval +experiment=eval_dino precision=int8`.
-    → verify: DINO INT8 SR moves off the ~20% floor toward the ~70% FP16 baseline. Still collapsed →
-    per-tensor 8-bit loss is inherent; report DINO 8-bit degraded vs FP32 and STOP.
-  - [ ] 🟢 **Plumb per-track `calibration_method`** into `src.export` (owner sets the value) and
-    record it in `results.<track>.json` fairness conditions (`src.study::dump_track_results`).
+- [ ] 🔴 **Calibration method as a labelled build option — DINO INT8/FP8 SR collapse**
+  (`docs/adr/0002` amendment). Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% /
+  INT8 ~76%. The ADR-0002 distribution fix recovered LeWM (action stressor, in-engine) but not DINO
+  (outlier-heavy frozen-DINOv3 activations; `max` per-tensor amax saturates them). `entropy`
+  (tail-clip) is the candidate lever — which method wins per track is an SR question, measured.
+  - [x] 🔴 **Decision recorded** — calibration method (`max` | `entropy`) is a build option for
+    **both** tracks and a **labelled result dimension** (track × precision × method); held constant
+    across INT8+FP8 within a labelled comparison; existing `max` artefacts preserved (additive, never
+    rewritten). → `docs/adr/0002`, SPEC §Parity + §Interface Contracts (Export shape).
+  - [ ] 🟢 **Plumb `calibration_method` (`max` | `entropy`)** as a build option in `src.export` and a
+    label recorded in `results.<track>.json` (`src.study::dump_track_results`); a new method's runs
+    are additive — do **not** overwrite existing `max`-labelled points (CLAUDE §8).
+  - [ ] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
+    `calibration_method=entropy`, re-run `src.sr_eval +experiment=eval_<lewm|dino> precision=int8` →
+    new `entropy`-labelled SR points beside the existing `max` ones.
+    → verify: DINO-`entropy` INT8 moves off the ~20% floor; LeWM-`entropy` vs LeWM-`max` ~76% decides
+    LeWM's headline method. Neither recovers DINO → per-tensor 8-bit loss inherent; report DINO 8-bit
+    degraded vs FP32.
+  - [ ] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
+    keep the existing `max`-labelled INT8/FP8 rows intact.
 
 - [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
