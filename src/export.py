@@ -217,6 +217,74 @@ def precision_match(reference: Tensor, engine_out: Tensor) -> dict:
     return {"max_abs": max_abs, "max_rel": max_rel}
 
 
+# DINO's attention exports its causal mask as an additive fill of finfo(float32).min
+# (≈ -3.4e38 — torch's SDPA `-inf` sentinel, materialized as a FINITE constant on export). That
+# value (a) overflows modelopt's entropy-calibration histogram (`ValueError: Too many bins for
+# data range` — `2*threshold` exceeds the FP32 max) and (b) collapses `max` calibration to a
+# garbage per-tensor scale. LeWM exports `is_causal=True` and never materializes such a tensor, so
+# the failure is DINO-only. Neutralizing the sentinel to a mild finite fill is numerically
+# equivalent for the mask — `softmax(-3e4 + logit)` underflows to 0 in FP16 and FP32 exactly as
+# `-inf` does — but removes the overflow, letting BOTH calibration methods proceed with the
+# attention MatMuls fully quantized (the real QK^T/scores ranges are unpolluted — the mask is added
+# AFTER the score MatMul). The pass is self-targeting (edits only tensors carrying the sentinel), so
+# it is a NO-OP on LeWM's graph — parity preserved, both tracks stay fully quantized.
+# docs/adr/0002 (amendment 2026-07-19, option B). OWNER-approved graph edit before PTQ.
+_MASK_SENTINEL_THRESHOLD = 1e30  # |x| >= this ⇒ the -3.4e38 mask sentinel, never a real activation
+_MASK_FILL = -3.0e4  # softmax-equivalent to -inf; within FP16 range (<65504) + FP32 histogram edge
+
+
+def _neutralize_attention_mask_sentinel(onnx_path: Path) -> Path:
+    """Rewrite any finfo(float32).min mask-fill constant in the graph to `_MASK_FILL` before the PTQ
+    calibration pass (see the note above). Scans initializers + `Constant` node value tensors and
+    clamps every element at or beyond `-_MASK_SENTINEL_THRESHOLD`. Returns a patched sibling ONNX
+    (with its external-data sidecar) when anything was rewritten, else the original path unchanged
+    (LeWM — no sentinel). `onnx` imported lazily so this module still imports off-pod."""
+    import onnx
+    from onnx import numpy_helper
+
+    model = onnx.load(str(onnx_path))  # pulls in the external-data sidecar if present
+    n_patched = 0
+
+    def _patch(t) -> None:
+        nonlocal n_patched
+        if t.data_type not in (
+            onnx.TensorProto.FLOAT,
+            onnx.TensorProto.FLOAT16,
+            onnx.TensorProto.DOUBLE,
+        ):
+            return
+        arr = numpy_helper.to_array(t)
+        hit = arr <= -_MASK_SENTINEL_THRESHOLD  # catches -3.4e38 and any -inf (fp16-cast sentinel)
+        if not hit.any():
+            return
+        arr = arr.copy()
+        arr[hit] = _MASK_FILL
+        t.CopyFrom(numpy_helper.from_array(arr, t.name))
+        n_patched += int(hit.sum())
+
+    for init in model.graph.initializer:
+        _patch(init)
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attr in node.attribute:
+                if attr.name == "value" and attr.type == onnx.AttributeProto.TENSOR:
+                    _patch(attr.t)
+
+    if n_patched == 0:
+        return onnx_path  # LeWM: no sentinel — leave the graph byte-identical
+    out = onnx_path.with_name(onnx_path.stem + ".maskfix.onnx")
+    onnx.save(
+        model,
+        str(out),
+        save_as_external_data=True,
+        all_tensors_to_one_file=True,
+        location=out.name + ".data",
+        size_threshold=1024,
+    )
+    print(f"  [maskfix] neutralized {n_patched} attention mask-sentinel value(s) -> {out.name}")
+    return out
+
+
 def quantize_onnx(
     onnx_path: Path,
     calibration_dict: dict,
@@ -259,6 +327,11 @@ def quantize_onnx(
     the quantized graph (verified: the FP32 engine off the same graph runs at batch 1/8/300) —
     so it is feed plumbing, not a quant-config knob."""
     from modelopt.onnx.quantization import quantize
+
+    # Neutralize DINO's -3.4e38 attention mask sentinel before calibration (no-op on LeWM). Both
+    # calibration methods otherwise choke on it: `entropy` overflows the histogram, `max` collapses
+    # the scale. See `_neutralize_attention_mask_sentinel` / docs/adr/0002 (option B).
+    onnx_path = _neutralize_attention_mask_sentinel(onnx_path)
 
     # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
     # off-pod / when no GPU is present ("run on GPU if available"). The predictor forces CPU

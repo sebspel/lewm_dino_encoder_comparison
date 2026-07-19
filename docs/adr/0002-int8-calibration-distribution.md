@@ -174,3 +174,75 @@ Calibration method is a per-engine build knob surfaced as a report label, not a 
 setting. The cross-track **latency** headline is calibration-method-invariant (scale magnitudes do not
 change quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is reported per
 (track, precision, method).
+
+---
+
+## Amendment (2026-07-19) — DINO `entropy` calibration crash: neutralize the attention mask sentinel
+
+**Status:** Accepted · unblocks DINO `entropy` (and hardens `max`) without breaking cross-track parity.
+
+### Symptom
+
+Building the DINO INT8 `entropy` engine crashed in modelopt's ONNX PTQ:
+`ValueError: Too many bins for data range. Cannot create 128 finite-sized bins.`, raised from
+`np.histogram(..., range=(-3.4028235e+38, 3.4028235e+38))` in modelopt's `_collect_value`. It hit the
+**predictor**, not the encoder, and DINO, not LeWM.
+
+### Root cause (traced, not inferred)
+
+DINO-WM's predictor attention (`stable_pretraining` ViT `_prepare_attn_mask`) builds an **explicit
+additive causal mask** — `masked_fill(mask, float("-inf"))` fed to `scaled_dot_product_attention` as
+`attn_mask`. On ONNX export that `-inf` is materialized as the **finite** constant
+`finfo(float32).min` (≈ −3.4028235e+38). The mask-add tensors (the 588×588 masks and the
+8×16×588×588 masked logits) therefore carry −3.4e38 as a real activation value. modelopt calibrates
+those tensors, and:
+
+- **`entropy`** — the histogram range becomes `2·threshold ≈ 6.8e38`, which **overflows FP32** when
+  `np.histogram` lays out the bin edges → the `ValueError` above.
+- **`max`** — no crash, but the per-tensor amax is −3.4e38, so the scale is garbage. This is a
+  contributor to DINO INT8-`max`'s collapse, silent where `entropy` is loud.
+
+**LeWM exports `is_causal=True`** (no materialized mask tensor), so neither pathology occurs — this is
+DINO-only.
+
+Ruled out along the way: it is **not** the unbounded CEM action stressor (that is the ADR-0002 body
+fix, LeWM-side), **not** FP16 overflow, **not** a NaN. The FP32 unfused graph runs clean; the value is
+a finite constant, not a computed non-finite. modelopt's `disable_mha_qdq` flag does **not** fix it:
+its MHA-partition detector does not recognize DINO's decomposed-SDPA-with-RoPE attention, so it
+excludes nothing (verified — the same 12 sentinel tensors still calibrate and it still crashes).
+
+### Options weighed
+
+- **A — explicit `nodes_to_exclude`** on the attention nodes: works, but leaves DINO's attention
+  MatMuls in FP16 while LeWM's quantize → **parity asymmetry + a capped speedup**. Rejected.
+- **C — accept it** (report DINO 8-bit degraded / unavailable, the FP16-only fallback): rejected —
+  loses the DINO 8-bit rows the study is meant to report.
+- **B — neutralize the mask sentinel in the exported graph (CHOSEN).**
+
+### Decision — option B
+
+Before the PTQ calibration pass, rewrite every `finfo(float32).min` (≥ `1e30` in magnitude) mask-fill
+constant in the exported predictor graph to a mild finite fill `_MASK_FILL = −3e4`. This is
+**numerically equivalent masking** — `softmax(−3e4 + logit)` underflows to 0 in FP16 and FP32 exactly
+as `−inf`/`−3.4e38` does — but the histogram range collapses to ±3e4, well inside the FP32 edge and
+the FP16 range (<65504), so `entropy` builds and `max` gets a sane scale. Because the mask is added
+**after** the QK^T score MatMul, the real score/probability tensors are unpolluted and the attention
+MatMuls quantize normally.
+
+- Implemented as `export._neutralize_attention_mask_sentinel`, called at the top of `quantize_onnx`
+  (so it runs for INT8 **and** FP8, both `max` and `entropy`). FP32/FP16 engines build from the base
+  graph untouched — their owner-signed-off drift tables do not move.
+- **Self-targeting ⇒ parity-preserving.** The pass edits only tensors carrying the sentinel, so it is
+  a **no-op on LeWM** and both tracks stay **fully quantized** (unlike option A). It applies to both
+  tracks unconditionally; only DINO's graph contains the sentinel.
+
+### Consequences
+
+- DINO `entropy` (and `max`) calibration completes; DINO 8-bit SR is now measurable rather than a
+  build crash — the SPEC "per-tensor 8-bit loss inherent" verdict is now decided by SR, not aborted
+  by an overflow.
+- Owner-only ONNX/PTQ graph edit — sits behind the OWNER-ONLY boundary (SPEC §Implementation
+  Boundaries); owner-approved 2026-07-19.
+- The masked-logits tensors keep a −3e4 outlier, so if modelopt ever placed a Q/DQ on the softmax
+  **input**, that scale would be coarse — but softmax I/O is not quantized (only the surrounding
+  MatMuls are), so this is inert. Judged, like all quant health here, by **SR**.
