@@ -372,6 +372,20 @@ statistic split → `docs/adr/0003`.
   → verify (off-pod ✔): `pytest` green; export imports (TRT/modelopt lazy). TRT build is
   pod-only 🔴.
 
+- [ ] 🔴 **Per-track calibration method — DINO INT8/FP8 SR collapse** (`docs/adr/0002` amendment).
+  Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% / INT8 ~76%. The ADR-0002
+  distribution fix recovered LeWM (action stressor, in-engine) but not DINO (stressor is the
+  outlier-heavy frozen-DINOv3 activations; `max` per-tensor amax saturates them).
+  - [x] 🔴 **Decision recorded** — per-track method: LeWM `max`, DINO `entropy`; held constant across
+    a track's INT8+FP8; recorded in `results.<track>.json`. → `docs/adr/0002`, SPEC §Parity +
+    §Interface Contracts (Export shape).
+  - [ ] 🖥️🔴 **Confirm entropy recovers DINO INT8 BEFORE the FP8 rebuild:** rebuild DINO INT8 with
+    `calibration_method="entropy"`, re-run `src.sr_eval +experiment=eval_dino precision=int8`.
+    → verify: DINO INT8 SR moves off the ~20% floor toward the ~70% FP16 baseline. Still collapsed →
+    per-tensor 8-bit loss is inherent; report DINO 8-bit degraded vs FP32 and STOP.
+  - [ ] 🟢 **Plumb per-track `calibration_method`** into `src.export` (owner sets the value) and
+    record it in `results.<track>.json` fairness conditions (`src.study::dump_track_results`).
+
 - [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
   → verify: quantized ONNX carries QuantizeLinear (E4M3); FP8 engine builds; **FP8 tactics are

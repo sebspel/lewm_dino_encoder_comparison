@@ -108,3 +108,64 @@ to hold 512.
   above. Both second-order against the ~4× gap closed.
 - If matching the distribution still does not recover INT8 SR, the loss is inherent to per-tensor INT8
   on these predictors and the documented **FP16-only fallback** applies.
+
+---
+
+## Amendment (2026-07-19) — the fix recovered LeWM but not DINO; calibration method goes per-track
+
+**Status:** Accepted · extends the decision above to FP8 and to the DINO-WM track.
+
+### What the distribution fix did and did not do
+
+The distribution fix above recovered **LeWM** (INT8 48% → ~76%; FP32/FP16 ~98%). It did **not**
+recover **DINO-WM**: INT8 ~20% and FP8 **2%**, against a healthy FP32/FP16 baseline of ~70% (DINO is
+undertrained, but the collapse is entirely in the *quantized* path — FP16 is lossless).
+
+The fix targeted the **action** distribution, which is LeWM's dominant quantization stressor: under
+Design A LeWM's `action_encoder` sits *inside* the predict engine, so the raw unbounded CEM action is
+an engine input the calibration rescaled. **That stressor does not exist at DINO's engine boundary.**
+The DINO action is embedded by `extra_encoders["action"]` and tiled into just 10 of the 404
+predictor-input channels *upstream* of the engine (`adapter.assemble_embedding`, Python-side,
+uncompiled), so where quantization sees it, it is neither raw nor unbounded. DINO's predict engine
+consumes the assembled 404 embedding, which is **384/404 frozen-DINOv3 patch features** — outlier /
+high-norm heavy (the phenomenon register tokens exist to mitigate).
+
+### Why `max` is the wrong method for DINO
+
+`max` (→ ORT `CalibrationMethod.MinMax` + `ActivationSymmetric`) sets each **per-tensor activation**
+scale to the single largest absolute value observed — **zero outlier rejection**. In explicit
+quantization activations *must* be per-tensor (TensorRT), so granularity is not a lever; the
+calibration **method** is. On DINO's outlier-heavy activations one high-norm token pins the amax and
+starves the dense bulk — where the CEM candidate-ranking signal lives — of resolution (INT8 leaves the
+bulk ~2–3 levels; E4M3's 3-bit mantissa is coarser still). That is the INT8-20% → FP8-2% cliff. `max`
+was signed off above as suited to LeWM's *tame* ViT activations; it is exactly wrong for DINO.
+
+### Decision — calibration method is per-track, held constant across a track's 8-bit precisions
+
+- **LeWM: `max`** (unchanged — its stressor is the action, already fixed; ViT activations are tame).
+- **DINO: `entropy`** (ORT `CalibrationMethod.Entropy` — KL/histogram threshold that clips the outlier
+  tail; modelopt's own default). The ONNX int8/fp8 flow supports exactly `{entropy (default), max}`;
+  `percentile` is not available there (it silently maps to MinMax), so `entropy` is *the* supported
+  outlier-aware lever.
+- The method is **held constant across INT8 and FP8 within each track**, so the INT8→FP8 delta stays
+  "format alone." FP8 is method-agnostic to this choice: the ONNX FP8 path computes INT8 scales with
+  the chosen method, then converts them to E4M3 (`fp8_scale = int8_scale × 448/127`) — so `entropy`
+  carries over to FP8 exactly as to INT8.
+
+### Parity
+
+Calibration method is a **per-track quant knob, not a cross-track parity condition** (SPEC §Parity).
+The cross-track headline is **latency**, which is calibration-method-invariant — scale magnitudes do
+not change quantized-op coverage, granularity, or TensorRT tactic selection. Per-model SR is therefore
+a **best-achievable quality-retention** measure, never a cross-track "which model quantizes better at
+identical settings" claim. The chosen method is recorded per track in `results.<track>.json`'s
+fairness conditions.
+
+### Gate (owner)
+
+The DINO → `entropy` switch is **gated on on-pod SR confirmation**: entropy must move DINO INT8 off
+the ~20% floor (toward the ~70% FP16 baseline) *before* the FP8 engines are rebuilt on it. If entropy
+does **not** recover DINO INT8, the loss is inherent to per-tensor 8-bit on the DINOv3-driven
+predictor, and DINO's 8-bit rows are reported **degraded vs FP32**. (The FP16-only fallback named in
+the original Consequences was removed in `352018f`; FP8 is now always built and reported, quoted vs
+FP32, per SPEC §FP8 delta.)

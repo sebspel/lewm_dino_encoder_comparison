@@ -119,9 +119,13 @@ requirements those signatures must satisfy; it does not restate the signatures.
   own predicted latents; it is reproduced in the builder, never harvested from a live CEM/eval
   run. **INT8's calibration health is judged by SR, not by the drift table.**
   (Full derivation, the two failure axes, and accepted residuals: `docs/adr/0002`.)
-- **FP8 draws the identical calibration streams and `max` method** — the per-tensor amax scales
-  come from the same encoder/predictor clips, and its calibration health is likewise judged by
-  SR, not the drift table.
+- **FP8 draws the identical calibration *streams* as INT8** (format-independent — the same
+  encoder/predictor clips) and, **within a track, the same calibration *method* as that track's
+  INT8**, so the INT8→FP8 step isolates the format. The method is **set per track** (`max` for
+  LeWM's tame ViT activations, `entropy` for DINO's outlier-heavy DINOv3 activations —
+  `docs/adr/0002`); the FP8 path computes the INT8 scales with that method, then converts them to
+  E4M3, so the choice carries over unchanged. Calibration health is likewise judged by SR, not the
+  drift table.
 
 ### Latency & profiling
 
@@ -255,7 +259,17 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   confound it; the encoder/predictor/overhead profile must attribute the gap to the right
   component.
 - **FP8 rides the identical parity conditions as the other precisions** — same CEM config, seeds,
-  normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone.
+  normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone,
+  **at each track's fixed calibration method** (held constant across that track's INT8 and FP8 —
+  `docs/adr/0002`).
+- **Calibration method is a per-track quant knob, not a cross-track parity condition.** It is set
+  per model to suit its activation distribution (`max` for LeWM, `entropy` for DINO —
+  `docs/adr/0002`), **held constant across a track's INT8 and FP8** so the format delta stays clean,
+  and **recorded in each track's `results.<track>.json` fairness conditions**. The cross-track
+  headline is **latency**, which is calibration-method-invariant (scale values do not change
+  quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is a
+  best-achievable quality-retention measure, never a cross-track "which quantizes better at
+  identical settings" claim.
 
 ---
 
