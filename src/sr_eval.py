@@ -9,6 +9,18 @@ its task-quality counterpart"). The benchmark (`src.benchmark` / `src.study`) le
     uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino> \
         [precision=fp32,fp16,int8,fp8] [calibration_method=max|entropy] [out=<dir>]
 
+**Mixed-precision component isolation (diagnostic).** Pass `encoder_precision=<p>` and/or
+`predictor_precision=<p>` to run ONE eval with the encoder and predictor engines at DIFFERENT
+precisions (the unspecified side defaults to `fp16`, the known-good held baseline) — e.g.
+`encoder_precision=fp16 predictor_precision=int8` isolates the predictor's quantization, and the
+reverse isolates the encoder's. Mutually exclusive with `precision=`. The result is recorded under
+a **composite** precision key `enc-<A>+pred-<B>` (never one of `fp32/fp16/int8/fp8`), so it lands
+BESIDE the pure-precision points and NEVER overwrites them; `src.report` ignores unknown precision
+keys, so these diagnostic points do not enter the headline (no report.py change).
+
+    uv run python -m src.sr_eval --config-dir conf +experiment=eval_dino \
+        encoder_precision=fp16 predictor_precision=int8 [calibration_method=max|entropy]
+
 The quantized (int8/fp8) SR depends on the PTQ **calibration method** (`max` | `entropy`, a build
 option for both tracks — SPEC §Parity), so each SR is tagged with it: the merged sr.json is keyed
 `{track: {precision: {method: SR}}}`, and a run only touches its own (track, precision, method)
@@ -81,24 +93,31 @@ def _track_from_experiment(experiment):
 
 
 def _split_argv(argv):
-    """Separate the driver-only args (`precision=`, `out=`, `calibration_method=`) from the Hydra
-    argv passed through to the vendored eval composition (`--config-dir`, `+experiment=`, other
-    overrides). The driver-only args are NOT valid Hydra overrides on the pusht config, so they
-    must not reach `_compose_eval_cfg` (Hydra would error on them)."""
+    """Separate the driver-only args (`precision=`, `encoder_precision=`, `predictor_precision=`,
+    `out=`, `calibration_method=`) from the Hydra argv passed through to the vendored eval
+    composition (`--config-dir`, `+experiment=`, other overrides). The driver-only args are NOT
+    valid Hydra overrides on the pusht config, so they must not reach `_compose_eval_cfg` (Hydra
+    would error on them)."""
     precisions = None
     out_dir = None
     method = None
+    enc_prec = None
+    pred_prec = None
     hydra_argv = []
     for a in argv:
         if a.startswith("precision="):
             precisions = tuple(p for p in a.split("=", 1)[1].split(",") if p)
+        elif a.startswith("encoder_precision="):
+            enc_prec = a.split("=", 1)[1]
+        elif a.startswith("predictor_precision="):
+            pred_prec = a.split("=", 1)[1]
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
         elif a.startswith("calibration_method="):
             method = a.split("=", 1)[1]
         else:
             hydra_argv.append(a)
-    return precisions, out_dir, method, hydra_argv
+    return precisions, out_dir, method, enc_prec, pred_prec, hydra_argv
 
 
 def _build_shim(track, model, engines):
@@ -187,7 +206,7 @@ def main():
     argv = sys.argv[1:]
     experiment = _experiment_from_argv(argv)
     track = _track_from_experiment(experiment)
-    precisions_arg, out_dir, method_arg, hydra_argv = _split_argv(argv)
+    precisions_arg, out_dir, method_arg, enc_prec, pred_prec, hydra_argv = _split_argv(argv)
     method = check_calibration_method(method_arg or DEFAULT_CALIBRATION_METHOD)
 
     import stable_worldmodel as swm
@@ -198,6 +217,28 @@ def main():
     precisions = precisions_arg or ExportConfig().precisions
     out_dir = out_dir or default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Each job is (precision_label, engines). Normal mode: one job per requested precision, both
+    # components at that precision. Mixed mode (component isolation): ONE job with the encoder and
+    # predictor engines at different precisions, recorded under a composite label `enc-<A>+pred-<B>`
+    # that cannot collide with a pure-precision key — so it writes BESIDE the pure points and never
+    # overwrites them (see `_merge_sr_json`). The held (unspecified) component defaults to fp16.
+    mixed_mode = enc_prec is not None or pred_prec is not None
+    if mixed_mode and precisions_arg is not None:
+        raise SystemExit(
+            "src.sr_eval: encoder_precision=/predictor_precision= (mixed-precision isolation) "
+            "cannot be combined with precision= — run them as separate invocations"
+        )
+    if mixed_mode:
+        enc_p, pred_p = enc_prec or "fp16", pred_prec or "fp16"
+        label = f"enc-{enc_p}+pred-{pred_p}"
+        engines = {
+            "encoder": engine_paths(track, enc_p, method=method)["encoder"],
+            "predictor": engine_paths(track, pred_p, method=method)["predictor"],
+        }
+        jobs = [(label, engines)]
+    else:
+        jobs = [(p, engine_paths(track, p, method=method)) for p in precisions]
 
     # Load the REAL trained checkpoint ONCE (outside the load_pretrained patch): the shim wraps
     # it, and the engine callables replace its encode/predict compute per precision. Compose the
@@ -215,16 +256,16 @@ def main():
     )
     sr_by_precision: dict = {}
     try:
-        for precision in precisions:
-            # SR is method-DEPENDENT, so load the engine tagged with THIS run's method (int8/fp8);
-            # fp32/fp16 are method-invariant and ignore it (study.engine_paths).
-            engines = engine_paths(track, precision, method=method)
+        for precision, engines in jobs:
+            # `engines` are already resolved per job (study.engine_paths); for int8/fp8 they are
+            # tagged with THIS run's method, fp32/fp16 are method-invariant. In mixed mode the two
+            # components come from different precisions (encoder vs predictor isolation).
             if not (engines["encoder"].exists() and engines["predictor"].exists()):
                 print(
-                    f"[sr-eval:{track}] {precision} ({method}): engines missing under "
-                    f"{engines['encoder'].parent} — skipped "
-                    f"(build with `src.export model={track} precision={precision} "
-                    f"calibration_method={method}`)"
+                    f"[sr-eval:{track}] {precision} ({method}): engine(s) missing "
+                    f"(encoder={engines['encoder'].name}, predictor={engines['predictor'].name}) "
+                    f"under {engines['encoder'].parent} — skipped; build the missing precision "
+                    f"with `src.export model={track} precision=<p> calibration_method={method}`"
                 )
                 continue
             shim = _build_shim(track, model, engines)
@@ -273,17 +314,27 @@ def main():
 
     if not sr_by_precision:
         raise SystemExit(
-            f"[sr-eval:{track}] no engines found for any of {precisions} under "
+            f"[sr-eval:{track}] no engines found for any of {[label for label, _ in jobs]} under "
             f"{engine_paths(track, 'fp32')['encoder'].parent} — "
             f"run `src.export model={track} precision=<p>` first"
         )
 
     sr_path = out_dir / "sr.json"
+    # Additive per (track, precision-label, method): pure-precision runs touch their own precision
+    # key; mixed runs touch only their composite `enc-<A>+pred-<B>` key. Existing points (incl. the
+    # canonical pure-precision SRs) are never overwritten (CLAUDE.md §8).
     _merge_sr_json(sr_path, track, method, sr_by_precision)
-    print(
-        f"[sr-eval:{track}] wrote {sr_path} (method={method}) — join the SR into the headline with:\n"
-        f"    uv run python -m src.report from={out_dir} sr={sr_path} calibration_method={method}"
-    )
+    if mixed_mode:
+        print(
+            f"[sr-eval:{track}] wrote {sr_path} (method={method}) — MIXED-precision diagnostic "
+            f"point(s) {list(sr_by_precision)} recorded additively under composite keys; "
+            f"pure-precision SRs untouched. src.report ignores these keys (no headline change)."
+        )
+    else:
+        print(
+            f"[sr-eval:{track}] wrote {sr_path} (method={method}) — join the SR into the headline with:\n"
+            f"    uv run python -m src.report from={out_dir} sr={sr_path} calibration_method={method}"
+        )
 
 
 if __name__ == "__main__":

@@ -29,9 +29,10 @@ def test_experiment_from_argv_requires_experiment():
 
 
 def test_split_argv_strips_driver_only_args():
-    """`precision=`/`out=`/`calibration_method=` are NOT valid Hydra overrides on the pusht config,
-    so they must be peeled off before the rest reaches `_compose_eval_cfg`; `+experiment=` stays."""
-    precisions, out_dir, method, hydra_argv = sr_eval._split_argv(
+    """`precision=`/`out=`/`calibration_method=`/`{encoder,predictor}_precision=` are NOT valid
+    Hydra overrides on the pusht config, so they must be peeled off before the rest reaches
+    `_compose_eval_cfg`; `+experiment=` stays."""
+    precisions, out_dir, method, enc_prec, pred_prec, hydra_argv = sr_eval._split_argv(
         [
             "--config-dir", "conf", "+experiment=eval_dino",
             "precision=fp16,int8", "out=/tmp/x", "calibration_method=entropy",
@@ -40,17 +41,49 @@ def test_split_argv_strips_driver_only_args():
     assert precisions == ("fp16", "int8")
     assert str(out_dir) == "/tmp/x"
     assert method == "entropy"
+    assert enc_prec is None and pred_prec is None
     assert hydra_argv == ["--config-dir", "conf", "+experiment=eval_dino"]
 
 
 def test_split_argv_defaults():
-    precisions, out_dir, method, hydra_argv = sr_eval._split_argv(
+    precisions, out_dir, method, enc_prec, pred_prec, hydra_argv = sr_eval._split_argv(
         ["--config-dir", "conf", "+experiment=eval_lewm"]
     )
     assert precisions is None  # -> caller falls back to ExportConfig().precisions
     assert out_dir is None
     assert method is None  # -> caller falls back to DEFAULT_CALIBRATION_METHOD (max)
+    assert enc_prec is None and pred_prec is None  # -> non-mixed mode
     assert hydra_argv == ["--config-dir", "conf", "+experiment=eval_lewm"]
+
+
+def test_split_argv_mixed_precision():
+    """Mixed-precision isolation args are peeled off and returned separately from `precision=`."""
+    precisions, _out, _m, enc_prec, pred_prec, hydra_argv = sr_eval._split_argv(
+        [
+            "--config-dir", "conf", "+experiment=eval_dino",
+            "encoder_precision=fp16", "predictor_precision=int8",
+        ]
+    )
+    assert precisions is None  # mixed mode does not use the precision list
+    assert enc_prec == "fp16"
+    assert pred_prec == "int8"
+    assert hydra_argv == ["--config-dir", "conf", "+experiment=eval_dino"]
+
+
+def test_merge_sr_json_mixed_key_never_clobbers_pure(tmp_path):
+    """A mixed-precision diagnostic run writes under a composite `enc-<A>+pred-<B>` key that cannot
+    collide with a pure-precision key, so the canonical pure-precision SRs are preserved."""
+    path = tmp_path / "sr.json"
+    sr_eval._merge_sr_json(path, "dino", "entropy", {"int8": 20.0, "fp8": 2.0})
+    # Component-isolation runs land BESIDE the pure points, never over them.
+    sr_eval._merge_sr_json(path, "dino", "entropy", {"enc-fp16+pred-int8": {"success_rate": 68.0}})
+    sr_eval._merge_sr_json(path, "dino", "entropy", {"enc-int8+pred-fp16": {"success_rate": 22.0}})
+
+    data = json.loads(path.read_text())
+    assert data["dino"]["int8"] == {"entropy": 20.0}  # pure int8 untouched
+    assert data["dino"]["fp8"] == {"entropy": 2.0}  # pure fp8 untouched
+    assert data["dino"]["enc-fp16+pred-int8"] == {"entropy": {"success_rate": 68.0}}
+    assert data["dino"]["enc-int8+pred-fp16"] == {"entropy": {"success_rate": 22.0}}
 
 
 def test_merge_sr_json_additive_over_track_precision_method(tmp_path):
