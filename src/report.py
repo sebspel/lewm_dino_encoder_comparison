@@ -10,6 +10,10 @@ Consumes the benchmark results (per track × precision) and emits the headline o
   - per-component **encoder / predictor / overhead** bottleneck breakdown, derived from the
     engine-step times × CEM call counts minus the measured per-cycle time (overhead by
     subtraction, SPEC §Interface Contracts)
+  - **calibration-method comparison** (`max` vs `entropy` SR side by side) — the ONE table that
+    spans methods, so the two labelled points coexist on the page (ADR-0002)
+  - **component-precision isolation** — which component's quantization caused a measured SR drop,
+    read off the mixed-precision diagnostic runs (ADR-0005)
 
 **Which statistic goes where** (SPEC §Interface Contracts — do not mix these):
   - **p50** — the COMPARISON basis: the LeWM-vs-DINOv3 headline ratio and the FP32-relative
@@ -32,6 +36,11 @@ All headline artifacts are persisted to `out_dir` on disk — each table seriali
 each plot to a `.png` — so a completed study survives pod teardown (SPEC §Headline-artifact
 durability). Logging to an open W&B run is optional and **additive, never the sole copy**.
 
+The four single-method tables are **method-scoped by filename** (`<name>.<method>.txt`) and state
+their calibration method in the table body, so rendering the other method neither clobbers them nor
+leaves an unlabelled artefact behind (SPEC §Parity, ADR-0002 3rd amendment). The calibration table
+is NOT method-scoped — it spans both methods by construction; only its `headline` marker moves.
+
 Input shape: ``bench[track][precision] -> BenchResult`` (missing entries are skipped).
 """
 
@@ -39,6 +48,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from statistics import fmean
@@ -52,12 +62,26 @@ import matplotlib.pyplot as plt  # noqa: E402
 from src.interfaces import (  # noqa: E402  — CEM per-cycle call counts (the decomposition weights)
     ENCODER_CALLS_PER_CYCLE as _ENCODER_CALLS,
     PREDICTOR_CALLS_PER_CYCLE as _PREDICTOR_CALLS,
+    CALIBRATION_METHODS,
     DEFAULT_CALIBRATION_METHOD,
+    QUANTIZED_PRECISIONS,
     check_calibration_method,
 )
 
 _TRACKS = ("lewm", "dino")
 _PRECISIONS = ("fp32", "fp16", "int8", "fp8")
+# The precisions whose SR does not depend on the PTQ calibration method — they build data-free off
+# the base graph, so whichever run recorded them, the point is the same (SPEC §Parity). Used to let
+# an `entropy` render join an fp32/fp16 SR that only a `max` run happened to record.
+_METHOD_INVARIANT_PRECISIONS = tuple(p for p in _PRECISIONS if p not in QUANTIZED_PRECISIONS)
+# Composite precision label written by the mixed-precision component-isolation runs
+# (`src.sr_eval encoder_precision=/predictor_precision=`): `enc-<A>+pred-<B>`. Deliberately NOT in
+# `_PRECISIONS`, so these diagnostic points reach no headline table, plot, or ratio — they are read
+# ONLY by the isolation table (ADR-0005).
+_ISOLATION_KEY = re.compile(r"^enc-([a-z0-9]+)\+pred-([a-z0-9]+)$")
+# The component held at FP16 while the other is quantized. FP16 is lossless on these checkpoints
+# (ADR-0002), so it is the right "undamaged" reference for an isolation run.
+_ISOLATION_HELD = "fp16"
 
 
 def _missing(x) -> bool:
@@ -230,19 +254,36 @@ def dilution_disclosure(bench: dict, track: str) -> dict:
 
 
 # --- tables ---------------------------------------------------------------------------
-def render_speed_table(bench: dict) -> str:
+def _method_line(method: str) -> str:
+    """The calibration-method label, carried INSIDE every single-method table body.
+
+    SPEC §Parity: the label must survive into the persisted artefact, never stdout-only — a
+    rendered table that does not name its method is not a valid artefact (ADR-0002 3rd amendment).
+    Both the SR and (via the joined eval-shim run) the per-cycle percentiles are method-sourced,
+    so this line qualifies the whole table, not just the SR column."""
+    return (
+        f"  calibration_method = {method}  (int8/fp8 SR + the per-cycle sample they were measured "
+        "on; fp32/fp16 method-invariant)"
+    )
+
+
+def render_speed_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
     # All three latency distributions at p50/p95 (SPEC §Interface Contracts): per-cycle is the
     # HEADLINE (joined from the eval-shim; PEND until then) with **p50 the comparison basis** and
     # p95 the descriptive tail; enc/pred are the isolated engine-step components. SR is PEND
-    # until the gated eval-shim pairs it.
+    # until the gated eval-shim pairs it. `cyc_n` is the post-truncation per-cycle sample count
+    # those percentiles + the decomposition mean were computed from (ADR-0003 amendment).
     hdr = (
-        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} "
+        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} {'cyc_n':>6} "
         f"{'enc_p50':>8} {'enc_p95':>8} {'pred_p50':>9} {'pred_p95':>9} "
         f"{'mem_MB':>9} {'SR':>7}"
     )
     lines = [
         "  (cyc = per-cycle HEADLINE, joined from eval-shim; p50 = comparison basis, "
         "p95 = tail; enc/pred = engine step; PEND = gated eval-shim)",
+        "  (cyc_n = equal-n truncated sample size — the common min across tracks at that "
+        "precision; SR-dependent, hence why p50 carries the comparison)",
+        _method_line(method),
         hdr,
         "-" * len(hdr),
     ]
@@ -252,9 +293,11 @@ def render_speed_table(bench: dict) -> str:
             if r is None:
                 continue
             sr = "PEND" if _missing(r["success_rate"]) else format(r["success_rate"], ".1f")
+            n = r.get("_per_cycle_n")
             lines.append(
                 f"{track:>6} {prec:>5} "
                 f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} {_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
+                f"{('—' if n is None else str(n)):>6} "
                 f"{r['encode_p50_ms']:>8.3f} {r['encode_p95_ms']:>8.3f} "
                 f"{r['predict_p50_ms']:>9.3f} {r['predict_p95_ms']:>9.3f} "
                 f"{r['peak_mem_mb']:>9.1f} {sr:>7}"
@@ -262,7 +305,7 @@ def render_speed_table(bench: dict) -> str:
     return "\n".join(lines)
 
 
-def render_fp32_relative_table(bench: dict) -> str:
+def render_fp32_relative_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
     """FP32-relative degradation per track × precision: per-cycle p50 speedup **and** SR delta,
     side by side — SPEC §Parity requires a precision that is faster but degrades task quality to
     be visible, which means both numbers in one row (this is where the INT8 story reads)."""
@@ -270,6 +313,7 @@ def render_fp32_relative_table(bench: dict) -> str:
     lines = [
         "  (vs that track's FP32; speedup = FP32 p50 ÷ this p50, >1 = faster; "
         "ΔSR in percentage points, <0 = task quality lost)",
+        _method_line(method),
         hdr,
         "-" * len(hdr),
     ]
@@ -283,7 +327,7 @@ def render_fp32_relative_table(bench: dict) -> str:
     return "\n".join(lines)
 
 
-def render_component_table(bench: dict) -> str:
+def render_component_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
     # Runtime-WEIGHTED per-cycle shares (step MEAN × CEM call counts); overhead by subtraction
     # from the measured mean cycle. `p` = optimizable fraction, ceiling = 1/(1-p).
     hdr = (
@@ -295,6 +339,7 @@ def render_component_table(bench: dict) -> str:
         "p50/p95 above)",
         "  (cyc_ms = per-cycle = step mean × calls; predict called "
         f"{_PREDICTOR_CALLS} × / cycle, encode {_ENCODER_CALLS} ×; ovh = cycle − enc − pred)",
+        _method_line(method),
         hdr,
         "-" * len(hdr),
     ]
@@ -313,12 +358,13 @@ def render_component_table(bench: dict) -> str:
     return "\n".join(lines)
 
 
-def render_dilution_table(bench: dict) -> str:
+def render_dilution_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
     """Amdahl dilution table: p, ceiling, and per-precision model-only vs realized speedup —
     makes the overhead floor that dilutes the model-only ratio visible."""
     lines = [
         "  (MEAN basis throughout — Amdahl is an expectation model; the reported p50 "
-        "FP32-relative speedup is in the fp32-relative table)"
+        "FP32-relative speedup is in the fp32-relative table)",
+        _method_line(method),
     ]
     for track in _TRACKS:
         d = dilution_disclosure(bench, track)
@@ -337,6 +383,156 @@ def render_dilution_table(bench: dict) -> str:
                 f"{_fmt(v['measured_realized_speedup'], '.2f'):>18}"
             )
     return "\n".join(lines)
+
+
+def _sr_value(point):
+    """The success rate out of one sr.json point — a `{success_rate, ...}` dict, a bare number
+    (manual override), or None when the point is absent."""
+    if point is None:
+        return None
+    return point.get("success_rate") if isinstance(point, dict) else point
+
+
+def render_calibration_table(
+    overrides: dict | None, headline_method: str = DEFAULT_CALIBRATION_METHOD
+) -> str:
+    """The ONE table that spans calibration methods: int8/fp8 SR under `max` AND `entropy`, side
+    by side (ADR-0002 3rd amendment).
+
+    The four single-method tables answer "what does the study report"; this one answers "what did
+    the calibration method buy". Keeping them separate preserves the guard that a single-method
+    render can never place `dino int8@max` beside `lewm int8@entropy` — the cross-track comparison
+    SPEC §Parity forbids — while still putting both measured points on the page.
+
+    Reads `sr.json` directly (`{track: {precision: {method: SR}}}`) rather than `bench`, because
+    `bench` holds only the ONE method the render selected. No `results.<track>.json` schema change.
+    The `headline` column names the method the single-method tables were rendered at, linking the
+    two artefacts. FP32/FP16 are excluded: they are method-invariant, so a comparison is vacuous.
+
+    Returns "" when no quantized SR exists at all — the caller then writes no artefact rather than
+    an empty one."""
+    delta_label = f"Δ({CALIBRATION_METHODS[-1][:3]}−{CALIBRATION_METHODS[0][:3]})"
+    hdr = (
+        f"{'track':>6} {'prec':>5} "
+        + " ".join(f"{'SR@' + m:>11}" for m in CALIBRATION_METHODS)
+        + f" {delta_label:>12} {'headline':>9}"
+    )
+    rows = []
+    for track in _TRACKS:
+        for prec in QUANTIZED_PRECISIONS:
+            raw = (overrides or {}).get(track, {}).get(prec)
+            if raw is None:
+                continue
+            srs = {m: _sr_value(_select_method(raw, m, prec)) for m in CALIBRATION_METHODS}
+            if all(v is None for v in srs.values()):
+                continue
+            first, last = srs[CALIBRATION_METHODS[0]], srs[CALIBRATION_METHODS[-1]]
+            delta = None if first is None or last is None else last - first
+            rows.append(
+                f"{track:>6} {prec:>5} "
+                + " ".join(
+                    f"{('PEND' if srs[m] is None else format(srs[m], '.1f')):>11}"
+                    for m in CALIBRATION_METHODS
+                )
+                + f" {_fmt(delta, '+.1f'):>12} {headline_method:>9}"
+            )
+    if not rows:
+        return ""
+    return "\n".join(
+        [
+            "  (int8/fp8 only — fp32/fp16 are method-invariant. PEND = that method's engines were "
+            "not built/evaluated for this cell)",
+            "  (`headline` = the method the single-method tables were rendered at; latency is "
+            "method-invariant, so only SR differs here)",
+            hdr,
+            "-" * len(hdr),
+        ]
+        + rows
+    )
+
+
+def _parse_isolation_key(key: str):
+    """`enc-<A>+pred-<B>` -> `(encoder_precision, predictor_precision)`, or None for a normal
+    precision key. Written by the mixed-precision component-isolation runs (`src.sr_eval`)."""
+    m = _ISOLATION_KEY.match(key)
+    return m.groups() if m else None
+
+
+def render_isolation_table(
+    bench: dict, overrides: dict | None, method: str = DEFAULT_CALIBRATION_METHOD
+) -> str:
+    """Component-precision isolation (ADR-0005): which component's quantization caused a measured
+    SR drop. Placed immediately after the FP32-relative table — it answers the question that table
+    provokes.
+
+    Each row is one diagnostic run with ONE component quantized and the other held at FP16 (the
+    lossless reference on these checkpoints — ADR-0002). ΔSR is quoted against that track's **FP16**
+    row, not FP32, because FP16 is what the held component is running at; that makes it a different
+    number from the FP32-relative table's ΔSR, deliberately.
+
+    `cyc_share` is the isolated component's share of the measured per-cycle time AT THAT PRECISION
+    (its step mean × CEM call count ÷ the joined cycle) — diagnostic context for how much latency
+    the damage was buying. It is "—" until the pure-precision per-cycle latency is joined.
+
+    These rows come from composite `enc-<A>+pred-<B>` sr.json keys that are NOT in `_PRECISIONS`,
+    so they reach no headline table, plot, or ratio — the mixed pairing is a diagnostic, never a
+    fifth precision (ADR-0005). Returns "" when no isolation runs exist."""
+    order = {p: i for i, p in enumerate(_PRECISIONS)}
+    rows = []
+    for track in _TRACKS:
+        for key, raw in (overrides or {}).get(track, {}).items():
+            parsed = _parse_isolation_key(key)
+            if parsed is None:
+                continue
+            enc_p, pred_p = parsed
+            # Isolation points are method-DEPENDENT (they are quantized runs), so `_select_method`
+            # must not fall back across methods — the composite key is not method-invariant.
+            sr = _sr_value(_select_method(raw, method, key))
+            if sr is None:
+                continue
+            quantized = [(c, p) for c, p in (("encoder", enc_p), ("predictor", pred_p))
+                         if p != _ISOLATION_HELD]
+            if not quantized:
+                continue  # both held at FP16 == the FP16 baseline; already the speed table's row
+            if len(quantized) == 1:
+                component, prec = quantized[0]
+            else:  # both sides quantized — not a single-component isolation; no share attributable
+                component, prec = "enc+pred", f"{enc_p}+{pred_p}"
+            base = bench.get(track, {}).get(_ISOLATION_HELD, {}).get("success_rate")
+            delta = None if base is None or _missing(base) else sr - base
+            share = None
+            if len(quantized) == 1 and prec in bench.get(track, {}):
+                d = decompose(bench[track][prec])
+                cycle = d["cycle_ms"]
+                if cycle:
+                    key_ms = "enc_cyc_ms" if component == "encoder" else "pred_cyc_ms"
+                    share = d[key_ms] / cycle
+            rows.append(
+                (
+                    _TRACKS.index(track), order.get(prec, len(order)), component,
+                    f"{track:>6} {prec:>9} {component:>10} {sr:>7.1f} "
+                    f"{_fmt(delta, '+.1f'):>12} {_fmt(share, '.3f'):>10}",
+                )
+            )
+    if not rows:
+        return ""
+    hdr = (
+        f"{'track':>6} {'prec':>9} {'quantized':>10} {'SR':>7} "
+        f"{'ΔSR_vs_fp16':>12} {'cyc_share':>10}"
+    )
+    return "\n".join(
+        [
+            "  (DIAGNOSTIC — mixed-precision component isolation; the OTHER component is held at "
+            "fp16. Never a reported configuration, never in the headline sweep.)",
+            "  (ΔSR is vs that track's FP16 row — the held component's precision — NOT vs FP32. "
+            "cyc_share = that component's share of the measured cycle at that precision.)",
+            f"  calibration_method = {method}  (isolation runs are method-dependent; a row only "
+            "explains a headline row rendered at the SAME method)",
+            hdr,
+            "-" * len(hdr),
+        ]
+        + [r[-1] for r in sorted(rows, key=lambda r: r[:3])]
+    )
 
 
 # --- plots ----------------------------------------------------------------------------
@@ -412,7 +608,7 @@ def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32"
 
 
 # --- eval-shim join (SR + per-cycle latency, equal-n) ---------------------------------
-def _select_method(raw, method: str):
+def _select_method(raw, method: str, precision: str | None = None):
     """From one sr.json precision entry, return the point for `method` (or None if this precision
     has no point for it). The entry is one of:
       - a plain number — a manual SR-only override, method-agnostic (returned for any method);
@@ -420,12 +616,26 @@ def _select_method(raw, method: str):
         when `method` is the default (`max`), else None (no such method here);
       - a labelled `{method: {success_rate, ...}}` map — `raw.get(method)`.
     So `int8` @ `max` and `int8` @ `entropy` coexist under one precision and a render selects one,
-    like-for-like across tracks (SPEC §Parity)."""
+    like-for-like across tracks (SPEC §Parity).
+
+    **FP32/FP16 fall back across methods** when `precision` says they are method-invariant. Those
+    engines build data-free off the base graph, so their SR cannot depend on a PTQ method — but
+    `src.sr_eval` stamps EVERY precision in a run with that run's method label, so an fp32/fp16 SR
+    recorded by a `max` run is filed under `max`. Without the fallback an `entropy` render leaves
+    fp32/fp16 SR-PENDING and NaNs every FP32-relative ΔSR, purely from a label. Quantized precisions
+    (and the composite isolation keys, which are not method-invariant) never fall back — an
+    `entropy` render must never silently show a `max` point."""
     if not isinstance(raw, dict):
         return raw  # plain number: method-agnostic manual SR override
     if "success_rate" in raw:  # legacy flat entry == max-calibrated (pre-labelling)
         return raw if method == DEFAULT_CALIBRATION_METHOD else None
-    return raw.get(method)  # labelled {method: SR} map
+    hit = raw.get(method)  # labelled {method: SR} map
+    if hit is not None or precision not in _METHOD_INVARIANT_PRECISIONS:
+        return hit
+    for m in (DEFAULT_CALIBRATION_METHOD, *sorted(raw)):
+        if raw.get(m) is not None:
+            return raw[m]
+    return None
 
 
 def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
@@ -439,7 +649,7 @@ def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
         for prec, raw in by_prec.items():
             if track not in bench or prec not in bench[track]:
                 continue
-            val = _select_method(raw, method)
+            val = _select_method(raw, method, prec)
             if val is None:  # this precision has no point for the selected method -> leave pending
                 continue
             row = bench[track][prec]
@@ -459,7 +669,13 @@ def _finalize_per_cycle(bench: dict) -> None:
 
     p50/p95 are reported (p50 the comparison basis); the mean feeds `decompose` only. All three
     come off the SAME truncated sample, so the decomposition and the headline describe the same
-    decisions."""
+    decisions.
+
+    The truncated `n` is STASHED on the row (`_per_cycle_n`) and rendered in the speed table: the
+    whole statistic ruling rests on n being 50-100 and SR-dependent (ADR-0003), and a reader must be
+    able to verify the equal-n truncation off the artefact rather than take it on trust. Note the
+    truncation takes the common MINIMUM, so the highest-SR track sets n for every row at that
+    precision — one more reason p95 carries no claim."""
     for prec in _PRECISIONS:
         lat_by_track = {
             t: bench[t][prec]["_per_cycle_latencies_ms"]
@@ -477,6 +693,7 @@ def _finalize_per_cycle(bench: dict) -> None:
             bench[t][prec]["per_cycle_p50_ms"] = _percentile_ms(sample, 0.50)
             bench[t][prec]["per_cycle_p95_ms"] = _percentile_ms(sample, 0.95)
             bench[t][prec]["per_cycle_mean_ms"] = fmean(sample)
+            bench[t][prec]["_per_cycle_n"] = n
 
 
 # --- durable results I/O (canonical per-track JSON <-> render) ------------------------
@@ -516,7 +733,12 @@ def report(
     `method` (`max` | `entropy`) selects which calibration method's quantized SR to join for
     int8/fp8, so a render is like-for-like across tracks (SPEC §Parity). sr.json holds both, so
     switching `method` re-renders the other without rebuilding. FP32/FP16 SR is method-invariant.
-    The cross-track LATENCY headline does not depend on `method`."""
+    The cross-track LATENCY headline does not depend on `method`.
+
+    The four single-method tables are written METHOD-SCOPED (`<name>.<method>.txt`) and name their
+    method in the body, so the two methods' artefacts coexist on disk. Two further tables render
+    only when their data exists: `calibration_table.txt` (both methods' SR side by side) and
+    `isolation_table.<method>.txt` (component-precision isolation, ADR-0005)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _join_eval(bench, sr_overrides, method)
@@ -534,29 +756,49 @@ def report(
         f"Calibration method for int8/fp8 SR: {method} "
         "(fp32/fp16 method-invariant; latency headline method-invariant — SPEC §Parity)\n"
     )
-    speed_table = render_speed_table(bench)
-    fp32_table = render_fp32_relative_table(bench)
-    component_table = render_component_table(bench)
-    dilution_table = render_dilution_table(bench)
+    speed_table = render_speed_table(bench, method)
+    fp32_table = render_fp32_relative_table(bench, method)
+    component_table = render_component_table(bench, method)
+    dilution_table = render_dilution_table(bench, method)
+    calibration_table = render_calibration_table(sr_overrides, method)
+    isolation_table = render_isolation_table(bench, sr_overrides, method)
     print(speed_table)
     print()
     print("FP32-relative degradation (speed AND task quality):")
     print(fp32_table)
+    if isolation_table:
+        print()
+        print("Component-precision isolation (which component caused the drop above):")
+        print(isolation_table)
     print()
     print(component_table)
     print()
     print("Amdahl dilution (model-only vs realized per-cycle speedup):")
     print(dilution_table)
+    if calibration_table:
+        print()
+        print("Calibration method comparison (SR only — latency is method-invariant):")
+        print(calibration_table)
 
     # Durability: serialize each table to a .txt on disk (not stdout/W&B-HTML only), so a
     # completed study survives pod teardown — same contract as the plots + checkpoints
     # (SPEC §Headline-artifact durability; W&B logging below stays additive).
+    #
+    # The single-method tables are METHOD-SCOPED by filename: their SR (and the per-cycle sample
+    # it was measured on) is method-sourced, so a fixed name would let an `entropy` render
+    # overwrite the `max` artefacts in place — the artefact-preservation rule broken at the last
+    # step (SPEC §Parity, ADR-0002 3rd amendment, CLAUDE §8). The calibration table spans both
+    # methods by construction, so it stays unscoped; only its `headline` marker moves on re-render.
     tables = {
-        "speed_table": (out_dir / "speed_table.txt", speed_table),
-        "fp32_relative_table": (out_dir / "fp32_relative_table.txt", fp32_table),
-        "component_table": (out_dir / "component_table.txt", component_table),
-        "dilution_table": (out_dir / "dilution_table.txt", dilution_table),
+        "speed_table": (out_dir / f"speed_table.{method}.txt", speed_table),
+        "fp32_relative_table": (out_dir / f"fp32_relative_table.{method}.txt", fp32_table),
+        "component_table": (out_dir / f"component_table.{method}.txt", component_table),
+        "dilution_table": (out_dir / f"dilution_table.{method}.txt", dilution_table),
     }
+    if isolation_table:
+        tables["isolation_table"] = (out_dir / f"isolation_table.{method}.txt", isolation_table)
+    if calibration_table:
+        tables["calibration_table"] = (out_dir / "calibration_table.txt", calibration_table)
     table_paths = {}
     for key, (path, text) in tables.items():
         path.write_text(text + "\n")
@@ -592,6 +834,16 @@ def report(
                 "headline/fp32_relative_table": wandb.Html(f"<pre>{fp32_table}</pre>"),
                 "headline/component_table": wandb.Html(f"<pre>{component_table}</pre>"),
                 "headline/dilution_table": wandb.Html(f"<pre>{dilution_table}</pre>"),
+                **(
+                    {"headline/calibration_table": wandb.Html(f"<pre>{calibration_table}</pre>")}
+                    if calibration_table
+                    else {}
+                ),
+                **(
+                    {"headline/isolation_table": wandb.Html(f"<pre>{isolation_table}</pre>")}
+                    if isolation_table
+                    else {}
+                ),
                 "headline/sr_pending": len(missing_sr),
                 "headline/calibration_method": method,  # which method's int8/fp8 SR is rendered
                 **{f"headline/{k}": wandb.Image(str(v)) for k, v in plots.items()},

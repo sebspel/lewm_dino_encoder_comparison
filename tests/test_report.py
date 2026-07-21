@@ -160,7 +160,8 @@ def test_speed_table_reports_all_three_distributions_at_p50_p95():
 
 
 def test_tables_persisted_to_disk(tmp_path):
-    """Durability (SPEC §Headline-artifact durability): each table serialized to a .txt."""
+    """Durability (SPEC §Headline-artifact durability): each table serialized to a .txt. The two
+    data-dependent tables (calibration, isolation) are absent here — no sr.json overrides."""
     bench = _synthetic()
     out = report.report(bench, tmp_path)
     assert set(out["tables"]) == {
@@ -173,6 +174,64 @@ def test_tables_persisted_to_disk(tmp_path):
         Path(out["tables"]["speed_table"]).read_text().rstrip("\n")
         == report.render_speed_table(bench)
     )
+
+
+def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
+    """SPEC §Parity / ADR-0002 3rd amendment: the method must survive into the PERSISTED artefact,
+    and rendering the other method must not clobber the first. Both are load-bearing — the SR and
+    the per-cycle sample it was measured on are method-sourced."""
+    overrides = {"lewm": {"int8": {"max": {"success_rate": 76.0},
+                                   "entropy": {"success_rate": 71.0}}}}
+
+    def _b():
+        return {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, 90.0),
+                         "int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+
+    out_max = report.report(_b(), tmp_path, sr_overrides=overrides, method="max")
+    out_ent = report.report(_b(), tmp_path, sr_overrides=overrides, method="entropy")
+
+    # distinct files -> the entropy render did not overwrite the max one
+    assert Path(out_max["tables"]["speed_table"]).name == "speed_table.max.txt"
+    assert Path(out_ent["tables"]["speed_table"]).name == "speed_table.entropy.txt"
+    for out, method in ((out_max, "max"), (out_ent, "entropy")):
+        for key in ("speed_table", "fp32_relative_table", "component_table", "dilution_table"):
+            text = Path(out["tables"][key]).read_text()
+            assert f"calibration_method = {method}" in text
+    # both SRs still on disk, each under its own label
+    assert "76.0" in Path(out_max["tables"]["speed_table"]).read_text()
+    assert "71.0" in Path(out_ent["tables"]["speed_table"]).read_text()
+
+
+def test_speed_table_reports_equal_n(tmp_path):
+    """ADR-0003 amendment: the n each percentile was computed from is ON the artefact, so the
+    equal-n truncation is verifiable rather than asserted. Truncation takes the common MINIMUM."""
+    bench = {
+        "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
+        "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
+    }
+    overrides = {
+        "lewm": {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": [10, 11, 12, 13, 14]}},
+        "dino": {"fp32": {"success_rate": 88.0, "per_cycle_latencies_ms": [100, 110, 120]}},
+    }
+    report.report(bench, tmp_path, sr_overrides=overrides)
+    assert bench["lewm"]["fp32"]["_per_cycle_n"] == 3  # min(5, 3), not lewm's own 5
+    text = report.render_speed_table(bench)
+    assert "cyc_n" in text
+    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[4] == "3"
+
+
+def test_method_invariant_precisions_join_across_methods(tmp_path):
+    """FP32/FP16 build data-free, so their SR cannot depend on a PTQ method — but `src.sr_eval`
+    stamps every precision in a run with that run's label. An entropy render must still join an
+    fp32 SR that only a `max` run recorded, or every FP32-relative ΔSR goes NaN from a label
+    alone. Quantized precisions must NOT fall back."""
+    overrides = {"lewm": {"fp32": {"max": {"success_rate": 90.0}},
+                          "int8": {"max": {"success_rate": 76.0}}}}
+    bench = {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, math.nan),
+                      "int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    out = report.report(bench, tmp_path, sr_overrides=overrides, method="entropy")
+    assert bench["lewm"]["fp32"]["success_rate"] == 90.0  # method-invariant -> falls back
+    assert "lewm-int8" in out["sr_pending"]  # quantized -> no fallback, stays pending
 
 
 def test_sr_pending_flagged_and_join(tmp_path):
@@ -294,6 +353,85 @@ def test_load_results_merges_per_track(tmp_path):
     b = report.load_results(report._resolve_result_paths(tmp_path))
     assert set(b) == {"lewm", "dino"}
     assert report.per_cycle_ratio(b, "fp32", "p95") == 20.0
+
+
+def test_calibration_table_shows_both_methods(tmp_path):
+    """ADR-0002 3rd amendment: the ONE table spanning methods. int8/fp8 only (fp32/fp16 are
+    method-invariant), PEND where a method was never built, and a `headline` column naming which
+    method the single-method tables were rendered at."""
+    overrides = {
+        "lewm": {
+            "fp32": {"max": {"success_rate": 98.0}},  # method-invariant -> excluded
+            "int8": {"max": {"success_rate": 76.0}},  # entropy not yet built -> PEND
+        },
+        "dino": {"int8": {"max": {"success_rate": 20.0}, "entropy": {"success_rate": 16.0}}},
+    }
+    text = report.render_calibration_table(overrides, headline_method="entropy")
+    assert "SR@max" in text and "SR@entropy" in text
+    # method-invariant precisions get no ROW here (a max-vs-entropy comparison of them is vacuous)
+    assert not [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]]
+    lewm = [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "int8"]][0]
+    assert "76.0" in lewm and "PEND" in lewm
+    dino = [ln for ln in text.splitlines() if ln.split()[:2] == ["dino", "int8"]][0]
+    assert "20.0" in dino and "16.0" in dino and "-4.0" in dino  # Δ(entropy − max)
+    assert dino.split()[-1] == "entropy"  # headline marker
+
+    bench = {"lewm": {"int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
+    out = report.report(bench, tmp_path, sr_overrides=overrides, method="max")
+    assert Path(out["tables"]["calibration_table"]).name == "calibration_table.txt"
+
+
+def test_calibration_table_absent_without_quantized_sr(tmp_path):
+    """No quantized SR -> no artefact, rather than an empty one."""
+    assert report.render_calibration_table(None) == ""
+    out = report.report(_synthetic(), tmp_path)
+    assert "calibration_table" not in out["tables"]
+
+
+def test_isolation_table_attributes_component(tmp_path):
+    """ADR-0005: the mixed-precision diagnostic attributes a measured SR drop to encoder or
+    predictor. ΔSR is quoted vs the track's FP16 row (the held component's precision), NOT FP32."""
+    bench = {
+        "dino": {
+            "fp16": _bench(600.0, 1200.0, 6.0, 3.0, 70.0),
+            "int8": _bench(400.0, 800.0, 4.0, 2.0, math.nan),
+        }
+    }
+    overrides = {
+        "dino": {
+            "enc-int8+pred-fp16": {"entropy": {"success_rate": 16.0}},
+            "enc-fp16+pred-int8": {"entropy": {"success_rate": 42.0}},
+        }
+    }
+    text = report.render_isolation_table(bench, overrides, method="entropy")
+    enc = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "int8", "encoder"]][0]
+    pred = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "int8", "predictor"]][0]
+    assert "16.0" in enc and "-54.0" in enc  # 16 − 70, vs FP16 not FP32
+    assert "42.0" in pred and "-28.0" in pred
+    # cyc_share = that component's per-cycle time × calls ÷ the joined cycle, at that precision
+    assert enc.split()[-1] == format(4.0 * 2 / 400.0, ".3f")
+    assert pred.split()[-1] == format(2.0 * 150 / 400.0, ".3f")
+
+
+def test_isolation_keys_never_reach_the_headline(tmp_path):
+    """The composite keys are diagnostics: they must leave every headline artefact byte-identical
+    (ADR-0005 — a mixed pairing is never a fifth precision)."""
+    overrides = {"dino": {"fp16": {"entropy": {"success_rate": 70.0}}}}
+    with_iso = {
+        "dino": {**overrides["dino"], "enc-fp16+pred-int8": {"entropy": {"success_rate": 42.0}}}
+    }
+
+    def _render(ov, out_dir):
+        bench = {"dino": {"fp16": _bench(600.0, 1200.0, 6.0, 3.0, math.nan),
+                          "int8": _bench(400.0, 800.0, 4.0, 2.0, math.nan)}}
+        out = report.report(bench, out_dir, sr_overrides=ov, method="entropy")
+        return {k: Path(v).read_text() for k, v in out["tables"].items()}
+
+    plain = _render(overrides, tmp_path / "a")
+    isolated = _render(with_iso, tmp_path / "b")
+    assert "isolation_table" in isolated and "isolation_table" not in plain
+    for key in plain:
+        assert plain[key] == isolated[key], f"{key} changed when isolation keys were present"
 
 
 def test_negative_overhead_surfaced_not_clamped(capsys):

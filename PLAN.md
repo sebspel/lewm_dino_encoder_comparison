@@ -428,24 +428,37 @@ statistic split → `docs/adr/0003`.
     → verify: composite keys land beside the pure points; pure SRs unchanged. ADR-0002 predicts
     **predictor**-dominant damage (Design A puts `action_encoder` inside the predict engine) — a
     contrary result reopens that mechanism.
-  - [ ] 🟢 **Isolation table** in `src/report.py`, rendered from the composite `sr.json` keys and
+  - [x] 🟢 **Isolation table** in `src/report.py`, rendered from the composite `sr.json` keys and
     placed after `fp32_relative_table`. Columns: track · precision · component quantized (other held
     fp16) · SR · ΔSR vs that track's FP16 · that component's per-cycle time share.
-    → verify: `isolation_table.txt` written under the reports dir; `pytest` green; the headline
-    `.txt`/`.png` byte-identical with and without composite keys present (`_PRECISIONS` closed).
+    → **landed (off-pod ✔):** `render_isolation_table` + `_parse_isolation_key` / `_ISOLATION_KEY`;
+    written as `isolation_table.<method>.txt` only when isolation runs exist.
+    `tests/test_report.py::test_isolation_table_attributes_component`,
+    `::test_isolation_keys_never_reach_the_headline` (headline `.txt` byte-identical with and
+    without composite keys). `pytest` 93 passed.
 
-- [ ] 🟢 **Report labelling + provenance** (`docs/adr/0002` 3rd amendment, `docs/adr/0003` amendment).
-  - [ ] **Method-scoped headline tables:** the four single-method tables written as
+- [x] 🟢 **Report labelling + provenance** (`docs/adr/0002` 3rd amendment, `docs/adr/0003` amendment).
+  - [x] **Method-scoped headline tables:** the four single-method tables written as
     `<name>.<method>.txt`, each carrying a `calibration_method = <m>` line in the table body.
-    → verify: rendering `calibration_method=entropy` leaves the `max` `.txt` files untouched on disk.
-  - [ ] **`calibration_table.txt`** — int8/fp8 only, both methods side by side: track · prec ·
+    → **landed (off-pod ✔):** `_method_line` + `render_*(bench, method)` (method optional, defaults
+    to `max` so existing callers are unchanged); `report` writes the method-scoped names.
+    `::test_headline_tables_are_method_scoped_and_labelled`.
+  - [x] **`calibration_table.txt`** — int8/fp8 only, both methods side by side: track · prec ·
     `SR@max` · `SR@entropy` · `Δ(entropy−max)` · `headline` (which method the single-method tables
     were rendered at). Reads `sr.json`'s per-(track, precision, method) keys — **no**
     `results.<track>.json` schema change.
-    → verify: both methods in one table; a method with no point renders `PEND`.
-  - [ ] **`n` column on the speed table** — the post-truncation per-cycle sample count each row's
+    → **landed (off-pod ✔):** `render_calibration_table`; unscoped filename (spans both methods);
+    absent when no quantized SR exists. `::test_calibration_table_shows_both_methods`,
+    `::test_calibration_table_absent_without_quantized_sr`.
+  - [x] **`n` column on the speed table** — the post-truncation per-cycle sample count each row's
     percentiles and mean were computed from (`report._finalize_per_cycle`).
-    → verify: the rendered `n` equals the common min-n across tracks for that precision.
+    → **landed (off-pod ✔):** `_finalize_per_cycle` stashes `_per_cycle_n`; `cyc_n` column.
+    `::test_speed_table_reports_equal_n`.
+  - [x] **Method-invariant SR join fixed (required by the `entropy` render):** `_select_method` gains
+    a `precision` arg — fp32/fp16 fall back across method labels (they build data-free, so their SR
+    cannot depend on a PTQ method), quantized + composite keys never do. Without it an `entropy`
+    render left fp32/fp16 SR-PENDING and NaN'd every FP32-relative ΔSR purely from a label.
+    `::test_method_invariant_precisions_join_across_methods`.
 
 - [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
