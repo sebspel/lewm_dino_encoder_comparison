@@ -406,6 +406,47 @@ statistic split → `docs/adr/0003`.
   - [ ] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
     keep the existing `max`-labelled INT8/FP8 rows intact.
 
+- [ ] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/adr/0005`).
+  Attributes each material 8-bit SR drop to the encoder or the predictor. Diagnostic: composite
+  `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected (track, precision) cell.
+  - [ ] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
+    diagnostic explains: `uv run python -m src.sr_eval --config-dir conf
+    +experiment=eval_<lewm|dino> precision=int8,fp8 calibration_method=entropy`.
+    → verify: `sr.json` carries `{track}.{int8,fp8}.entropy`; a render at
+    `calibration_method=entropy` shows no PEND in the int8/fp8 SR column.
+  - [ ] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
+    model=lewm precision=<int8|fp8> calibration_method=entropy`.
+    → verify: `engines/lewm/{encoder,predictor}.<p>.entropy.plan` exist; quantized ONNX carries
+    QuantizeLinear.
+  - [x] 🖥️ **DINO isolation runs** (2026-07-21, `entropy`): int8 + fp8, both sides.
+    → enc-fp16+pred-fp8 70.0 · enc-fp16+pred-int8 42.0 · enc-int8+pred-fp16 16.0 ·
+    enc-fp8+pred-fp16 4.0 (FP16 baseline ~70). Encoder-dominant; predictor FP8-clean,
+    INT8-sensitive. Recorded in `sr.json` under composite keys.
+  - [ ] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
+    +experiment=eval_lewm encoder_precision=int8 predictor_precision=fp16
+    calibration_method=entropy` and the reverse. FP8 only if LeWM FP8 also drops.
+    → verify: composite keys land beside the pure points; pure SRs unchanged. ADR-0002 predicts
+    **predictor**-dominant damage (Design A puts `action_encoder` inside the predict engine) — a
+    contrary result reopens that mechanism.
+  - [ ] 🟢 **Isolation table** in `src/report.py`, rendered from the composite `sr.json` keys and
+    placed after `fp32_relative_table`. Columns: track · precision · component quantized (other held
+    fp16) · SR · ΔSR vs that track's FP16 · that component's per-cycle time share.
+    → verify: `isolation_table.txt` written under the reports dir; `pytest` green; the headline
+    `.txt`/`.png` byte-identical with and without composite keys present (`_PRECISIONS` closed).
+
+- [ ] 🟢 **Report labelling + provenance** (`docs/adr/0002` 3rd amendment, `docs/adr/0003` amendment).
+  - [ ] **Method-scoped headline tables:** the four single-method tables written as
+    `<name>.<method>.txt`, each carrying a `calibration_method = <m>` line in the table body.
+    → verify: rendering `calibration_method=entropy` leaves the `max` `.txt` files untouched on disk.
+  - [ ] **`calibration_table.txt`** — int8/fp8 only, both methods side by side: track · prec ·
+    `SR@max` · `SR@entropy` · `Δ(entropy−max)` · `headline` (which method the single-method tables
+    were rendered at). Reads `sr.json`'s per-(track, precision, method) keys — **no**
+    `results.<track>.json` schema change.
+    → verify: both methods in one table; a method with no point renders `PEND`.
+  - [ ] **`n` column on the speed table** — the post-truncation per-cycle sample count each row's
+    percentiles and mean were computed from (`report._finalize_per_cycle`).
+    → verify: the rendered `n` equals the common min-n across tracks for that precision.
+
 - [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
   → verify: quantized ONNX carries QuantizeLinear (E4M3); FP8 engine builds; **FP8 tactics are
@@ -440,6 +481,9 @@ statistic split → `docs/adr/0003`.
 **Verify:** FP8 engines built on the L40S (gitignored, regenerable); FP8 precision-match
 owner-signed-off; FP8 SR + latency + peak mem recorded and joined; every Phase-5 table/plot and
 the per-track results JSON carry the FP8 row/point (quoted vs FP32); all logged to W&B.
+Every rendered table names its calibration method and no render clobbers another method's artefacts;
+the speed table carries `n`; the isolation table attributes each material 8-bit SR drop to a
+component on **both** tracks.
 
 ---
 

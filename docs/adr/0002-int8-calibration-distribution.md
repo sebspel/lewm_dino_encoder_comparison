@@ -246,3 +246,66 @@ MatMuls quantize normally.
 - The masked-logits tensors keep a −3e4 outlier, so if modelopt ever placed a Q/DQ on the softmax
   **input**, that scale would be coarse — but softmax I/O is not quantized (only the surrounding
   MatMuls are), so this is inert. Judged, like all quant health here, by **SR**.
+
+---
+
+## Amendment (2026-07-21) — the method label must survive into the persisted artefact
+
+**Status:** Accepted · closes the gap between the labelling decision above and what the rendered
+report actually carries.
+
+### Symptom
+
+The data layer honours the labelling decision: `sr.json` is keyed per `(track, precision, method)`
+and int8/fp8 engine plans are method-tagged. The **render layer discards it**. All four table
+renderers take only `bench`, so the method reaches no table header, no row label, and no filename;
+it is printed to stdout and logged as a separate W&B key, neither of which is part of the persisted
+artefact. Two consequences:
+
+- `speed_table.txt` shows an `int8` row whose SR is method-dependent, with no way to tell which
+  method produced it.
+- Re-rendering the other method **overwrites the first in place** (fixed filenames, `out_dir`
+  defaulting to the source dir) — the artefact-preservation rule above, broken at the last step.
+
+Note this is not confined to the SR column: `_join_eval` pulls `success_rate` **and**
+`per_cycle_latencies_ms` from the selected method's entry, so the per-cycle percentiles, and
+everything derived from them (`p`, ceiling, overhead, realized speedup), are method-*sourced* too.
+Kernel latency is method-invariant in principle; the measured sample is not, because n is SR-driven
+and SR is method-driven.
+
+### Decision
+
+- **The four headline tables stay single-method**, and say so: written as `<name>.<method>.txt` with
+  a `calibration_method = <m>` line in the table body. Nothing clobbers; nothing is unlabelled.
+- **A fifth table, `calibration_table.txt`, carries the method comparison** — int8/fp8 only, both
+  methods side by side (`SR@max`, `SR@entropy`, `Δ(entropy−max)`), plus a `headline` column naming
+  which method the single-method tables were rendered at. That column is the link between the two
+  artefacts and removes the ambiguity entirely.
+- It reads `sr.json`'s existing per-`(track, precision, method)` keys, so **no schema change** to the
+  canonical `results.<track>.json`.
+
+### Rejected alternative — two rows per quantized precision in the headline tables
+
+Considered and rejected: rendering `int8@max` and `int8@entropy` as sibling rows in all four tables.
+
+- Only SR (and ΔSR) is genuinely method-dependent. The component and dilution tables derive entirely
+  from step means and the cycle, so both rows would print near-identical numbers — inviting a reader
+  to read run-to-run jitter as a calibration effect, against a SPEC claim that the latency headline
+  *is* method-invariant.
+- It removes a guard that currently works: `method` is global to a render, so one table can never mix
+  `dino int8@max` with `lewm int8@entropy`. The two-row layout puts precisely that forbidden
+  cross-track comparison on adjacent lines.
+- It forks the keying of every cross-track consumer — `per_cycle_ratio(bench, "int8")` and the
+  speed-vs-SR scatter stop being well-defined with two methods under one precision.
+- It forces a method axis into `results.<track>.json`, i.e. a schema change to the durable artefact,
+  where the split approach needs none.
+
+### Consequences
+
+- Existing `max`-labelled `.txt`/`.png` artefacts are superseded by method-scoped filenames on the
+  next render; the underlying `results.<track>.json` and `sr.json` are untouched, so nothing measured
+  is lost (CLAUDE §8).
+- `results.<track>.json`'s `meta.calibration_method` remains a **whole-file, last-write-wins**
+  provenance label while `bench` merges precisions across runs, so it can mislabel a file that mixes
+  methods. Latency being method-invariant makes this provenance-only, not a wrong number — recorded
+  here as a known residual rather than fixed, since the per-point truth lives in `sr.json`.

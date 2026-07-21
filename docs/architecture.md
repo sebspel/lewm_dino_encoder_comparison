@@ -197,6 +197,18 @@ drives `(horizon − n_obs) + 1` predict calls per decision, not `horizon + 1`:
 
 Both counts are **per-decision**, so the measured cycle must be per-decision too (ADR 0004).
 
+### Attribution runs on the same seam in both directions
+
+The encoder and predictor are separately exported, separately quantized, and separately timed. That
+seam already carries the *latency* attribution (the per-component decomposition above); **ADR 0005**
+runs it in the other direction for *task quality*, holding one component at FP16 while the other is
+quantized, so a measured SR collapse is attributed to a component rather than reported as a symptom.
+
+The two attributions answer the study's mechanistic claim from both sides — which component costs the
+time, and which component cannot survive 8-bit. They are deliberately asymmetric in status: the
+latency decomposition is a headline result, the SR isolation is a diagnostic that never enters the
+FP32→FP16→INT8→FP8 sweep (ADR 0005, "Diagnostic, not a shipped configuration").
+
 ---
 
 ## 7. Amdahl dilution disclosure

@@ -149,6 +149,8 @@ requirements those signatures must satisfy; it does not restate the signatures.
 - **Per-cycle n is 50–100 per track per precision, not thousands** — establish this before
   reading any per-cycle percentile. It is SR-dependent hence track-dependent, which is what the
   equal-n truncation neutralises. This n is why p50 carries the comparison and p95 does not.
+  **The n each percentile was computed from is reported in the artefact**, not merely asserted: the
+  equal-n truncation must be verifiable off the table rather than taken on trust (`docs/adr/0003`).
 - **Three latency distributions, each REPORTED as p50/p95**, mapping to the three profile slices.
   A mean is never *reported* for any of them.
   1. **per-cycle** — the **headline**, compared at p50: full per-decision planning latency
@@ -273,6 +275,11 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   cross-track **latency** headline is calibration-method-invariant regardless (scale values do not
   change quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is a
   quality-retention measure reported per (track, precision, method).
+  **The label must survive into the persisted artefact, never stdout-only:** each single-method table
+  is method-scoped by filename and states its method in the table body, and a dedicated
+  `calibration_table.txt` carries both methods' SR side by side plus which method the headline was
+  rendered at. A rendered table that does not name its method is not a valid artefact
+  (`docs/adr/0002`).
 
 ---
 
@@ -366,6 +373,17 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
 - **FP8 delta:** FP8 (E4M3) built and benchmarked like INT8 on the L40S's native FP8 Tensor
   Cores, its speed/SR degradation quoted vs FP32, and its rows/points folded into the same
   headline recordings, tables, and plots as the other precisions.
+- **Component-precision isolation (diagnostic, both tracks, `entropy`).** Where a quantized precision
+  shows a material SR drop, the study must attribute it to the **encoder or the predictor**, not
+  merely report it: the SR eval is re-run with ONE component quantized and the other held at FP16,
+  two runs per affected (track, precision) cell. It is run at a **single calibration method
+  (`entropy`)**, method-matched to the headline row it explains, and covers **both tracks** — a
+  one-track isolation would argue the other track's innocence from absence of evidence.
+  **It is a diagnostic, not a fifth precision:** mixed pairings are never benchmarked for latency,
+  never entered in the headline ratio or the FP32→FP16→INT8→FP8 sweep, and never quoted as a
+  recommended configuration. Results are recorded under composite `enc-<A>+pred-<B>` keys that cannot
+  collide with a pure precision, so they are additive and the headline is unchanged by construction.
+  Rendered as its own table immediately after the FP32-relative table. (`docs/adr/0005`.)
 
 ---
 

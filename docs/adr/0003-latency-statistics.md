@@ -75,3 +75,30 @@ p50 carries the comparison and p95 does not.
   overhead the negative-overhead alarm cannot catch it.
 - **Open (owner):** whether to drop a per-cycle warm-up. It would shrink an already-small n and discard
   the only solve where all 50 episodes are alive.
+
+---
+
+## Amendment (2026-07-21) — report the n each percentile was computed from
+
+**Status:** Accepted
+
+The ruling above rests on n: p50 carries the comparison *because* n is 50–100, and the equal-n
+truncation exists *because* n is SR-dependent hence track-dependent. Neither is checkable from the
+rendered report — `_finalize_per_cycle` computes the common min-n, truncates, and discards the count.
+A reader of `speed_table.txt` cannot tell whether a p95 came off 66 samples or 98, nor verify that
+the two tracks were compared at equal n. The contract is asserted in prose and unfalsifiable from the
+artefact.
+
+**Decision:** the speed table gains an **`n` column** — the post-truncation per-cycle sample count
+each row's percentiles and mean were computed from.
+
+**The derivation is now confirmed by measurement.** The DINO component-isolation runs
+(`docs/adr/0005`, `entropy`, 2026-07-21) recorded n = 66, 83, 93, 98 at SR = 70, 42, 16, 4%. Those fit
+`n = 50 + alive_at_25` closely, with episodes terminating by t=25 tracking the eventual success count
+— e.g. 70% SR → 66 decisions (16 alive at the second solve), 4% SR → 98 (48 alive). The n model above
+is measured, not merely traced, and the SR-dependence it predicts is large: a 32-decision spread
+across one track's precisions.
+
+Because equal-n truncation takes the common minimum across tracks, the **highest-SR track sets n for
+every row at that precision** — so a single strong result shrinks the sample the tail is read from.
+That is another reason p95 carries no claim, and another reason the number belongs on the page.
