@@ -188,6 +188,12 @@ action-replace/proprio-carry, and host/Python glue).
 A **negative `overhead_ms` is surfaced loudly**, never clamped: it is a sign the call-count
 weighting or the isolated measurement is off.
 
+For that subtraction to mean anything, both sides must be measured under the same warm-up regime.
+The engine loops drop warm-up iters, so the per-cycle vector drops a warm-up head too (k = 1
+decision, at report time, disclosed in the table) — otherwise cold-start cost sits on one side of
+the subtraction only and is booked entirely as planner overhead, a one-sided bias the
+negative-overhead alarm cannot catch because it makes overhead *more* positive (ADR 0003).
+
 **Call counts are confirmed against the installed `CEMSolver.solve`, not assumed.** Tracing
 `solve → get_cost → rollout` in swm 0.1.1 (both `wm/prejepa/prejepa.py` and `wm/lewm/lewm.py`)
 shows the `candidates` tensor is `horizon`-long only, **not** `n_obs + horizon`. So the rollout

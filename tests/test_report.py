@@ -204,7 +204,8 @@ def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
 
 def test_speed_table_reports_equal_n(tmp_path):
     """ADR-0003 amendment: the n each percentile was computed from is ON the artefact, so the
-    equal-n truncation is verifiable rather than asserted. Truncation takes the common MINIMUM."""
+    equal-n truncation is verifiable rather than asserted. n is what SURVIVES both reductions —
+    the warm-up drop then the common MINIMUM across tracks."""
     bench = {
         "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
         "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
@@ -214,10 +215,11 @@ def test_speed_table_reports_equal_n(tmp_path):
         "dino": {"fp32": {"success_rate": 88.0, "per_cycle_latencies_ms": [100, 110, 120]}},
     }
     report.report(bench, tmp_path, sr_overrides=overrides)
-    assert bench["lewm"]["fp32"]["_per_cycle_n"] == 3  # min(5, 3), not lewm's own 5
+    # k=1 drop -> lewm 4, dino 2; equal-n min = 2 (not lewm's own 4)
+    assert bench["lewm"]["fp32"]["_per_cycle_n"] == 2
     text = report.render_speed_table(bench)
     assert "cyc_n" in text
-    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[4] == "3"
+    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[4] == "2"
 
 
 def test_method_invariant_precisions_join_across_methods(tmp_path):
@@ -286,7 +288,8 @@ def test_legacy_flat_sr_joins_only_under_max(tmp_path):
 
 def test_join_eval_fills_sr_and_equal_n_per_cycle(tmp_path):
     """The gated eval-shim join fills SR + per-cycle latency; per-cycle p50/p95 are taken after
-    truncating each track to the common min-n across tracks (equal-n, SPEC §Interface Contracts)."""
+    dropping the warm-up head and truncating each track to the common min-n across tracks
+    (equal-n, SPEC §Interface Contracts)."""
     bench = {
         "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
         "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
@@ -297,29 +300,106 @@ def test_join_eval_fills_sr_and_equal_n_per_cycle(tmp_path):
     }
     report.report(bench, tmp_path, sr_overrides=overrides)
     assert bench["lewm"]["fp32"]["success_rate"] == 90.0
-    # equal-n: both truncated to min n=3 -> lewm uses [10,11,12], p50 = 11
-    assert math.isclose(bench["lewm"]["fp32"]["per_cycle_p50_ms"], 11.0)
+    # warm-up drop k=1 -> lewm [11,12,13], dino [110,120]; equal-n min = 2 -> lewm [11,12]
+    assert math.isclose(bench["lewm"]["fp32"]["per_cycle_p50_ms"], 11.5)
     assert not math.isnan(bench["dino"]["fp32"]["per_cycle_p95_ms"])
-    # the decomposition mean comes off the SAME truncated sample as the reported percentiles
-    assert math.isclose(bench["lewm"]["fp32"]["per_cycle_mean_ms"], 11.0)  # mean(10,11,12)
-    assert math.isclose(bench["dino"]["fp32"]["per_cycle_mean_ms"], 110.0)
+    # the decomposition mean comes off the SAME reduced sample as the reported percentiles
+    assert math.isclose(bench["lewm"]["fp32"]["per_cycle_mean_ms"], 11.5)
+    assert math.isclose(bench["dino"]["fp32"]["per_cycle_mean_ms"], 115.0)
 
 
 def test_equal_n_truncation_is_temporal_not_smallest(tmp_path):
     """Equal-n truncation keeps the first n in TEMPORAL order (a representative subset), NOT the
-    n smallest — otherwise the upper tail is censored and p95 deflated (SPEC §Interface Contracts)."""
+    n smallest — otherwise the upper tail is censored and p95 deflated (SPEC §Interface Contracts).
+    The large sample sits at index 1 so it survives the k=1 warm-up drop: this pins the truncation
+    rule, not the warm-up rule."""
     bench = {
         "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
         "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
     }
     overrides = {
-        # lewm: a large latency arrives FIRST (temporal), then small ones; min-n across tracks = 3
-        "lewm": {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": [100.0, 1.0, 2.0, 3.0, 4.0]}},
-        "dino": {"fp32": {"success_rate": 88.0, "per_cycle_latencies_ms": [10.0, 11.0, 12.0]}},
+        "lewm": {"fp32": {"success_rate": 90.0,
+                          "per_cycle_latencies_ms": [5.0, 100.0, 1.0, 2.0, 3.0, 4.0]}},
+        "dino": {"fp32": {"success_rate": 88.0,
+                          "per_cycle_latencies_ms": [9.0, 10.0, 11.0, 12.0]}},
     }
     report.report(bench, tmp_path, sr_overrides=overrides)
-    # temporal first-3 = [100,1,2] -> p95 near 100; sorted()[:3] = [1,2,3] would give ~3
+    # post-drop lewm [100,1,2,3,4], dino [10,11,12]; n=3 -> temporal first-3 = [100,1,2] -> p95 ~100
+    # (sorted()[:3] = [1,2,3] would give ~3)
     assert bench["lewm"]["fp32"]["per_cycle_p95_ms"] > 50.0
+
+
+def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
+    """ADR-0003 amendment: the cold first decision is dropped BEFORE truncation, so it cannot bias
+    the mean the decomposition subtracts from — and the exclusion is disclosed (`drop×`), not
+    hidden. `warmup_drop=0` reproduces the old, biased view."""
+    def _b():
+        return {"lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)}}
+
+    # a 10x cold first decision, then a steady 10ms
+    lat = [100.0] + [10.0] * 9
+    overrides = {"lewm": {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": lat}}}
+
+    dropped = _b()
+    report.report(dropped, tmp_path / "drop", sr_overrides=overrides)
+    row = dropped["lewm"]["fp32"]
+    assert math.isclose(row["per_cycle_mean_ms"], 10.0)  # cold sample gone from the mean
+    assert row["_per_cycle_n"] == 9
+    assert row["_per_cycle_dropped_ms"] == [100.0]  # stashed, not discarded
+
+    kept = _b()
+    report.report(kept, tmp_path / "keep", sr_overrides=overrides, warmup_drop=0)
+    assert math.isclose(kept["lewm"]["fp32"]["per_cycle_mean_ms"], 19.0)  # 10x sample inflates it
+    assert kept["lewm"]["fp32"]["_per_cycle_n"] == 10
+
+    # the exclusion is ON the artefact: drop× = 100 / retained p50 (10) = 10.00
+    text = report.render_speed_table(dropped)
+    assert "drop×" in text
+    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[5] == "10.00"
+
+
+def test_warmup_drop_does_not_move_the_p50_headline(tmp_path):
+    """The drop exists for the MEAN-based decomposition. p50 is robust to one cold sample in n,
+    so the headline ratio is unmoved either way — which is why this is a defensible correction
+    rather than a result-changing one (ADR-0003 amendment)."""
+    lat = {"lewm": [900.0] + [10.0 + (i % 5) for i in range(60)],
+           "dino": [9000.0] + [100.0 + (i % 5) for i in range(60)]}
+    overrides = {
+        t: {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": v}} for t, v in lat.items()
+    }
+
+    def _ratio(k):
+        bench = {
+            "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
+            "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
+        }
+        report.report(bench, tmp_path / f"k{k}", sr_overrides=overrides, warmup_drop=k)
+        return report.per_cycle_ratio(bench, "fp32", "p50")
+
+    assert math.isclose(_ratio(0), _ratio(1))
+
+
+def test_report_never_rewrites_canonical_results(tmp_path):
+    """`src.report` renders VIEWS. The canonical artefacts — `results.<track>.json` (src.study) and
+    `sr.json` (src.sr_eval) — are read-only to it and must survive a render byte-for-byte, even when
+    out_dir IS the directory holding them (CLAUDE §8, SPEC §Headline-artifact durability)."""
+    import json
+
+    bench = _synthetic()
+    canonical = {}
+    for track in ("lewm", "dino"):
+        p = tmp_path / f"results.{track}.json"
+        p.write_text(json.dumps({"meta": {"track": track}, "bench": bench[track]}))
+        canonical[p] = p.read_bytes()
+    sr_path = tmp_path / "sr.json"
+    sr_path.write_text(json.dumps({"lewm": {"int8": {"max": {"success_rate": 76.0}}}}))
+    canonical[sr_path] = sr_path.read_bytes()
+
+    loaded = report.load_results(report._resolve_result_paths(tmp_path))
+    report.report(loaded, tmp_path, sr_overrides=json.loads(sr_path.read_text()), method="max")
+
+    for path, before in canonical.items():
+        assert path.read_bytes() == before, f"{path.name} was rewritten by a render"
 
 
 def test_nan_sr_is_skipped_not_crashed(tmp_path):

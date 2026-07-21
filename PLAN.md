@@ -454,6 +454,24 @@ statistic split → `docs/adr/0003`.
     percentiles and mean were computed from (`report._finalize_per_cycle`).
     → **landed (off-pod ✔):** `_finalize_per_cycle` stashes `_per_cycle_n`; `cyc_n` column.
     `::test_speed_table_reports_equal_n`.
+  - [x] 🔴 **Per-cycle warm-up drop `k=1`** (owner-approved 2026-07-21; `docs/adr/0003` amendment
+    closes the "Open (owner)" item). The engine loops drop `warmup` iters, the per-cycle callback
+    dropped none, so cold-start sat on one side of `overhead = cycle − enc − pred` only.
+    → **landed (off-pod ✔):** `interfaces.PER_CYCLE_WARMUP_DROP = 1`; applied in
+    `report._finalize_per_cycle(warmup_drop=)` **before** the equal-n truncation and at **report**
+    time (sr.json's raw vector untouched → ADR-0004 span-sum reconciliation still valid);
+    `src.report per_cycle_warmup=0` re-renders the undropped view. Excluded decisions stashed
+    (`_per_cycle_dropped_ms`) and DISCLOSED as the speed table's `drop×`.
+    `::test_per_cycle_warmup_drops_cold_decision_and_discloses_it`,
+    `::test_warmup_drop_does_not_move_the_p50_headline` (the p50 headline is unmoved — this
+    corrects the mean-based tables only).
+    → ⏳ **`k` is a principled default, not yet measured.** Run the head-vs-median check on
+    `sr.json`'s raw vectors (`latencies_ms[0]` and `[:5]` vs the median of the remainder, per track
+    per precision) to confirm `k=1` suffices; read `drop×` off the rendered table once real data is
+    joined.
+  - [x] **Canonical results never rewritten by a render** — `src.report` writes only `.txt`/`.png`;
+    `results.<track>.json` + `sr.json` are read-only to it even when `out_dir` holds them
+    (`src.study` also dumps BEFORE rendering). `::test_report_never_rewrites_canonical_results`.
   - [x] **Method-invariant SR join fixed (required by the `entropy` render):** `_select_method` gains
     a `precision` arg — fp32/fp16 fall back across method labels (they build data-free, so their SR
     cannot depend on a PTQ method), quantized + composite keys never do. Without it an `entropy`

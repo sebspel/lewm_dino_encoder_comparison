@@ -89,6 +89,17 @@ CEM_NUM_SAMPLES = 300  # candidate fan-out — the batch `predict` is timed at
 ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, batch 1)
 PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, batched over the candidates
 
+# Per-cycle warm-up: decisions dropped from the HEAD of each per-cycle latency vector before the
+# equal-n truncation (docs/adr/0003 amendment, owner-approved 2026-07-21). The engine-step loops
+# already drop `ExportConfig.warmup` iters; the per-cycle callback records from the first decision of
+# the first solve, so without this the cold first execute_v2 / kernel autotune / clock ramp sits in
+# the cycle mean and NOT in the component means — and `overhead = cycle − enc − pred` books all of it
+# as planner overhead, deflating `p` and the Amdahl ceiling. Applied at REPORT time, never at record
+# time: `sr.json` keeps the complete raw vector, so the ADR-0004 span-sum reconciliation still holds
+# and both views re-render off-pod. Costs 1 of ~50-100 samples; the p50 headline is unmoved either
+# way (median robustness) — this is for the mean-based decomposition.
+PER_CYCLE_WARMUP_DROP = 1
+
 # CEM action-proposal shape — the distribution `predict` is ACTUALLY driven by at eval, and
 # what the INT8 predictor calibration stream reproduces (SPEC §Interface Contracts —
 # calibration distribution). Read from the vendored configs + `CEMSolver` source, not assumed:

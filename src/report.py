@@ -64,6 +64,7 @@ from src.interfaces import (  # noqa: E402  — CEM per-cycle call counts (the d
     PREDICTOR_CALLS_PER_CYCLE as _PREDICTOR_CALLS,
     CALIBRATION_METHODS,
     DEFAULT_CALIBRATION_METHOD,
+    PER_CYCLE_WARMUP_DROP,
     QUANTIZED_PRECISIONS,
     check_calibration_method,
 )
@@ -115,10 +116,11 @@ def decompose(r: dict) -> dict:
     fraction; the Amdahl ceiling is `1/(1-p)`. When the cycle is not yet joined, the cycle-derived
     fields are None (the enc/pred model shares still stand).
 
-    KNOWN RESIDUAL (owner-recorded, unquantified until the pod run): the enc/pred loops drop
-    `warmup` iters but the per-cycle callback records from the first decision of the first solve,
-    so cold-start cost sits in the cycle mean and NOT in the component means — the difference is
-    booked as overhead. It inflates overhead, so the negative-overhead alarm cannot catch it.
+    The warm-up asymmetry that used to bias this — enc/pred loops dropping `warmup` iters while the
+    per-cycle callback recorded from the first decision of the first solve, so cold-start cost landed
+    in the cycle mean and was booked entirely as overhead — is closed by
+    `_finalize_per_cycle(warmup_drop=…)` (ADR-0003 amendment). The excluded decisions are disclosed
+    as the speed table's `drop×`, and `warmup_drop=0` reproduces the old, biased view.
     """
     enc_cyc = r["encode_mean_ms"] * _ENCODER_CALLS
     pred_cyc = r["predict_mean_ms"] * _PREDICTOR_CALLS
@@ -267,14 +269,18 @@ def _method_line(method: str) -> str:
     )
 
 
-def render_speed_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
+def render_speed_table(
+    bench: dict,
+    method: str = DEFAULT_CALIBRATION_METHOD,
+    warmup_drop: int = PER_CYCLE_WARMUP_DROP,
+) -> str:
     # All three latency distributions at p50/p95 (SPEC §Interface Contracts): per-cycle is the
     # HEADLINE (joined from the eval-shim; PEND until then) with **p50 the comparison basis** and
     # p95 the descriptive tail; enc/pred are the isolated engine-step components. SR is PEND
     # until the gated eval-shim pairs it. `cyc_n` is the post-truncation per-cycle sample count
     # those percentiles + the decomposition mean were computed from (ADR-0003 amendment).
     hdr = (
-        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} {'cyc_n':>6} "
+        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
         f"{'enc_p50':>8} {'enc_p95':>8} {'pred_p50':>9} {'pred_p95':>9} "
         f"{'mem_MB':>9} {'SR':>7}"
     )
@@ -283,6 +289,8 @@ def render_speed_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) ->
         "p95 = tail; enc/pred = engine step; PEND = gated eval-shim)",
         "  (cyc_n = equal-n truncated sample size — the common min across tracks at that "
         "precision; SR-dependent, hence why p50 carries the comparison)",
+        f"  (drop× = the {warmup_drop} dropped warm-up decision(s) ÷ the retained cyc_p50 — the "
+        "EXCLUSION disclosed, not hidden; ≈1 means the cold decision was unremarkable)",
         _method_line(method),
         hdr,
         "-" * len(hdr),
@@ -294,10 +302,15 @@ def render_speed_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) ->
                 continue
             sr = "PEND" if _missing(r["success_rate"]) else format(r["success_rate"], ".1f")
             n = r.get("_per_cycle_n")
+            # Worst dropped decision relative to the retained p50 — with the default k=1 that IS
+            # the cold decision; for k>1 the max is the conservative disclosure.
+            dropped = r.get("_per_cycle_dropped_ms") or []
+            p50 = r["per_cycle_p50_ms"]
+            drop_x = max(dropped) / p50 if dropped and not _missing(p50) and p50 else None
             lines.append(
                 f"{track:>6} {prec:>5} "
                 f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} {_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
-                f"{('—' if n is None else str(n)):>6} "
+                f"{('—' if n is None else str(n)):>6} {_fmt(drop_x, '.2f'):>7} "
                 f"{r['encode_p50_ms']:>8.3f} {r['encode_p95_ms']:>8.3f} "
                 f"{r['predict_p50_ms']:>9.3f} {r['predict_p95_ms']:>9.3f} "
                 f"{r['peak_mem_mb']:>9.1f} {sr:>7}"
@@ -661,27 +674,45 @@ def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
                 row["success_rate"] = val
 
 
-def _finalize_per_cycle(bench: dict) -> None:
+def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -> None:
     """Compute per-cycle p50/p95 **and the mean** on each row from its joined raw per-DECISION
-    latencies (one per alive episode per solve — `src.eval_latency`), AFTER truncating every
-    track to the common min-n across tracks per precision (equal-n, SPEC §Interface Contracts).
-    A single-track render truncates to that track's own n.
+    latencies (one per alive episode per solve — `src.eval_latency`), after dropping a warm-up head
+    and truncating every track to the common min-n across tracks per precision (equal-n, SPEC
+    §Interface Contracts). A single-track render truncates to that track's own n.
 
     p50/p95 are reported (p50 the comparison basis); the mean feeds `decompose` only. All three
     come off the SAME truncated sample, so the decomposition and the headline describe the same
     decisions.
 
-    The truncated `n` is STASHED on the row (`_per_cycle_n`) and rendered in the speed table: the
-    whole statistic ruling rests on n being 50-100 and SR-dependent (ADR-0003), and a reader must be
-    able to verify the equal-n truncation off the artefact rather than take it on trust. Note the
-    truncation takes the common MINIMUM, so the highest-SR track sets n for every row at that
-    precision — one more reason p95 carries no claim."""
+    **Warm-up (`warmup_drop`, default 1 decision — ADR-0003 amendment).** The engine-step loops drop
+    `ExportConfig.warmup` iters, but the per-cycle callback records from the first decision of the
+    first solve. Keeping the cold decision would put first-`execute_v2` / kernel-autotune / clock-ramp
+    cost in the cycle mean and NOT in the component means, so `overhead = cycle − enc − pred` would
+    book all of it as planner overhead — a one-sided bias the negative-overhead alarm structurally
+    cannot catch (it makes overhead *more* positive). Dropping restores the symmetry the subtraction
+    assumes. It is applied HERE, at report time, so `sr.json`'s raw vector stays complete (CLAUDE §8),
+    the ADR-0004 span-sum reconciliation still holds, and `warmup_drop=0` re-renders the undropped
+    view off-pod.
+
+    **Order matters: drop BEFORE truncating.** Truncation keeps the temporal head (`lat[:n]`), so
+    truncating first would preserve the cold decision by construction while discarding clean tail
+    samples.
+
+    The dropped values are STASHED (`_per_cycle_dropped_ms`) rather than discarded, so the speed
+    table can disclose how anomalous the excluded decision actually was (`drop×`) — the exclusion is
+    reported, not hidden. The truncated `n` is stashed too (`_per_cycle_n`): the whole statistic
+    ruling rests on n being 50-100 and SR-dependent, so a reader must be able to verify the equal-n
+    truncation off the artefact. Truncation takes the common MINIMUM, so the highest-SR track sets n
+    for every row at that precision — one more reason p95 carries no claim."""
     for prec in _PRECISIONS:
-        lat_by_track = {
+        raw_by_track = {
             t: bench[t][prec]["_per_cycle_latencies_ms"]
             for t in _TRACKS
             if prec in bench.get(t, {}) and bench[t][prec].get("_per_cycle_latencies_ms")
         }
+        # Drop the warm-up head first; a vector too short to survive it is left unreduced rather
+        # than reduced to nothing (only reachable with synthetic/degenerate data — real n is 50-100).
+        lat_by_track = {t: v[warmup_drop:] for t, v in raw_by_track.items() if len(v) > warmup_drop}
         if not lat_by_track:
             continue
         n = min(len(v) for v in lat_by_track.values())
@@ -694,6 +725,7 @@ def _finalize_per_cycle(bench: dict) -> None:
             bench[t][prec]["per_cycle_p95_ms"] = _percentile_ms(sample, 0.95)
             bench[t][prec]["per_cycle_mean_ms"] = fmean(sample)
             bench[t][prec]["_per_cycle_n"] = n
+            bench[t][prec]["_per_cycle_dropped_ms"] = raw_by_track[t][:warmup_drop]
 
 
 # --- durable results I/O (canonical per-track JSON <-> render) ------------------------
@@ -722,6 +754,7 @@ def report(
     wandb_run=None,
     sr_overrides: dict | None = None,
     method: str = DEFAULT_CALIBRATION_METHOD,
+    warmup_drop: int = PER_CYCLE_WARMUP_DROP,
 ) -> dict:
     """Emit all headline tables + plots to `out_dir`; optionally log to an open W&B run.
     Returns the artifact paths and the computed ratios for programmatic use.
@@ -735,14 +768,24 @@ def report(
     switching `method` re-renders the other without rebuilding. FP32/FP16 SR is method-invariant.
     The cross-track LATENCY headline does not depend on `method`.
 
+    `warmup_drop` (default 1) drops that many cold decisions from the head of each per-cycle vector
+    before the equal-n truncation, matching the engine loops' warm-up drop so the decomposition
+    subtracts like from like (ADR-0003 amendment). The exclusion is disclosed as the speed table's
+    `drop×`; `warmup_drop=0` re-renders the undropped view.
+
     The four single-method tables are written METHOD-SCOPED (`<name>.<method>.txt`) and name their
     method in the body, so the two methods' artefacts coexist on disk. Two further tables render
     only when their data exists: `calibration_table.txt` (both methods' SR side by side) and
-    `isolation_table.<method>.txt` (component-precision isolation, ADR-0005)."""
+    `isolation_table.<method>.txt` (component-precision isolation, ADR-0005).
+
+    **Writes only `.txt` and `.png` into `out_dir`.** The canonical inputs — `results.<track>.json`
+    (`src.study`) and `sr.json` (`src.sr_eval`) — are read-only here and are never rewritten, even
+    when `out_dir` is the directory holding them (CLAUDE §8; pinned by
+    `tests/test_report.py::test_report_never_rewrites_canonical_results`)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _join_eval(bench, sr_overrides, method)
-    _finalize_per_cycle(bench)
+    _finalize_per_cycle(bench, warmup_drop)
 
     missing_sr = _missing_sr_rows(bench)
     if missing_sr:
@@ -756,7 +799,7 @@ def report(
         f"Calibration method for int8/fp8 SR: {method} "
         "(fp32/fp16 method-invariant; latency headline method-invariant — SPEC §Parity)\n"
     )
-    speed_table = render_speed_table(bench, method)
+    speed_table = render_speed_table(bench, method, warmup_drop)
     fp32_table = render_fp32_relative_table(bench, method)
     component_table = render_component_table(bench, method)
     dilution_table = render_dilution_table(bench, method)
@@ -878,15 +921,19 @@ def main() -> None:
         uv run python -m src.report from=<dir|results.json>      # explicit source
         uv run python -m src.report from=<dir> sr=<sr.json> wandb=<eval overlay> out=<dir>
         uv run python -m src.report from=<dir> sr=<sr.json> calibration_method=entropy
+        uv run python -m src.report from=<dir> sr=<sr.json> per_cycle_warmup=0
 
     `calibration_method` (default `max`) selects which method's int8/fp8 SR to render from sr.json
     (which holds both); re-run with `=entropy` for the entropy view — same sr.json, no rebuild.
+    `per_cycle_warmup` (default 1) is the cold decisions dropped before the equal-n truncation;
+    `=0` reproduces the pre-ADR-0003-amendment view. Neither rewrites any canonical results file.
     """
     src = None
     out_dir = None
     sr_overrides = None
     wandb_experiment = None
     method = DEFAULT_CALIBRATION_METHOD
+    warmup_drop = PER_CYCLE_WARMUP_DROP
     for a in sys.argv[1:]:
         if a.startswith("from="):
             src = a.split("=", 1)[1]
@@ -896,6 +943,8 @@ def main() -> None:
             sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
         elif a.startswith("calibration_method="):
             method = check_calibration_method(a.split("=", 1)[1])
+        elif a.startswith("per_cycle_warmup="):
+            warmup_drop = int(a.split("=", 1)[1])
         elif a.startswith("wandb="):
             wandb_experiment = a.split("=", 1)[1]
     if src is None:
@@ -918,13 +967,20 @@ def main() -> None:
             wandb_experiment, name="phase5-report", config={"phase": "phase5-report"}
         )
     try:
-        report(bench, out_dir, wandb_run=run, sr_overrides=sr_overrides, method=method)
+        report(
+            bench,
+            out_dir,
+            wandb_run=run,
+            sr_overrides=sr_overrides,
+            method=method,
+            warmup_drop=warmup_drop,
+        )
     finally:
         if run is not None:
             run.finish()
     print(
-        f"[report] headline artifacts (method={method}) -> {out_dir}  "
-        f"(from {len(paths)} track file(s))"
+        f"[report] headline artifacts (method={method}, per_cycle_warmup={warmup_drop}) "
+        f"-> {out_dir}  (from {len(paths)} track file(s))"
     )
 
 

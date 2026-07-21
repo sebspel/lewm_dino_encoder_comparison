@@ -163,10 +163,14 @@ requirements those signatures must satisfy; it does not restate the signatures.
   iters dropped), so n is equal across tracks and the tail is not boundary-censored. encode-/
   predict-step ride isolated per-precision engine loops; per-cycle rides the observation-only
   per-decision latency callback over the SR eval-shim run, so **per-cycle latency and SR come
-  from the same solves**. Per-cycle samples are truncated to a common minimum n for an equal-n
-  comparison; the reported p50/p95 **and** the decomposition mean are taken off that *same*
-  truncated sample. A dedicated latency-only pass is **not** an alternative — it would break the
-  same-solves pairing.
+  from the same solves**. The per-cycle vector likewise **drops a warm-up head (k = 1 decision by
+  default) before truncation**, so the cycle and the engine steps are measured under the same
+  warm-up regime and `overhead = cycle − enc − pred` subtracts like from like; the drop is applied
+  at **report** time (the recorded vector stays complete) and the excluded decision is **disclosed**
+  in the speed table, never silently removed (`docs/adr/0003`). Per-cycle samples are then truncated
+  to a common minimum n for an equal-n comparison; the reported p50/p95 **and** the decomposition
+  mean are taken off that *same* reduced sample. A dedicated latency-only pass is **not** an
+  alternative — it would break the same-solves pairing.
 - **Peak memory is sampled from the driver/runtime** (`cudaMemGetInfo`/nvidia-smi), **not** the
   torch caching allocator, which would systematically undercount the optimized path.
 - **The per-component profile slices are mutually exclusive and additive, by subtraction from the

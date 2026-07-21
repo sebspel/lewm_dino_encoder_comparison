@@ -68,13 +68,15 @@ p50 carries the comparison and p95 does not.
   tail-based speedup. It is distinct from `dilution_disclosure`'s mean-based
   `measured_realized_speedup` — same shape, different question; separate tables, never conflated or
   averaged.
-- **Accepted residual (unquantified until the pod run):** the isolated engine loops drop warm-up iters
-  but the per-cycle callback records from the first decision of the first solve, so cold-start cost
-  sits in the cycle mean and **not** in the component means — the difference is booked as overhead.
-  Means are outlier-sensitive, so this bites harder than it would at p50, and because it *inflates*
-  overhead the negative-overhead alarm cannot catch it.
-- **Open (owner):** whether to drop a per-cycle warm-up. It would shrink an already-small n and discard
-  the only solve where all 50 episodes are alive.
+- ~~**Accepted residual (unquantified until the pod run):** the isolated engine loops drop warm-up
+  iters but the per-cycle callback records from the first decision of the first solve, so cold-start
+  cost sits in the cycle mean and **not** in the component means — the difference is booked as
+  overhead. Means are outlier-sensitive, so this bites harder than it would at p50, and because it
+  *inflates* overhead the negative-overhead alarm cannot catch it.~~
+  → **CLOSED** by the warm-up amendment below (2026-07-21).
+- ~~**Open (owner):** whether to drop a per-cycle warm-up. It would shrink an already-small n and
+  discard the only solve where all 50 episodes are alive.~~
+  → **RESOLVED** (owner, 2026-07-21): drop `k = 1`. The cost was mis-stated here — see the amendment.
 
 ---
 
@@ -102,3 +104,68 @@ across one track's precisions.
 Because equal-n truncation takes the common minimum across tracks, the **highest-SR track sets n for
 every row at that precision** — so a single strong result shrinks the sample the tail is read from.
 That is another reason p95 carries no claim, and another reason the number belongs on the page.
+
+---
+
+## Amendment (2026-07-21) — drop a per-cycle warm-up of k = 1 decision
+
+**Status:** Accepted (owner) · **Closes:** the "Open (owner)" item and the warm-up accepted residual
+
+### The defect is asymmetry, not cold start
+
+The engine-step loops drop `ExportConfig.warmup = 10` iters. The per-cycle callback drops nothing —
+the vendored eval's warm-up pass is gated on `compile`, which is `false`, so `SolveLatencyRecorder`
+records from the **first decision of the first solve**, including the first `execute_v2`, kernel
+autotune, allocator growth, and clock ramp from idle.
+
+Including cold start is not itself dishonest. The problem is that the report **subtracts one from the
+other**: `overhead = cycle − enc·2 − pred·150` is only meaningful if both sides were measured under
+the same warm-up regime. As it stood, the entire cold-start cost was booked as *planner overhead*,
+which deflates `p` and lowers the Amdahl ceiling — i.e. it made quantization look **less** useful
+than it is, in the study built to measure exactly that. And because it inflates overhead, the
+negative-overhead alarm can never fire on it.
+
+Two further points, neither previously recorded:
+
+- **The bias is probably not symmetric across tracks.** DINO's execution contexts are ~11 GB
+  (`src/sr_eval.py`'s teardown note — three precisions OOM'd without explicit collection); LeWM's
+  ViT-Tiny contexts are trivial. So DINO's cold decision is plausibly far more expensive. The
+  dilution table is a *reconciliation*, so a per-track-asymmetric bias there reads as an Amdahl-model
+  failure rather than a measurement artefact.
+- **Equal-n truncation actively preserved the cold sample.** `lat[:n]` keeps the temporal head, so
+  truncating DINO's 66 samples to LeWM's 51 discarded 15 clean tail samples and kept the cold one.
+
+### The cost was mis-stated
+
+The original open item said a warm-up drop "would discard the only solve where all 50 episodes are
+alive". That describes dropping the first **solve** — 50 of ~66 samples, correctly unacceptable.
+Dropping the first **k decisions** costs 1 of ~66. The per-decision unit is homogeneous across solves
+(ADR 0004: solve 1's decisions are the same unit, just fewer of them), so there is no reason the
+drop must align to a solve boundary. The surgical option was never as expensive as this ADR implied.
+
+### Decision
+
+**`PER_CYCLE_WARMUP_DROP = 1`** (`src/interfaces.py`), applied in `report._finalize_per_cycle`.
+
+- **At report time, never at record time.** `sr.json` keeps the complete raw vector, so nothing
+  measured is destroyed (CLAUDE §8), the ADR-0004 span-sum reconciliation still holds against the
+  untouched record, and `per_cycle_warmup=0` re-renders the undropped view off-pod with no re-run.
+- **Before the equal-n truncation**, or truncation would preserve the cold decision by construction.
+- **Disclosed, not hidden:** the dropped values are stashed and rendered as the speed table's
+  `drop×` (worst dropped decision ÷ retained `cyc_p50`). A `drop×` near 1 says the cold decision was
+  unremarkable and the correction was moot; a large one says it mattered. Either way the reader sees
+  what was excluded, which pre-empts the obvious challenge that the warm-up was tuned until the
+  numbers looked good.
+
+### Consequences
+
+- **The p50 headline does not move.** A median over n = 50-100 is robust to one head sample; pinned
+  by `tests/test_report.py::test_warmup_drop_does_not_move_the_p50_headline`. This is a correction to
+  the **mean**-based decomposition and dilution tables, not a result-changing intervention — which is
+  what makes it defensible to apply after the data was collected.
+- p95 does move (a cold sample sits near the 3rd-4th largest at n=66). p95 carries no claim.
+- `k = 1` is the minimum defensible value and the default. Whether cold cost decays across several
+  decisions is empirical — `sr.json` already holds the raw vectors, so comparing `latencies_ms[0]`
+  (and `[:5]`) against the median of the remainder sets `k` from data. **That check has not yet been
+  run**; until it is, `k = 1` is a principled default, not a measured one.
+- `decompose`'s KNOWN-RESIDUAL note is retired; the residual is closed rather than accepted.
