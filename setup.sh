@@ -98,7 +98,9 @@ uv pip install \
 #    The old check only imported modelopt and asserted torch's CUDA — it passed even with a
 #    cu13 onnxruntime-gpu, which then failed cudnnCreate at INT8-export time. Opening a CUDA-EP
 #    session here (mirroring modelopt's own preload_dlls) makes a CUDA-major mismatch fail
-#    provisioning LOUDLY instead of silently later. Needs the pod GPU (this is a pod bootstrap).
+#    provisioning LOUDLY instead of silently later. The CUDA-EP session runs only when a GPU is
+#    present (torch.cuda.is_available()); on CPU pods it is skipped -- ORT would otherwise fall
+#    back to the CPU provider and mask the check as a misleading pass.
 uv run python - <<'PY'
 import numpy as np, onnx, onnxruntime as ort
 import torch, tensorrt, modelopt
@@ -110,18 +112,23 @@ print("modelopt", modelopt.__version__)
 print("onnxruntime-gpu", ort.__version__, "| providers", ort.get_available_providers())
 assert torch.version.cuda and torch.version.cuda.startswith("12."), torch.version.cuda
 assert "CUDAExecutionProvider" in ort.get_available_providers(), "onnxruntime-gpu has no CUDA EP"
-# modelopt loads the CUDA/cuDNN DLLs from the nvidia wheels this way; mirror it so the check
-# sees the same libraries the real INT8 quantization will.
-if hasattr(ort, "preload_dlls"):
-    ort.preload_dlls()
-g = helper.make_graph([helper.make_node("Relu", ["x"], ["y"])], "g",
-    [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4])],
-    [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])])
-onnx.save(helper.make_model(g, opset_imports=[helper.make_opsetid("", 19)]), "/tmp/_ort_cuda_check.onnx")
-ort.InferenceSession("/tmp/_ort_cuda_check.onnx",
-                     providers=[("CUDAExecutionProvider", {"device_id": 0})]).run(
-    None, {"x": np.ones((1, 4), np.float32)})
-print("onnxruntime CUDA EP: OK (cuDNN initialized on the CUDA-12 stack)")
+# The CUDA-EP session below is GPU-only; skip it on CPU pods, where ORT would silently fall
+# back to the CPU provider and report a misleading pass.
+if torch.cuda.is_available():
+    # modelopt loads the CUDA/cuDNN DLLs from the nvidia wheels this way; mirror it so the check
+    # sees the same libraries the real INT8 quantization will.
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+    g = helper.make_graph([helper.make_node("Relu", ["x"], ["y"])], "g",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1, 4])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1, 4])])
+    onnx.save(helper.make_model(g, opset_imports=[helper.make_opsetid("", 19)]), "/tmp/_ort_cuda_check.onnx")
+    ort.InferenceSession("/tmp/_ort_cuda_check.onnx",
+                         providers=[("CUDAExecutionProvider", {"device_id": 0})]).run(
+        None, {"x": np.ones((1, 4), np.float32)})
+    print("onnxruntime CUDA EP: OK (cuDNN initialized on the CUDA-12 stack)")
+else:
+    print("no GPU (torch.cuda.is_available() == False) -- skipping CUDA-EP session check (CPU pod)")
 PY
 
 # 5) secrets: HF_TOKEN must be in the runtime env for gated DINOv3 downloads
