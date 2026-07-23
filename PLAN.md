@@ -372,7 +372,7 @@ statistic split → `docs/adr/0003`.
   → verify (off-pod ✔): `pytest` green; export imports (TRT/modelopt lazy). TRT build is
   pod-only 🔴.
 
-- [ ] 🔴 **Calibration method as a labelled build option — DINO INT8/FP8 SR collapse**
+- [x] 🔴 **Calibration method as a labelled build option — DINO INT8/FP8 SR collapse**
   (`docs/adr/0002` amendment). Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% /
   INT8 ~76%. The ADR-0002 distribution fix recovered LeWM (action stressor, in-engine) but not DINO
   (outlier-heavy frozen-DINOv3 activations; `max` per-tensor amax saturates them). `entropy`
@@ -397,24 +397,24 @@ statistic split → `docs/adr/0003`.
     shared with `study.engine_paths`), so a second method's engines are additive on the volume;
     `study`/`sr_eval` load by method (fp32/fp16 untagged/method-invariant; `method=max` falls back to the
     legacy untagged plan so pre-tagging engines aren't orphaned). `tests/{test_sr_eval,test_study,test_report}.py`.
-  - [ ] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
+  - [x] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
     `calibration_method=entropy`, re-run `src.sr_eval +experiment=eval_<lewm|dino> precision=int8` →
     new `entropy`-labelled SR points beside the existing `max` ones.
     → verify: DINO-`entropy` INT8 moves off the ~20% floor; LeWM-`entropy` vs LeWM-`max` ~76% decides
     LeWM's headline method. Neither recovers DINO → per-tensor 8-bit loss inherent; report DINO 8-bit
     degraded vs FP32.
-  - [ ] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
+  - [x] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
     keep the existing `max`-labelled INT8/FP8 rows intact.
 
-- [ ] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/adr/0005`).
+- [x] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/adr/0005`).
   Attributes each material 8-bit SR drop to the encoder or the predictor. Diagnostic: composite
   `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected (track, precision) cell.
-  - [ ] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
+  - [x] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
     diagnostic explains: `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_<lewm|dino> precision=int8,fp8 calibration_method=entropy`.
     → verify: `sr.json` carries `{track}.{int8,fp8}.entropy`; a render at
     `calibration_method=entropy` shows no PEND in the int8/fp8 SR column.
-  - [ ] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
+  - [x] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
     model=lewm precision=<int8|fp8> calibration_method=entropy`.
     → verify: `engines/lewm/{encoder,predictor}.<p>.entropy.plan` exist; quantized ONNX carries
     QuantizeLinear.
@@ -422,7 +422,7 @@ statistic split → `docs/adr/0003`.
     → enc-fp16+pred-fp8 70.0 · enc-fp16+pred-int8 42.0 · enc-int8+pred-fp16 16.0 ·
     enc-fp8+pred-fp16 4.0 (FP16 baseline ~70). Encoder-dominant; predictor FP8-clean,
     INT8-sensitive. Recorded in `sr.json` under composite keys.
-  - [ ] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
+  - [x] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_lewm encoder_precision=int8 predictor_precision=fp16
     calibration_method=entropy` and the reverse. FP8 only if LeWM FP8 also drops.
     → verify: composite keys land beside the pure points; pure SRs unchanged. ADR-0002 predicts
@@ -478,28 +478,28 @@ statistic split → `docs/adr/0003`.
     render left fp32/fp16 SR-PENDING and NaN'd every FP32-relative ΔSR purely from a label.
     `::test_method_invariant_precisions_join_across_methods`.
 
-- [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
+- [x] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
   → verify: quantized ONNX carries QuantizeLinear (E4M3); FP8 engine builds; **FP8 tactics are
   actually selected** (verbose build / layer inspection), not a silent FP16 no-op.
 
-- [ ] 🖥️🔴 **Precision-match gate — FP8 rows:** `uv run python -m src.precision_match
+- [x] 🖥️🔴 **Precision-match gate — FP8 rows:** `uv run python -m src.precision_match
   track=<lewm|dino>` gains FP8 drift rows vs the PyTorch reference (nominal + off-nominal hist
   `T ∈ {1,2}`). No coded pass/fail — owner sign-off on the drift table. **Not the arbiter**
   (nominal inputs; SR is — SPEC §Requirements).
 
-- [ ] 🖥️ **SR-per-precision — FP8:** `uv run python -m src.sr_eval --config-dir conf
+- [x] 🖥️ **SR-per-precision — FP8:** `uv run python -m src.sr_eval --config-dir conf
   +experiment=eval_<lewm|dino> precision=fp8`, both tracks. Writes the `fp8` key into the
   per-track `sr.json` (read-modify-write → no clobber, CLAUDE.md §8).
   → verify: FP8 SR recorded per track, paired with its per-cycle latencies (same solves).
 
-- [ ] 🖥️ **Per-component benchmark — FP8:** `src/benchmark.py` times the FP8 encode-step +
+- [x] 🖥️ **Per-component benchmark — FP8:** `src/benchmark.py` times the FP8 encode-step +
   predictor-step distributions (equal-n p50/p95, warm-up dropped) + peak mem; `src/report.py
   ::decompose` derives the FP8 encoder/predictor/overhead split from the FP8 engine-step means ×
   the CEM call counts. `src/gpu_clocks.py` brackets the FP8 runs.
   → verify: FP8 per-component + peak-mem rows populated; negative overhead surfaced loudly.
 
-- [ ] **FP8 in the headline artifacts (tables + plots):** the FP32→FP16→INT8→FP8 speed table (all
+- [x] **FP8 in the headline artifacts (tables + plots):** the FP32→FP16→INT8→FP8 speed table (all
   three distributions at p50 **and** p95), the FP32-relative table (p50 speedup + ΔSR per row),
   the Amdahl dilution table (model-only vs realized at FP8), and the speed-vs-SR plot all gain the
   FP8 row/point; the canonical per-track `results.<track>.json` records the FP8 numbers + fairness
