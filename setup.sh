@@ -73,6 +73,14 @@ uv pip install \
   --extra-index-url https://pypi.org/simple/ \
   "onnxruntime-gpu${ONNXRUNTIME_GPU_VERSION:+==${ONNXRUNTIME_GPU_VERSION}}"
 
+#    setuptools -- modelopt 0.43.0 requires setuptools>=80, but the cu124 torch index below
+#    caps setuptools at <=78.1.0, and uv's default first-index strategy would resolve setuptools
+#    ONLY from that index (never PyPI, where >=80 lives), making modelopt unsatisfiable. Pre-pin
+#    setuptools>=80 from PyPI (no extra indexes) so the requirement is already satisfied before
+#    modelopt resolves -- same "pre-satisfy modelopt's dep first" pattern as the onnxruntime-gpu
+#    pin above; keeps first-index discipline intact instead of relaxing it with unsafe-best-match.
+uv pip install "setuptools>=80"
+
 #    Model Optimizer -- torch pinned to the installed cu124 build so modelopt cannot upgrade
 #    torch into the cu13 stack (0.45+ requires torch 2.13 = cu13); that turns a bad modelopt
 #    pin into a loud dependency conflict here instead of a silent cu124->cu13 torch swap. NO
