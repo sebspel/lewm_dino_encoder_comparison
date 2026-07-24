@@ -520,6 +520,67 @@ component on **both** tracks.
 
 ---
 
+## Phase 7 — Clock-state confound: disclosure & bound (off-pod)  🔴 normalization + framing · 🟢 render
+
+Off-pod: reads the saved `results.{lewm,dino}.json` + `gpu_logs/*.dmon.log` — no L40S. Discloses and
+bounds the differential-throttle confound; canonical artifacts untouched, normalized numbers additive
+and labelled `derived`. (SPEC §Execution Environment, §Parity, §Requirements "Clock-state confound
+disclosure", §Implementation Boundaries.)
+
+- [x] 🔴 **Lock-denial recorded (Execution Environment).** `nvidia-smi -lgc` denied on the L40S pod
+  (root, persistence mode on) → clocks unlockable; recorded in SPEC §Execution Environment. A
+  clock-locked re-run is deferred (future work).
+  → verify: SPEC §Execution Environment states the denial; no pod phase attempts a clock lock.
+
+- [ ] 🔴 **OWNER GATE — normalization construction + headline framing.** Owner fixes (a) the scaling
+  model (`T_ref = T × f_measured/f_ref`), reference clock `f_ref`, the per-run clock statistic feeding
+  `f_measured` (e.g. util-conditioned median SM clock), and which time is clock-bound; and (b) whether
+  the headline stays the measured stock-hardware ratio (with disclosure) or is reframed. CLAUDE builds
+  the render only after sign-off.
+  → verify: owner sign-off on the formula + `f_ref` + statistic + framing recorded **before** any
+  `*_normalized.derived.*` is written.
+
+- [ ] 🟢 **Throttle diagnostic.** `src/clock_norm.py` parses `gpu_logs/*.dmon.log` → per-run telemetry
+  summary (SM/mem clock, power, temp, util medians + util-conditioned clock) and a differential-throttle
+  plot (LeWM vs DINO, per precision) → `$STABLEWM_HOME/reports/phase5/gpu_logs/*_clock_diag.png`.
+  → verify: plot renders from the saved `dmon` logs; the summary shows the lighter track at the boost
+  ceiling and the heavier track throttled below it.
+
+- [ ] 🟢 **Harvest → `derived_clocks.json`.** `src/clock_norm.py` writes the owner-set per-run clock
+  statistic + power per (track, precision, {sr_eval, benchmark}) to
+  `$STABLEWM_HOME/reports/phase5/derived_clocks.json`. Read-only over `gpu_logs/`; `results.*.json`
+  untouched.
+  → verify: round-trips; one entry per (track, precision, run-type); values match the diagnostic.
+
+- [ ] 🟢 **Apply normalization → three surfaces.** `src/clock_norm.py` applies the owner-set formula to
+  the canonical latencies (`results.*.json` via `report.load_results` + `derived_clocks.json`):
+  (a) cross-model per-cycle ratio `R` and normalized `R′`; (b) within-model FP32→FP16→INT8→FP8 deltas
+  at a common clock; (c) overhead recomputed with component-loop and cycle latencies at a matched clock.
+  Written as `*_normalized.derived.txt`, never overwriting `results.*.json` or the `.entropy.txt` tables.
+  → verify: `R′ ≤ R` (bound brackets); canonical artifacts byte-unchanged (extend
+  `test_report_never_rewrites_canonical_results`); each derived table names itself `derived` + the
+  `f_ref`/statistic used.
+
+- [ ] 🟢 **Disclosure (`RESULTS.md`) + persist.** Limitations write-up: clocks unlockable (attempt +
+  denial), the differential throttle (one-sided on the heavier track), the cross-model ratio's
+  clock-normalized bound, the within-model spread caveat, the pod-conditional-under-virtualization
+  caveat; embeds the throttle plot + the normalized-bound tables; states the owner-set framing.
+  Persisted to `$STABLEWM_HOME/reports/phase5/`; throttle plot committed to `reports/figs/`
+  (display-only exception).
+  → verify: disclosure names the confound, the bound, and the framing; measured numbers remain the
+  headline; normalized clearly labelled `derived`; artifact on the volume (not git-only).
+
+- [ ] 🟢 **W&B (additive).** `src/wandb_log.py` logs the derived tables + throttle plot +
+  `derived_clocks.json` to the same project — never the sole copy.
+  → verify: logged; volume copy canonical.
+
+**Verify:** owner sign-off on the normalization construction + framing recorded; `derived_clocks.json`
++ `*_normalized.derived.*` written additively with `results.*.json` / `.entropy.txt` untouched; the
+`R`/`R′` bound reported on all three surfaces; `RESULTS.md` discloses the confound + the bound + the
+framing; throttle plot committed to `reports/figs/`; all logged to W&B.
+
+---
+
 ## Critical files
 
 - `src/interfaces.py` — typed contract; dim constants + CEM per-cycle call counts.
@@ -531,6 +592,9 @@ component on **both** tracks.
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
 - `src/gpu_clocks.py` — passive `nvidia-smi dmon` GPU-telemetry observer →
   `$STABLEWM_HOME/reports/phase5/gpu_logs/`.
+- `src/clock_norm.py` — Phase-7 clock-confound render (off-pod): harvests per-run clock stats from
+  `gpu_logs/`, applies the owner-set normalization, writes `derived_clocks.json` +
+  `*_normalized.derived.*` + `RESULTS.md`; reads canonical results via `report.load_results`.
 - `src/eval_latency.py` — observation-only **per-decision** latency callback (one record per
   episode's decision, NOT per solve — `docs/architecture.md` §8).
 - `src/eval.py` — Phase-3 eval driver over the byte-unmodified `eval_wm.run`.
@@ -568,3 +632,6 @@ component on **both** tracks.
    tables (Phase 5).
 6. `src.export` builds FP8 engines on the L40S; FP8 rows appear in the SR/latency/peak-mem
    recordings, tables, and plots, quoted vs FP32 like the other precisions (Phase 6).
+7. `src.clock_norm` renders the clock-normalized derived tables + `RESULTS.md` off-pod from the
+   saved results + `gpu_logs/`; the confound is disclosed and bounded, canonical artifacts untouched
+   (Phase 7).
