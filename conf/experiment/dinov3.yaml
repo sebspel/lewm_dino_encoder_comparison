@@ -26,7 +26,7 @@ wandb:
   enabled: true
   config:
     entity: null
-    project: lewm-dino-encoder-comparison
+    project: worldmodel-inference-optimisation
 # Training hyperparameters: 10 epochs (reduced from DINO-WM paper's 100 for speed),
 # batch_size 128 (matches LeWM; note this removes the paper's per-track asymmetry).
 # batch_size is a top-level key in prejepa.yaml.

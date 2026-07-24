@@ -10,7 +10,7 @@ wandb:
   enabled: true
   config:
     entity: null
-    project: lewm-dino-encoder-comparison
+    project: worldmodel-inference-optimisation
 # LeWM paper training hyperparameters: 10 epochs, batch size 128. (Vendored lewm.yaml
 # default is max_epochs=100; batch_size is already 128 — pinned here so the setup is
 # explicit.) Keys: trainer.max_epochs, loader.batch_size.

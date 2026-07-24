@@ -1,2 +1,2 @@
-# lewm_dino_encoder_comparison
+# worldmodel-inference-optimisation
 Comparing encoders of JEPA (LeWM) vs DINOv3.

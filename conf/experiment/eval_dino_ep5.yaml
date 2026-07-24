@@ -34,4 +34,4 @@ wandb:
   enabled: true
   config:
     entity: null
-    project: lewm-dino-encoder-comparison
+    project: worldmodel-inference-optimisation
