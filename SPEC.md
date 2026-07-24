@@ -365,6 +365,12 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     **off-pod** from the saved results, which is how the separately-gated SR-per-precision is
     joined in without re-running the L40S benchmark. A single-track render omits the two
     cross-track ratio plots, which need both tracks.
+    - **Committed display copy (`reports/figs/`).** A small curated set of the rendered headline
+      plots (PNG) is checked into the repo under `reports/figs/`. This is the **one exception to the
+      never-in-git rule for artifacts** — and it holds only because these figures are a
+      **regenerable, display-only view**, never the canonical artifact: the durable per-track
+      results, tables, and full plot set stay on the network volume under `$STABLEWM_HOME/reports/`.
+      The committed copy is refreshed by re-copying from a render, never hand-edited.
   - **Dilution disclosure (Amdahl).** Because only encoder+predictor are quantized and the Python
     overhead is precision-invariant, the per-precision wall-clock delta is capped by the model's
     share of the cycle. The study reports, per model: the FP32 baseline per-component time shares
