@@ -149,7 +149,7 @@ def precision_match_track(
             predict_inputs=opt_predict,
             engine_dir=engine_dir / precision,
             calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
-            # PTQ method (`max` | `entropy`, a build option for both tracks — ADR-0002), so the
+            # PTQ method (`max` | `entropy`, a build option for both tracks — architecture.md §7), so the
             # drift table the owner signs off is measured on the engine SR-eval will build with the
             # same method. Drift IS method-dependent (different scales), so this run is labelled.
             calibration_method=calibration_method,

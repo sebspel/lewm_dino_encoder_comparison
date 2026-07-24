@@ -177,7 +177,7 @@ def test_tables_persisted_to_disk(tmp_path):
 
 
 def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
-    """SPEC §Parity / ADR-0002 3rd amendment: the method must survive into the PERSISTED artefact,
+    """SPEC §Parity / architecture.md §7: the method must survive into the PERSISTED artefact,
     and rendering the other method must not clobber the first. Both are load-bearing — the SR and
     the per-cycle sample it was measured on are method-sourced."""
     overrides = {"lewm": {"int8": {"max": {"success_rate": 76.0},
@@ -203,7 +203,7 @@ def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
 
 
 def test_speed_table_reports_equal_n(tmp_path):
-    """ADR-0003 amendment: the n each percentile was computed from is ON the artefact, so the
+    """architecture.md §8: the n each percentile was computed from is ON the artefact, so the
     equal-n truncation is verifiable rather than asserted. n is what SURVIVES both reductions —
     the warm-up drop then the common MINIMUM across tracks."""
     bench = {
@@ -251,7 +251,7 @@ def test_sr_pending_flagged_and_join(tmp_path):
 def test_method_labelled_sr_join_selects_and_coexists(tmp_path):
     """The gated eval-shim sr.json holds int8 SR under BOTH methods
     (`{track:{precision:{method:SR}}}`); `report(method=…)` selects one for a like-for-like render,
-    and the other stays available (SPEC §Parity, ADR-0002). fp32 stays method-invariant."""
+    and the other stays available (SPEC §Parity, architecture.md §7). fp32 stays method-invariant."""
     overrides = {
         "lewm": {
             "fp32": {"max": {"success_rate": 90.0}},
@@ -330,7 +330,7 @@ def test_equal_n_truncation_is_temporal_not_smallest(tmp_path):
 
 
 def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
-    """ADR-0003 amendment: the cold first decision is dropped BEFORE truncation, so it cannot bias
+    """architecture.md §8: the cold first decision is dropped BEFORE truncation, so it cannot bias
     the mean the decomposition subtracts from — and the exclusion is disclosed (`drop×`), not
     hidden. `warmup_drop=0` reproduces the old, biased view."""
     def _b():
@@ -361,7 +361,7 @@ def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
 def test_warmup_drop_does_not_move_the_p50_headline(tmp_path):
     """The drop exists for the MEAN-based decomposition. p50 is robust to one cold sample in n,
     so the headline ratio is unmoved either way — which is why this is a defensible correction
-    rather than a result-changing one (ADR-0003 amendment)."""
+    rather than a result-changing one (architecture.md §8)."""
     lat = {"lewm": [900.0] + [10.0 + (i % 5) for i in range(60)],
            "dino": [9000.0] + [100.0 + (i % 5) for i in range(60)]}
     overrides = {
@@ -436,7 +436,7 @@ def test_load_results_merges_per_track(tmp_path):
 
 
 def test_calibration_table_shows_both_methods(tmp_path):
-    """ADR-0002 3rd amendment: the ONE table spanning methods. int8/fp8 only (fp32/fp16 are
+    """architecture.md §7: the ONE table spanning methods. int8/fp8 only (fp32/fp16 are
     method-invariant), PEND where a method was never built, and a `headline` column naming which
     method the single-method tables were rendered at."""
     overrides = {
@@ -469,7 +469,7 @@ def test_calibration_table_absent_without_quantized_sr(tmp_path):
 
 
 def test_isolation_table_attributes_component(tmp_path):
-    """ADR-0005: the mixed-precision diagnostic attributes a measured SR drop to encoder or
+    """architecture.md §9: the mixed-precision diagnostic attributes a measured SR drop to encoder or
     predictor. ΔSR is quoted vs the track's FP16 row (the held component's precision), NOT FP32."""
     bench = {
         "dino": {
@@ -495,7 +495,7 @@ def test_isolation_table_attributes_component(tmp_path):
 
 def test_isolation_keys_never_reach_the_headline(tmp_path):
     """The composite keys are diagnostics: they must leave every headline artefact byte-identical
-    (ADR-0005 — a mixed pairing is never a fifth precision)."""
+    (architecture.md §9 — a mixed pairing is never a fifth precision)."""
     overrides = {"dino": {"fp16": {"entropy": {"success_rate": 70.0}}}}
     with_iso = {
         "dino": {**overrides["dino"], "enc-fp16+pred-int8": {"entropy": {"success_rate": 42.0}}}

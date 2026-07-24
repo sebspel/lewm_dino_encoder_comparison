@@ -3,7 +3,7 @@
 The source of truth for **what** this project must satisfy. `PLAN.md` carries the ordered
 execution steps and progress; `CLAUDE.md` holds behavioral rules; `src/interfaces.py` is the
 typed contract in code for the owned export/benchmark layer. Design rationale that runs
-longer than a couple of sentences lives in `docs/architecture.md` and `docs/adr/`.
+longer than a couple of sentences lives in `docs/architecture.md`.
 
 ---
 
@@ -77,7 +77,7 @@ Layering rationale: `docs/architecture.md` §1.
 - Runtime secrets/env (`WANDB_API_KEY`, `HF_TOKEN`, `STABLEWM_HOME`) are passed at runtime.
 
 The pinned dependency set (CUDA-12 export stack, TensorRT/modelopt out of uv) and the reasons for
-those pins are recorded in `docs/adr/0001-cuda12-export-stack.md`; the executable form is
+those pins are recorded in `docs/architecture.md` §6; the executable form is
 `pyproject.toml` + `setup.sh`. Concrete run commands live in `PLAN.md`.
 
 ### W&B logging discipline
@@ -120,12 +120,12 @@ requirements those signatures must satisfy; it does not restate the signatures.
   var_scale`, zero mean, **unclamped**) and rolls `predict` autoregressively so it consumes its
   own predicted latents; it is reproduced in the builder, never harvested from a live CEM/eval
   run. **INT8's calibration health is judged by SR, not by the drift table.**
-  (Full derivation, the two failure axes, and accepted residuals: `docs/adr/0002`.)
+  (Full derivation, the two failure axes, and accepted residuals: `docs/architecture.md` §7.)
 - **FP8 draws the identical calibration *streams* as INT8** (format-independent — the same
   encoder/predictor clips) and reuses whichever calibration *method* the engine was built with, so
   the INT8→FP8 step isolates the format. The **calibration method (`max` | `entropy`) is a build
   option available to both tracks** and a **labelled dimension of every quantized result**
-  (`docs/adr/0002`); the FP8 path computes the INT8 scales with that method, then converts them to
+  (`docs/architecture.md` §7); the FP8 path computes the INT8 scales with that method, then converts them to
   E4M3, so the choice carries over unchanged. Calibration health is likewise judged by SR, not the
   drift table.
 
@@ -136,7 +136,7 @@ requirements those signatures must satisfy; it does not restate the signatures.
   measure**, reported p50/p95 and **compared at p50**. There is no fixed-wall-clock rollout-count
   run.
 - **Three statistics, three jobs — never substituted for one another** (owner ruling, 2026-07-15;
-  `docs/adr/0003`): **p50** is the comparison basis (headline ratio, FP32-relative speedup);
+  `docs/architecture.md` §8): **p50** is the comparison basis (headline ratio, FP32-relative speedup);
   **p95** is the reported tail and carries no claim; **mean** is the decomposition basis **only**
   and is never a reported headline.
 - **A "cycle" is ONE episode's decision, not the span of one `CEMSolver.solve` call.** A solve
@@ -145,12 +145,12 @@ requirements those signatures must satisfy; it does not restate the signatures.
   closing at `end_solve`) and **never `reset → end_solve`**. Bracketing per solve while weighting
   by per-decision call counts inflates `overhead_ms` silently and would make the headline scale
   with how many episodes are alive — SR-dependent, therefore track-dependent: a parity break.
-  (`docs/adr/0004`.)
+  (`docs/architecture.md` §8.)
 - **Per-cycle n is 50–100 per track per precision, not thousands** — establish this before
   reading any per-cycle percentile. It is SR-dependent hence track-dependent, which is what the
   equal-n truncation neutralises. This n is why p50 carries the comparison and p95 does not.
   **The n each percentile was computed from is reported in the artefact**, not merely asserted: the
-  equal-n truncation must be verifiable off the table rather than taken on trust (`docs/adr/0003`).
+  equal-n truncation must be verifiable off the table rather than taken on trust (`docs/architecture.md` §8).
 - **Three latency distributions, each REPORTED as p50/p95**, mapping to the three profile slices.
   A mean is never *reported* for any of them.
   1. **per-cycle** — the **headline**, compared at p50: full per-decision planning latency
@@ -167,7 +167,7 @@ requirements those signatures must satisfy; it does not restate the signatures.
   default) before truncation**, so the cycle and the engine steps are measured under the same
   warm-up regime and `overhead = cycle − enc − pred` subtracts like from like; the drop is applied
   at **report** time (the recorded vector stays complete) and the excluded decision is **disclosed**
-  in the speed table, never silently removed (`docs/adr/0003`). Per-cycle samples are then truncated
+  in the speed table, never silently removed (`docs/architecture.md` §8). Per-cycle samples are then truncated
   to a common minimum n for an equal-n comparison; the reported p50/p95 **and** the decomposition
   mean are taken off that *same* reduced sample. A dedicated latency-only pass is **not** an
   alternative — it would break the same-solves pairing.
@@ -182,7 +182,7 @@ requirements those signatures must satisfy; it does not restate the signatures.
   remainder is `overhead_ms = cycle − encoder − predictor` — the un-optimizable floor (CEM
   sampling/topk/mean-var, the criterion, the 384→404 assembly, per-step action-replace/
   proprio-carry, and host/Python glue). A negative `overhead_ms` is **surfaced loudly** — never
-  clamped. (`docs/architecture.md` §6, `docs/adr/0003`.)
+  clamped. (`docs/architecture.md` §6, `docs/architecture.md` §8.)
 
 ### Adapter, rollout & shim
 
@@ -269,7 +269,7 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
 - **FP8 rides the identical parity conditions as the other precisions** — same CEM config, seeds,
   normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone,
   **at a fixed calibration method** (held constant across INT8 and FP8 for any labelled comparison —
-  `docs/adr/0002`).
+  `docs/architecture.md` §7).
 - **Calibration method (`max` | `entropy`) is a build option for both tracks, surfaced as a report
   label — not a hidden per-track setting.** Every quantized result records its method in
   `results.<track>.json`, so `max`- and `entropy`-calibrated points coexist and cross-track
@@ -283,7 +283,7 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   is method-scoped by filename and states its method in the table body, and a dedicated
   `calibration_table.txt` carries both methods' SR side by side plus which method the headline was
   rendered at. A rendered table that does not name its method is not a valid artefact
-  (`docs/adr/0002`).
+  (`docs/architecture.md` §7).
 
 ---
 
@@ -344,7 +344,7 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
   the traced `HS`). It is measured on **nominal, dataset-drawn inputs**, so it does **not**
   exercise the unbounded CEM action proposal that drives INT8 saturation — **INT8's calibration
-  health is judged by SR, not by the drift table** (`docs/adr/0002`).
+  health is judged by SR, not by the drift table** (`docs/architecture.md` §7).
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8 and FP8
   (FP32→FP16→INT8→FP8), benchmarked on the L40S as three equal-n p50/p95 latency distributions
   (**per-cycle headline**, encode-step + predictor-step components), plus peak GPU memory **and SR
@@ -373,7 +373,7 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     *realized* speedup (measured FP32-vs-precision per-cycle ratio), whose gap is the overhead
     floor and should match `1/((1−p) + p/s)`. **This whole block is mean-based**, `p` included, so
     it is a **different number** from the reported p50 FP32-relative speedup — rendered in separate
-    tables, never conflated or averaged. (`docs/architecture.md` §7, `docs/adr/0003`.)
+    tables, never conflated or averaged. (`docs/architecture.md` §7, `docs/architecture.md` §8.)
 - **FP8 delta:** FP8 (E4M3) built and benchmarked like INT8 on the L40S's native FP8 Tensor
   Cores, its speed/SR degradation quoted vs FP32, and its rows/points folded into the same
   headline recordings, tables, and plots as the other precisions.
@@ -387,7 +387,7 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   never entered in the headline ratio or the FP32→FP16→INT8→FP8 sweep, and never quoted as a
   recommended configuration. Results are recorded under composite `enc-<A>+pred-<B>` keys that cannot
   collide with a pure precision, so they are additive and the headline is unchanged by construction.
-  Rendered as its own table immediately after the FP32-relative table. (`docs/adr/0005`.)
+  Rendered as its own table immediately after the FP32-relative table. (`docs/architecture.md` §9.)
 
 ---
 

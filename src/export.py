@@ -228,7 +228,7 @@ def precision_match(reference: Tensor, engine_out: Tensor) -> dict:
 # attention MatMuls fully quantized (the real QK^T/scores ranges are unpolluted — the mask is added
 # AFTER the score MatMul). The pass is self-targeting (edits only tensors carrying the sentinel), so
 # it is a NO-OP on LeWM's graph — parity preserved, both tracks stay fully quantized.
-# docs/adr/0002 (amendment 2026-07-19, option B). OWNER-approved graph edit before PTQ.
+# architecture.md §7. OWNER-approved graph edit before PTQ.
 _MASK_SENTINEL_THRESHOLD = 1e30  # |x| >= this ⇒ the -3.4e38 mask sentinel, never a real activation
 _MASK_FILL = -3.0e4  # softmax-equivalent to -inf; within FP16 range (<65504) + FP32 histogram edge
 
@@ -330,7 +330,7 @@ def quantize_onnx(
 
     # Neutralize DINO's -3.4e38 attention mask sentinel before calibration (no-op on LeWM). Both
     # calibration methods otherwise choke on it: `entropy` overflows the histogram, `max` collapses
-    # the scale. See `_neutralize_attention_mask_sentinel` / docs/adr/0002 (option B).
+    # the scale. See `_neutralize_attention_mask_sentinel` / architecture.md §7.
     onnx_path = _neutralize_attention_mask_sentinel(onnx_path)
 
     # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
@@ -445,7 +445,7 @@ def engine_filename(
     """Engine-plan filename for one `component` (`encoder` | `predictor`). Quantized precisions
     (int8/fp8) are TAGGED with the PTQ calibration method so `int8` @ `max` and `int8` @ `entropy`
     engines coexist on the volume without overwriting each other (the SR they yield differs —
-    docs/adr/0002); FP32/FP16 carry no scales and are method-invariant, so they stay untagged.
+    architecture.md §7); FP32/FP16 carry no scales and are method-invariant, so they stay untagged.
     Single source of truth for the convention, shared by the writer (`export`) and the loader
     (`study.engine_paths`)."""
     if precision in QUANTIZED_PRECISIONS:
@@ -521,7 +521,7 @@ def export(
                 # never collide in the same engine dir (each is a separately quantized ONNX —
                 # SPEC §Export shape); mirrors the method-tagged .plan below.
                 engine_dir / f"{name}.{precision}.{calibration_method}.onnx",
-                # Per-track method (max for LeWM, entropy for DINO — owner-set, ADR-0002); the
+                # Per-track method (max for LeWM, entropy for DINO — owner-set, architecture.md §7); the
                 # same for this track's int8 and fp8 so only the format differs.
                 calibration_method=calibration_method,
                 calibration_shapes=shapes,
@@ -537,7 +537,7 @@ def export(
             onnx_path,
             precision,
             # Method-tagged for int8/fp8 (untagged for fp32/fp16), so a second calibration
-            # method's engines are additive and never overwrite the first's (docs/adr/0002).
+            # method's engines are additive and never overwrite the first's (architecture.md §7).
             engine_dir / engine_filename(name, precision, calibration_method),
             inputs,
         )

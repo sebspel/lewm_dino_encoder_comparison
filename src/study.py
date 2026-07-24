@@ -140,7 +140,7 @@ def dump_track_results(
             "seed": cfg.seed,
             "obs_shape": list(cfg.obs_shape),
             # The int8/fp8 PTQ method this run's engines were built with (a build option for both
-            # tracks — docs/adr/0002). Latency is method-invariant, so this is provenance, not a
+            # tracks — architecture.md §7). Latency is method-invariant, so this is provenance, not a
             # cross-track parity condition; the method-dependent SR is labelled in sr.json.
             "calibration_method": calibration_method,
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),

@@ -21,11 +21,11 @@ Precision = Literal["fp32", "fp16", "int8", "fp8"]
 QUANTIZED_PRECISIONS: tuple[str, ...] = ("int8", "fp8")
 
 # PTQ calibration method — a BUILD OPTION available to BOTH tracks (`max` | `entropy`), not a
-# hidden per-track setting (docs/adr/0002 amendment, 2026-07-19). `max` (ORT MinMax + symmetric)
+# hidden per-track setting (architecture.md §7). `max` (ORT MinMax + symmetric)
 # sets each per-tensor scale to the largest abs activation seen — zero outlier rejection; `entropy`
 # (ORT Entropy) picks a KL-optimal threshold that clips the outlier tail. The ONNX int8/fp8 flow
 # supports exactly these two. Which one wins is an SR question, MEASURED per (track, precision,
-# method) — NOT asserted per track: LeWM's action signal (widened by ADR-0002) may prefer `max`;
+# method) — NOT asserted per track: LeWM's action signal (widened by architecture.md §7) may prefer `max`;
 # DINO's outlier-heavy frozen-DINOv3 activations may prefer `entropy`'s tail-clip. Held CONSTANT
 # across a track's INT8 and FP8 within a labelled comparison so the INT8->FP8 step isolates the
 # format (SPEC §Parity). Surfaced as a report LABEL (results.<track>.json meta + method-scoped
@@ -90,12 +90,12 @@ ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, ba
 PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, batched over the candidates
 
 # Per-cycle warm-up: decisions dropped from the HEAD of each per-cycle latency vector before the
-# equal-n truncation (docs/adr/0003 amendment, owner-approved 2026-07-21). The engine-step loops
+# equal-n truncation (architecture.md §8). The engine-step loops
 # already drop `ExportConfig.warmup` iters; the per-cycle callback records from the first decision of
 # the first solve, so without this the cold first execute_v2 / kernel autotune / clock ramp sits in
 # the cycle mean and NOT in the component means — and `overhead = cycle − enc − pred` books all of it
 # as planner overhead, deflating `p` and the Amdahl ceiling. Applied at REPORT time, never at record
-# time: `sr.json` keeps the complete raw vector, so the ADR-0004 span-sum reconciliation still holds
+# time: `sr.json` keeps the complete raw vector, so the architecture.md §8 span-sum reconciliation still holds
 # and both views re-render off-pod. Costs 1 of ~50-100 samples; the p50 headline is unmoved either
 # way (median robustness) — this is for the mean-based decomposition.
 PER_CYCLE_WARMUP_DROP = 1

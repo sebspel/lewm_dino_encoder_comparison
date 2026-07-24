@@ -38,7 +38,7 @@ def test_engine_paths_convention(tmp_path):
 
 def test_engine_paths_quantized_are_method_tagged(tmp_path):
     """int8/fp8 plans are TAGGED with the calibration method so max/entropy engines coexist without
-    overwriting (docs/adr/0002); the loader selects by method."""
+    overwriting (architecture.md §7); the loader selects by method."""
     mx = study.engine_paths("dino", "int8", engine_root=tmp_path, method="max")
     assert mx["encoder"] == tmp_path / "dino" / "encoder.int8.max.plan"
 
@@ -106,13 +106,13 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
     meta = json.loads(path.read_text())["meta"]
     assert meta["num_samples"] == study.CEM_NUM_SAMPLES
     assert meta["n_latency_iters"] == 2
-    # PTQ calibration method label — a build option for both tracks (ADR-0002), default `max`
+    # PTQ calibration method label — a build option for both tracks (architecture.md §7), default `max`
     assert meta["calibration_method"] == "max"
 
 
 def test_check_calibration_method_validates():
     """Calibration method is a build option for BOTH tracks (`max` | `entropy`); an unknown value
-    fails loudly rather than mislabelling an artefact or crashing deep in modelopt (ADR-0002)."""
+    fails loudly rather than mislabelling an artefact or crashing deep in modelopt (architecture.md §7)."""
     import pytest
 
     from src.interfaces import check_calibration_method

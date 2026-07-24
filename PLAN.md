@@ -1,7 +1,7 @@
 # PLAN.md — LeWM vs DINOv3-WM: Inference Optimization Study
 
 > Execution steps only. **What** the project must satisfy → `SPEC.md`. **Why** a design is
-> shaped this way → `docs/architecture.md` + `docs/adr/`. Behavioral rules → `CLAUDE.md`.
+> shaped this way → `docs/architecture.md`. Behavioral rules → `CLAUDE.md`.
 > Typed contract → `src/interfaces.py`.
 > Every completed step records `[x]` + artifact name (commit hash added by the owner).
 > Tick a box before the next step.
@@ -22,7 +22,7 @@ Boundaries). 🖥️ runs on the L40S GPU. ⏱️ capped effort with a stated fa
 - [x] `pyproject.toml` + `uv.lock` pinning: `stable-worldmodel`, `stable-pretraining`,
   `hydra-core`, `wandb`, `jaxtyping`, `beartype`, `onnx`, `transformers`, `timm`,
   **torch (cu124 wheel index)** — all uv-managed. **TensorRT NOT in uv**
-  (installed by `setup.sh`). Versions pinned. → `docs/adr/0001`
+  (installed by `setup.sh`). Versions pinned. → `docs/architecture.md` §6
 - [x] `setup.sh` — pod bootstrap, idempotent: installs **uv**, runs `uv sync`, then installs
   **TensorRT (cu12, CUDA-12.4)** outside the lock. Secrets from the pod's runtime env.
 - [x] Skeleton dirs: `conf/` (Hydra), `tests/` (pytest).
@@ -97,7 +97,7 @@ Valid pre- or post-training; also satisfies the §2 slot-in "import + one forwar
   `conf/experiment/` `wandb:` block. Reused by Phases 5–6.
 - [x] Owned **observation-only CEM latency callback** `src/eval_latency.py` (+
   `tests/test_eval_latency.py`) — `CEMSolver.Callback` subclass injected via `cfg.solver.callbacks`.
-  → **Bracket superseded in Phase 5** (`docs/adr/0004`); this box records Phase 3 as shipped.
+  → **Bracket superseded in Phase 5** (`docs/architecture.md` §8); this box records Phase 3 as shipped.
 - [x] Owned **eval driver** `src/eval.py` — opens the W&B run, invokes byte-unmodified
   `eval_wm.run`, captures `World.evaluate`'s metrics, logs SR + latency.
 - [x] Owned **eval overlays** `conf/experiment/eval_{lewm,dino}.yaml` (`@package _global_`): set
@@ -140,7 +140,7 @@ violation raises at both the `encode` and `predict` boundaries.
 ## Phase 5 — Speedup study: export, profile & latency benchmark  🔴 OWNER-heavy · 🖥️ ⏱️
 
 Owner makes the silent-failure calls; Claude owns plumbing. Methodology → SPEC §Interface
-Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0004`.
+Contracts; statistic split → `docs/architecture.md` §8; cycle definition → `docs/architecture.md` §8.
 
 - [x] 🟢 **Checkpoint → adapter loader** — materialize each checkpoint via the platform
   `load_pretrained` (reuse the Phase-3 load path), wrap in `LeWM`/`DINOWMAdapter`.
@@ -167,7 +167,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
 - [x] 🔴 **INT8 explicit quantization (Model Optimizer PTQ):** base FP32 ONNX →
   `modelopt.onnx.quantization` (Q/DQ + per-tensor scales) → quantized ONNX per method →
   `build_engine` (no `int8_calibrator`, no calibration profile). Sequenced **before** the
-  precision-match gate. → `docs/adr/0001`
+  precision-match gate. → `docs/architecture.md` §6
   → `setup.sh` installs `nvidia-modelopt[onnx]` + CUDA-12 `onnxruntime-gpu` (out of uv) and
   sanity-opens an ORT CUDA-EP session. Pins: `modelopt==0.43.0`, `onnxruntime-gpu==1.24.4`.
   → `src/calibrate.py`: clip draw + per-method streams kept; `make_calibrator` →
@@ -175,7 +175,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   → `src/export.py`: `quantize_onnx` (`calibration_method="max"`, `use_external_data_format=True`);
   `build_engine` calibrator/profile branch dropped. `interfaces.py` re-documents `calib_loader`.
   → **calibration EP split:** encoder on CUDA EP, predictor on CPU EP
-  (`quantize_onnx(force_cpu_calibration=name=="predictor")`) — `docs/adr/0001`.
+  (`quantize_onnx(force_cpu_calibration=name=="predictor")`) — `docs/architecture.md` §6.
   → verify (off-pod ✔): `pytest` green. 🔴 owner-confirm on pod: non-`max` modelopt knobs left at
   INT8 defaults; keeping the TRT INT8 flag for a Q/DQ graph; `onnx` lock harmonization (modelopt
   caps 1.19.1 vs locked 1.22.0).
@@ -183,7 +183,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   EP, predictor binds CPU EP.
 
 - [x] 🔴🖥️ **Calibration-distribution fix — INT8 SR collapse** (reopens the INT8 box above).
-  Observed: lewm FP32 94% / FP16 96% / **INT8 48%**. Diagnosis + decision → `docs/adr/0002`.
+  Observed: lewm FP32 94% / FP16 96% / **INT8 48%**. Diagnosis + decision → `docs/architecture.md` §7.
   - [x] `src/interfaces.py` — `CEM_VAR_SCALE=1.0`, `CEM_HORIZON=5`, `EVAL_N_OBS=1` beside
     `CEM_NUM_SAMPLES`. 🔴 confirm vs source on pod.
   - [x] `src/calibrate.py::predictor_batches` — `_sample_cem_actions` (`randn * CEM_VAR_SCALE`,
@@ -235,13 +235,13 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   **Call counts confirmed against source (2026-07-15):** 180 (unconfirmed guess) → **150**
   (`((5−1)+1)×30`); `ENCODER_CALLS_PER_CYCLE=2` unaffected. `test_profile.py` removed, covered by
   `tests/test_report.py`.
-  → **statistic fixed to the MEAN** (`docs/adr/0003`): `decompose` + `dilution_disclosure` read
+  → **statistic fixed to the MEAN** (`docs/architecture.md` §8): `decompose` + `dilution_disclosure` read
   `*_mean_ms`; `BenchResult` carries `per_cycle_mean_ms`/`encode_mean_ms`/`predict_mean_ms`;
   `report._finalize_per_cycle` computes the cycle mean off the same truncated sample as p50/p95.
   `tests/test_report.py::test_decompose_uses_mean_not_p50`.
-  → 🔴 open: whether to drop a per-cycle warm-up (`docs/adr/0003`, accepted residual).
+  → 🔴 open: whether to drop a per-cycle warm-up (`docs/architecture.md` §8, accepted residual).
 
-- [x] 🔴 **Per-decision latency bracket** (`docs/adr/0004`).
+- [x] 🔴 **Per-decision latency bracket** (`docs/architecture.md` §8).
   - [x] `src/eval_latency.py` — bracket **per env** via consecutive `start_batch` hooks (last
     closing at `end_solve`), one record per decision, sync per span; `current_bs == 1` guard;
     `n_solves` → `n_cycles`. Consumers `src/eval.py` + `src/sr_eval.py` updated (W&B
@@ -300,7 +300,7 @@ Contracts; statistic split → `docs/adr/0003`; cycle definition → `docs/adr/0
   → **statistic ruling landed (pod-run pending):** `per_cycle_ratio` defaults to **p50**;
   `plot_per_cycle_ratio` + W&B `headline/per_cycle_p50_ratio_*` follow it. `render_speed_table`
   renders all three distributions at p50 **and** p95 (the encode/predict p95s previously reached no
-  table). `docs/adr/0003`.
+  table). `docs/architecture.md` §8.
   → **`fp32_relative` wired in (was dead code):** now quoted at **p50**, `base` guarded with
   `.get`, rendered as `fp32_relative_table.txt` (speedup + ΔSR in one row). Distinct from
   `dilution_disclosure`'s mean-based `measured_realized_speedup`. `tests/test_report.py` asserts
@@ -341,7 +341,7 @@ INT8 on the L40S's native FP8 Tensor Cores (Ada 4th-gen / Transformer Engine) �
 hardware change. Owner sets the silent-failure quant config; Claude owns the wiring. It extends
 the Phase-5 sweep to FP32→FP16→INT8→FP8, so every Phase-5 recording, table, and plot gains the
 FP8 rows/points, reported vs FP32 like the others. Methodology → SPEC §Interface Contracts;
-statistic split → `docs/adr/0003`.
+statistic split → `docs/architecture.md` §8.
 
 - [x] 🟢 **Precision plumbing:** `Precision` literal + `ExportConfig.precisions` gain `fp8`
   (`src/interfaces.py`). Audit `src/report.py`, `src/study.py`, `src/benchmark.py`,
@@ -361,7 +361,7 @@ statistic split → `docs/adr/0003`.
   `BuilderFlag.FP8` + `BuilderFlag.FP16` (heavy layers FP8, remainder FP16, mirroring INT8+FP16);
   the `precision == "int8"` gates in `export`/`main` generalize to the quantized set
   `{int8, fp8}`. Calibration streams (`src/calibrate.py`) reused unchanged (format-independent).
-  → `docs/adr/0001`
+  → `docs/architecture.md` §6
   → **landed:** `quantize_onnx(quant_mode=)` threads `quantize_mode` to modelopt ONLY for the
   non-default format (the owner-signed-off INT8 call stays byte-identical); `build_engine` `fp8`
   branch (`BuilderFlag.FP8`+FP16); quantized-ONNX filename per precision
@@ -373,14 +373,14 @@ statistic split → `docs/adr/0003`.
   pod-only 🔴.
 
 - [x] 🔴 **Calibration method as a labelled build option — DINO INT8/FP8 SR collapse**
-  (`docs/adr/0002` amendment). Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% /
-  INT8 ~76%. The ADR-0002 distribution fix recovered LeWM (action stressor, in-engine) but not DINO
+  (`docs/architecture.md` §7). Observed: DINO FP32/FP16 ~70% / **INT8 ~20% / FP8 2%**; LeWM ~98% /
+  INT8 ~76%. The architecture.md §7 distribution fix recovered LeWM (action stressor, in-engine) but not DINO
   (outlier-heavy frozen-DINOv3 activations; `max` per-tensor amax saturates them). `entropy`
   (tail-clip) is the candidate lever — which method wins per track is an SR question, measured.
   - [x] 🔴 **Decision recorded** — calibration method (`max` | `entropy`) is a build option for
     **both** tracks and a **labelled result dimension** (track × precision × method); held constant
     across INT8+FP8 within a labelled comparison; existing `max` artefacts preserved (additive, never
-    rewritten). → `docs/adr/0002`, SPEC §Parity + §Interface Contracts (Export shape).
+    rewritten). → `docs/architecture.md` §7, SPEC §Parity + §Interface Contracts (Export shape).
   - [x] 🟢 **Plumb `calibration_method` (`max` | `entropy`)** as a build option in `src.export` and a
     label recorded in `results.<track>.json` (`src.study::dump_track_results`); a new method's runs
     are additive — do **not** overwrite existing `max`-labelled points (CLAUDE §8).
@@ -406,7 +406,7 @@ statistic split → `docs/adr/0003`.
   - [x] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
     keep the existing `max`-labelled INT8/FP8 rows intact.
 
-- [x] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/adr/0005`).
+- [x] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/architecture.md` §9).
   Attributes each material 8-bit SR drop to the encoder or the predictor. Diagnostic: composite
   `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected (track, precision) cell.
   - [x] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
@@ -425,7 +425,7 @@ statistic split → `docs/adr/0003`.
   - [x] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_lewm encoder_precision=int8 predictor_precision=fp16
     calibration_method=entropy` and the reverse. FP8 only if LeWM FP8 also drops.
-    → verify: composite keys land beside the pure points; pure SRs unchanged. ADR-0002 predicts
+    → verify: composite keys land beside the pure points; pure SRs unchanged. architecture.md §7 predicts
     **predictor**-dominant damage (Design A puts `action_encoder` inside the predict engine) — a
     contrary result reopens that mechanism.
   - [x] 🟢 **Isolation table** in `src/report.py`, rendered from the composite `sr.json` keys and
@@ -437,7 +437,7 @@ statistic split → `docs/adr/0003`.
     `::test_isolation_keys_never_reach_the_headline` (headline `.txt` byte-identical with and
     without composite keys). `pytest` 93 passed.
 
-- [x] 🟢 **Report labelling + provenance** (`docs/adr/0002` 3rd amendment, `docs/adr/0003` amendment).
+- [x] 🟢 **Report labelling + provenance** (`docs/architecture.md` §7, `docs/architecture.md` §8).
   - [x] **Method-scoped headline tables:** the four single-method tables written as
     `<name>.<method>.txt`, each carrying a `calibration_method = <m>` line in the table body.
     → **landed (off-pod ✔):** `_method_line` + `render_*(bench, method)` (method optional, defaults
@@ -454,12 +454,12 @@ statistic split → `docs/adr/0003`.
     percentiles and mean were computed from (`report._finalize_per_cycle`).
     → **landed (off-pod ✔):** `_finalize_per_cycle` stashes `_per_cycle_n`; `cyc_n` column.
     `::test_speed_table_reports_equal_n`.
-  - [x] 🔴 **Per-cycle warm-up drop `k=1`** (owner-approved 2026-07-21; `docs/adr/0003` amendment
+  - [x] 🔴 **Per-cycle warm-up drop `k=1`** (owner-approved 2026-07-21; `docs/architecture.md` §8
     closes the "Open (owner)" item). The engine loops drop `warmup` iters, the per-cycle callback
     dropped none, so cold-start sat on one side of `overhead = cycle − enc − pred` only.
     → **landed (off-pod ✔):** `interfaces.PER_CYCLE_WARMUP_DROP = 1`; applied in
     `report._finalize_per_cycle(warmup_drop=)` **before** the equal-n truncation and at **report**
-    time (sr.json's raw vector untouched → ADR-0004 span-sum reconciliation still valid);
+    time (sr.json's raw vector untouched → architecture.md §8 span-sum reconciliation still valid);
     `src.report per_cycle_warmup=0` re-renders the undropped view. Excluded decisions stashed
     (`_per_cycle_dropped_ms`) and DISCLOSED as the speed table's `drop×`.
     `::test_per_cycle_warmup_drops_cold_decision_and_discloses_it`,
@@ -530,7 +530,7 @@ component on **both** tracks.
 - `src/gpu_clocks.py` — passive `nvidia-smi dmon` GPU-telemetry observer →
   `$STABLEWM_HOME/reports/phase5/gpu_logs/`.
 - `src/eval_latency.py` — observation-only **per-decision** latency callback (one record per
-  episode's decision, NOT per solve — `docs/adr/0004`).
+  episode's decision, NOT per solve — `docs/architecture.md` §8).
 - `src/eval.py` — Phase-3 eval driver over the byte-unmodified `eval_wm.run`.
 - `src/dino_patch.py` — `DINOv3PreJEPA` register-slice subclass.
 - `conf/` — owned Hydra overlays (`{lewm,dinov3}.yaml` train; `eval_{lewm,dino}.yaml` eval).
@@ -541,7 +541,7 @@ component on **both** tracks.
 - `scripts/verify_encode.py` — Phase-2 encode sanity (owned, fails loud).
 - `pyproject.toml`, `uv.lock`, `setup.sh`. `Dockerfile` + `docker-compose.yml` at project end.
 - `tests/` — pytest for the owned boundaries.
-- `SPEC.md` (contract) · `docs/architecture.md` + `docs/adr/` (rationale) · `docs/platform_api.md`
+- `SPEC.md` (contract) · `docs/architecture.md` (rationale) · `docs/platform_api.md`
   (Phase-1 findings).
 
 ## Cross-cutting rules

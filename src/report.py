@@ -11,9 +11,9 @@ Consumes the benchmark results (per track × precision) and emits the headline o
     engine-step times × CEM call counts minus the measured per-cycle time (overhead by
     subtraction, SPEC §Interface Contracts)
   - **calibration-method comparison** (`max` vs `entropy` SR side by side) — the ONE table that
-    spans methods, so the two labelled points coexist on the page (ADR-0002)
+    spans methods, so the two labelled points coexist on the page (architecture.md §7)
   - **component-precision isolation** — which component's quantization caused a measured SR drop,
-    read off the mixed-precision diagnostic runs (ADR-0005)
+    read off the mixed-precision diagnostic runs (architecture.md §9)
 
 **Which statistic goes where** (SPEC §Interface Contracts — do not mix these):
   - **p50** — the COMPARISON basis: the LeWM-vs-DINOv3 headline ratio and the FP32-relative
@@ -38,7 +38,7 @@ durability). Logging to an open W&B run is optional and **additive, never the so
 
 The four single-method tables are **method-scoped by filename** (`<name>.<method>.txt`) and state
 their calibration method in the table body, so rendering the other method neither clobbers them nor
-leaves an unlabelled artefact behind (SPEC §Parity, ADR-0002 3rd amendment). The calibration table
+leaves an unlabelled artefact behind (SPEC §Parity, architecture.md §7). The calibration table
 is NOT method-scoped — it spans both methods by construction; only its `headline` marker moves.
 
 Input shape: ``bench[track][precision] -> BenchResult`` (missing entries are skipped).
@@ -78,10 +78,10 @@ _METHOD_INVARIANT_PRECISIONS = tuple(p for p in _PRECISIONS if p not in QUANTIZE
 # Composite precision label written by the mixed-precision component-isolation runs
 # (`src.sr_eval encoder_precision=/predictor_precision=`): `enc-<A>+pred-<B>`. Deliberately NOT in
 # `_PRECISIONS`, so these diagnostic points reach no headline table, plot, or ratio — they are read
-# ONLY by the isolation table (ADR-0005).
+# ONLY by the isolation table (architecture.md §9).
 _ISOLATION_KEY = re.compile(r"^enc-([a-z0-9]+)\+pred-([a-z0-9]+)$")
 # The component held at FP16 while the other is quantized. FP16 is lossless on these checkpoints
-# (ADR-0002), so it is the right "undamaged" reference for an isolation run.
+# (architecture.md §7), so it is the right "undamaged" reference for an isolation run.
 _ISOLATION_HELD = "fp16"
 
 
@@ -119,7 +119,7 @@ def decompose(r: dict) -> dict:
     The warm-up asymmetry that used to bias this — enc/pred loops dropping `warmup` iters while the
     per-cycle callback recorded from the first decision of the first solve, so cold-start cost landed
     in the cycle mean and was booked entirely as overhead — is closed by
-    `_finalize_per_cycle(warmup_drop=…)` (ADR-0003 amendment). The excluded decisions are disclosed
+    `_finalize_per_cycle(warmup_drop=…)` (architecture.md §8). The excluded decisions are disclosed
     as the speed table's `drop×`, and `warmup_drop=0` reproduces the old, biased view.
     """
     enc_cyc = r["encode_mean_ms"] * _ENCODER_CALLS
@@ -260,7 +260,7 @@ def _method_line(method: str) -> str:
     """The calibration-method label, carried INSIDE every single-method table body.
 
     SPEC §Parity: the label must survive into the persisted artefact, never stdout-only — a
-    rendered table that does not name its method is not a valid artefact (ADR-0002 3rd amendment).
+    rendered table that does not name its method is not a valid artefact (architecture.md §7).
     Both the SR and (via the joined eval-shim run) the per-cycle percentiles are method-sourced,
     so this line qualifies the whole table, not just the SR column."""
     return (
@@ -278,7 +278,7 @@ def render_speed_table(
     # HEADLINE (joined from the eval-shim; PEND until then) with **p50 the comparison basis** and
     # p95 the descriptive tail; enc/pred are the isolated engine-step components. SR is PEND
     # until the gated eval-shim pairs it. `cyc_n` is the post-truncation per-cycle sample count
-    # those percentiles + the decomposition mean were computed from (ADR-0003 amendment).
+    # those percentiles + the decomposition mean were computed from (architecture.md §8).
     hdr = (
         f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
         f"{'enc_p50':>8} {'enc_p95':>8} {'pred_p50':>9} {'pred_p95':>9} "
@@ -410,7 +410,7 @@ def render_calibration_table(
     overrides: dict | None, headline_method: str = DEFAULT_CALIBRATION_METHOD
 ) -> str:
     """The ONE table that spans calibration methods: int8/fp8 SR under `max` AND `entropy`, side
-    by side (ADR-0002 3rd amendment).
+    by side (architecture.md §7).
 
     The four single-method tables answer "what does the study report"; this one answers "what did
     the calibration method buy". Keeping them separate preserves the guard that a single-method
@@ -474,12 +474,12 @@ def _parse_isolation_key(key: str):
 def render_isolation_table(
     bench: dict, overrides: dict | None, method: str = DEFAULT_CALIBRATION_METHOD
 ) -> str:
-    """Component-precision isolation (ADR-0005): which component's quantization caused a measured
+    """Component-precision isolation (architecture.md §9): which component's quantization caused a measured
     SR drop. Placed immediately after the FP32-relative table — it answers the question that table
     provokes.
 
     Each row is one diagnostic run with ONE component quantized and the other held at FP16 (the
-    lossless reference on these checkpoints — ADR-0002). ΔSR is quoted against that track's **FP16**
+    lossless reference on these checkpoints — architecture.md §7). ΔSR is quoted against that track's **FP16**
     row, not FP32, because FP16 is what the held component is running at; that makes it a different
     number from the FP32-relative table's ΔSR, deliberately.
 
@@ -489,7 +489,7 @@ def render_isolation_table(
 
     These rows come from composite `enc-<A>+pred-<B>` sr.json keys that are NOT in `_PRECISIONS`,
     so they reach no headline table, plot, or ratio — the mixed pairing is a diagnostic, never a
-    fifth precision (ADR-0005). Returns "" when no isolation runs exist."""
+    fifth precision (architecture.md §9). Returns "" when no isolation runs exist."""
     order = {p: i for i, p in enumerate(_PRECISIONS)}
     rows = []
     for track in _TRACKS:
@@ -684,14 +684,14 @@ def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -
     come off the SAME truncated sample, so the decomposition and the headline describe the same
     decisions.
 
-    **Warm-up (`warmup_drop`, default 1 decision — ADR-0003 amendment).** The engine-step loops drop
+    **Warm-up (`warmup_drop`, default 1 decision — architecture.md §8).** The engine-step loops drop
     `ExportConfig.warmup` iters, but the per-cycle callback records from the first decision of the
     first solve. Keeping the cold decision would put first-`execute_v2` / kernel-autotune / clock-ramp
     cost in the cycle mean and NOT in the component means, so `overhead = cycle − enc − pred` would
     book all of it as planner overhead — a one-sided bias the negative-overhead alarm structurally
     cannot catch (it makes overhead *more* positive). Dropping restores the symmetry the subtraction
     assumes. It is applied HERE, at report time, so `sr.json`'s raw vector stays complete (CLAUDE §8),
-    the ADR-0004 span-sum reconciliation still holds, and `warmup_drop=0` re-renders the undropped
+    the architecture.md §8 span-sum reconciliation still holds, and `warmup_drop=0` re-renders the undropped
     view off-pod.
 
     **Order matters: drop BEFORE truncating.** Truncation keeps the temporal head (`lat[:n]`), so
@@ -770,13 +770,13 @@ def report(
 
     `warmup_drop` (default 1) drops that many cold decisions from the head of each per-cycle vector
     before the equal-n truncation, matching the engine loops' warm-up drop so the decomposition
-    subtracts like from like (ADR-0003 amendment). The exclusion is disclosed as the speed table's
+    subtracts like from like (architecture.md §8). The exclusion is disclosed as the speed table's
     `drop×`; `warmup_drop=0` re-renders the undropped view.
 
     The four single-method tables are written METHOD-SCOPED (`<name>.<method>.txt`) and name their
     method in the body, so the two methods' artefacts coexist on disk. Two further tables render
     only when their data exists: `calibration_table.txt` (both methods' SR side by side) and
-    `isolation_table.<method>.txt` (component-precision isolation, ADR-0005).
+    `isolation_table.<method>.txt` (component-precision isolation, architecture.md §9).
 
     **Writes only `.txt` and `.png` into `out_dir`.** The canonical inputs — `results.<track>.json`
     (`src.study`) and `sr.json` (`src.sr_eval`) — are read-only here and are never rewritten, even
@@ -830,7 +830,7 @@ def report(
     # The single-method tables are METHOD-SCOPED by filename: their SR (and the per-cycle sample
     # it was measured on) is method-sourced, so a fixed name would let an `entropy` render
     # overwrite the `max` artefacts in place — the artefact-preservation rule broken at the last
-    # step (SPEC §Parity, ADR-0002 3rd amendment, CLAUDE §8). The calibration table spans both
+    # step (SPEC §Parity, architecture.md §7, CLAUDE §8). The calibration table spans both
     # methods by construction, so it stays unscoped; only its `headline` marker moves on re-render.
     tables = {
         "speed_table": (out_dir / f"speed_table.{method}.txt", speed_table),
@@ -926,7 +926,7 @@ def main() -> None:
     `calibration_method` (default `max`) selects which method's int8/fp8 SR to render from sr.json
     (which holds both); re-run with `=entropy` for the entropy view — same sr.json, no rebuild.
     `per_cycle_warmup` (default 1) is the cold decisions dropped before the equal-n truncation;
-    `=0` reproduces the pre-ADR-0003-amendment view. Neither rewrites any canonical results file.
+    `=0` reproduces the undropped view. Neither rewrites any canonical results file.
     """
     src = None
     out_dir = None
