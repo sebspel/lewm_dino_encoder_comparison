@@ -8,7 +8,8 @@
 
 ## Context
 
-**Execution model.** The **L40S RunPod pod is the only execution target**; local WSL is
+**Execution model.** Inference (export + benchmark) and LeWM training run on the **L40S RunPod
+pod**; **DINOv3-WM training runs on an H200 SXM** (SPEC §Execution Environment). Local WSL is
 edit-only. Every run command is `uv run …` on the pod (provisioned by `setup.sh`). The five
 SPEC requirement bundles map to the Phases below.
 
@@ -70,8 +71,9 @@ Hard-coded once in `src/interfaces.py` in Phase 4.
   `setup.sh` §8); resolves and one batch loads.
 - [x] 🖥️ Train LeWM: `uv run python -m scripts.train.lewm --config-dir conf +experiment=lewm`
   → `$STABLEWM_HOME/checkpoints/lewm/`.
-- [x] 🖥️ Train DINOv3-WM: `uv run python -m scripts.train.prejepa --config-dir conf
-  +experiment=dinov3` → `$STABLEWM_HOME/checkpoints/dino/`.
+- [x] 🖥️ Train DINOv3-WM (**on an H200 SXM**, not the L40S — SPEC §Execution Environment):
+  `uv run python -m scripts.train.prejepa --config-dir conf +experiment=dinov3` →
+  `$STABLEWM_HOME/checkpoints/dino/`.
 - [x] ⏱️ Epoch-capped: **10 epochs both tracks**, batch size 128 (set in the conf overlays).
 
 **Verify:** two checkpoints exist; both W&B runs logged; `uv run python -m scripts.verify_encode`

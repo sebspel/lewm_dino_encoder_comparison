@@ -59,8 +59,12 @@ Layering rationale: `docs/architecture.md` §1.
 
 ## Execution Environment
 
-- **Single machine: L40S** — train and benchmark on the same instance (same hardware class as
-  the LeWM paper, so speed numbers are comparable).
+- **Inference runs on one machine: L40S** — both tracks are exported and benchmarked on the same
+  L40S (same hardware class as the LeWM paper, so speed numbers are comparable).
+- **Training hardware differs by track:** LeWM is trained on the L40S; DINOv3-WM is trained on an
+  **H200 SXM**. Training hardware, like training batch size, does **not** carry into inference — the
+  exported engine is built and benchmarked on the same L40S from the checkpoint weights alone — so
+  the latency comparison is unaffected.
 - **TensorRT engines are architecture-specific and disposable** — regenerated on the L40S,
   gitignored, never committed. They are **saved to and loaded from the network volume by
   default** (`$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<precision>.plan`, the quantized
@@ -256,8 +260,9 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   run — both the isolated component loops and the per-cycle eval-shim run. Its logs persist to
   `$STABLEWM_HOME/reports/phase5/gpu_logs/` (same durability contract as the headline artifacts).
   The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
-- Training batch size is held equal across tracks (128, LeWM's paper value) and does **not** carry
-  into inference.
+- Training batch size is held equal across tracks (128, LeWM's paper value); training **hardware**
+  is not (LeWM on the L40S, DINOv3-WM on an H200 SXM). Neither carries into inference — the exported
+  engine is built and benchmarked on the same L40S from the checkpoint weights alone.
 - **Every speed figure is reported with its SR**, and FP16/INT8/FP8 results quote **SR and
   latency degradation relative to FP32** — a precision that is faster but degrades task quality
   must be visible.
