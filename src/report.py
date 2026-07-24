@@ -549,73 +549,164 @@ def render_isolation_table(
 
 
 # --- plots ----------------------------------------------------------------------------
-def plot_speed_vs_sr(bench: dict, out_dir: Path) -> Path:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    markers = {"fp32": "o", "fp16": "s", "int8": "^", "fp8": "D"}
-    for track in _TRACKS:
+# Static report/print PNGs on the light surface (matplotlib Agg). Validated categorical hues in
+# FIXED order so the figure set reads as one system (dataviz skill): colour follows the ENTITY
+# (track / component), never rank. Sentence-case titles, UPPERCASE precisions, black axes + axis
+# values; grey is reserved for grid/leader lines on the bar charts.
+# DINO is RED (not orange) so the track colours stay clear of the component palette's orange
+_TRACK_COLOR = {"lewm": "#2a78d6", "dino": "#e34948"}  # blue / red (slots 1, 8)
+_TRACK_DISPLAY = {"lewm": "LeWM", "dino": "DINOv3-WM"}
+_PREC_DISPLAY = {"fp32": "FP32", "fp16": "FP16", "int8": "INT8", "fp8": "FP8"}
+_PRECISION_MARKER = {"fp32": "o", "fp16": "s", "int8": "^", "fp8": "D"}
+_RATIO_HUE = "#81c784"  # light green — distinct from the component encoder green and the track hues
+# encoder green / predictor purple / overhead orange (validated slots 3, 7, 2)
+_COMPONENT_COLOR = {"encoder": "#1baf7a", "predictor": "#4a3aa7", "overhead": "#eb6834"}
+_GRID = "#e1e0d9"
+_MUTED = "#898781"
+_INK = "#0b0b0b"
+
+
+def _prec_label(prec: str, method: str) -> str:
+    """Display label for a precision. Quantized precisions carry the calibration method in
+    brackets (their SR depends on it); FP32/FP16 do not (method-invariant)."""
+    return f"{_PREC_DISPLAY[prec]} ({method})" if prec in QUANTIZED_PRECISIONS else _PREC_DISPLAY[prec]
+
+
+def _fmt_time_ms(ms) -> str:
+    """A duration in ms, rendered ms below 1 s and seconds above, so a 30 ms overhead and a 74 s
+    cycle both read cleanly."""
+    if _missing(ms):
+        return "—"
+    return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.3g} ms"
+
+
+def _style(ax, *, grid_axis: str = "y") -> None:
+    """Recessive grey grid, BLACK spines + tick values — the shared chrome across the figure set."""
+    ax.grid(axis=grid_axis, color=_GRID, lw=0.6, zorder=0)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(_INK)
+    ax.tick_params(colors=_INK)
+    for item in (ax.xaxis.label, ax.yaxis.label, ax.title):
+        item.set_color(_INK)
+
+
+def _render_speed_vs_sr(bench: dict, path: Path, method: str, title: str | None) -> Path:
+    """One speed-vs-SR figure. Two panels (LeWM | DINOv3-WM) with a SHARED y-axis but SEPARATE
+    linear x-axes — the ~350× latency gap that a single linear axis would collapse is handled by
+    faceting, so no log scale is needed. Marker = precision, with NO connecting line (the
+    precisions are discrete, not a continuum). Each panel carries its OWN legend, coloured in that
+    panel's track hue; quantized precisions carry the calibration method. `title` None omits the
+    figure title (RESULTS.md); a title is passed for the README headline copy."""
+    from matplotlib.lines import Line2D
+
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+    legend_loc = {"lewm": "lower left", "dino": "upper left"}  # each keeps clear of its panel's points
+    for ax, track in zip(axes, _TRACKS):
+        present = []
         for prec in _PRECISIONS:
             r = bench.get(track, {}).get(prec)
             if r is None or _missing(r["success_rate"]) or _missing(r["per_cycle_p50_ms"]):
                 continue
-            ax.scatter(
-                r["per_cycle_p50_ms"], r["success_rate"],
-                marker=markers[prec], s=80, label=f"{track}-{prec}",
-            )
-    ax.set_xlabel("per-cycle latency p50 (ms) — lower = faster")
-    ax.set_ylabel("success rate (%)")
-    ax.set_title("Speed vs task quality")
-    ax.legend(fontsize=8)
+            ax.scatter(r["per_cycle_p50_ms"], r["success_rate"], marker=_PRECISION_MARKER[prec],
+                       s=90, color=_TRACK_COLOR[track], edgecolor="white", linewidth=0.8, zorder=3)
+            present.append(prec)
+        ax.set_title(_TRACK_DISPLAY[track])
+        ax.set_xlabel("Per-cycle latency p50 (ms, lower is faster)")
+        _style(ax, grid_axis="both")
+        if present:
+            handles = [Line2D([], [], marker=_PRECISION_MARKER[p], ls="", color=_TRACK_COLOR[track],
+                              label=_prec_label(p, method)) for p in present]
+            ax.legend(handles=handles, title="Precision", fontsize=7.5, loc=legend_loc[track],
+                      borderpad=0.6, labelspacing=0.35, handletextpad=0.4)
+    axes[0].set_ylabel("Success rate (%)")
+    if title:
+        fig.suptitle(title)
     fig.tight_layout()
-    path = out_dir / "speed_vs_sr.png"
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
 
 
-def _bar_over_precisions(values: dict[str, float], title: str, ylabel: str, out_dir: Path, fname: str) -> Path:
-    fig, ax = plt.subplots(figsize=(5, 4))
-    precs = [p for p in _PRECISIONS if p in values and not _missing(values[p])]
-    ax.bar(precs, [values[p] for p in precs])
-    ax.axhline(1.0, color="grey", ls="--", lw=0.8)  # parity line
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    fig.tight_layout()
-    path = out_dir / fname
-    fig.savefig(path, dpi=120)
-    plt.close(fig)
-    return path
+def plot_speed_vs_sr(bench: dict, out_dir: Path, method: str = DEFAULT_CALIBRATION_METHOD) -> Path:
+    """Speed vs SR, rendered twice: untitled `speed_vs_sr.png` (for RESULTS.md, which titles it in
+    prose) and titled `speed_vs_sr.titled.png` (the README headline copy). Returns the untitled
+    path (the canonical RESULTS artefact)."""
+    _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.titled.png", method,
+                        title="Per-cycle planning latency vs success rate")
+    return _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.png", method, title=None)
 
 
 def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
+    """DINOv3-WM ÷ LeWM per-cycle p50 latency ratio per precision. RESULTS.md only, so NO figure
+    title; one series → orange bars, no legend; zero baseline KEPT (truncating a ratio axis
+    misleads); each bar value-labelled so the 310-410× spread is exact rather than muted."""
     vals = {
         p: per_cycle_ratio(bench, p, "p50")
         for p in _PRECISIONS
         if p in bench.get("lewm", {}) and p in bench.get("dino", {})
     }
-    return _bar_over_precisions(
-        vals, "DINOv3 ÷ LeWM per-cycle p50 latency", "ratio (×)", out_dir, "per_cycle_ratio.png"
-    )
+    precs = [p for p in _PRECISIONS if p in vals and not _missing(vals[p])]
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bars = ax.bar([_PREC_DISPLAY[p] for p in precs], [vals[p] for p in precs],
+                  color=_RATIO_HUE, width=0.6, zorder=2)
+    for b, p in zip(bars, precs):
+        ax.annotate(f"{vals[p]:.0f}×", (b.get_x() + b.get_width() / 2, b.get_height()),
+                    textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8, color=_INK)
+    ax.set_ylabel("p50 latency ratio (DINOv3-WM relative to LeWM)")
+    _style(ax, grid_axis="y")
+    fig.tight_layout()
+    path = out_dir / "per_cycle_ratio.png"
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    return path
 
 
 def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32") -> Path:
-    """Stacked encoder/predictor/overhead bar per track at one precision, from the runtime-
-    WEIGHTED per-cycle shares (step p50 × calls) with overhead by subtraction. Attributes the
-    LeWM↔DINO gap to the right component. `overhead` is 0 until the per-cycle latency is joined."""
-    fig, ax = plt.subplots(figsize=(5, 4))
+    """Per-track encoder/predictor/overhead split at one precision, as TWO panels each NORMALISED
+    to 100% of that track's own cycle. The ~350× absolute gap otherwise collapses LeWM to a flat
+    line and hides DINO's encoder; normalising makes both compositions readable, and the absolute
+    cycle time is kept in each panel title so the gap is not erased. Runtime-WEIGHTED (step mean ×
+    CEM call counts) with overhead by subtraction. Each component is a LEADER-LINE callout (so the
+    ~0% encoder sliver is still labelled), the callouts fanning outward per panel to avoid
+    collisions; callout text is black, leader lines grey."""
     tracks = [t for t in _TRACKS if precision in bench.get(t, {})]
     decs = {t: decompose(bench[t][precision]) for t in tracks}
-    bottoms = [0.0] * len(tracks)
-    segments = (("encoder", "enc_cyc_ms"), ("predictor", "pred_cyc_ms"), ("overhead", "overhead_ms"))
-    for label, key in segments:
-        heights = [(decs[t][key] or 0.0) for t in tracks]
-        ax.bar(tracks, heights, bottom=bottoms, label=label)
-        bottoms = [b + h for b, h in zip(bottoms, heights)]
-    ax.set_ylabel("per-cycle time (ms), runtime-weighted")
-    ax.set_title(f"Component breakdown ({precision})")
-    ax.legend(fontsize=8)
+    segments = (("Encoder", "enc_cyc_ms"), ("Predictor", "pred_cyc_ms"), ("Overhead", "overhead_ms"))
+    anchor_y = {"Encoder": 12, "Predictor": 50, "Overhead": 88}  # spread callout heights, arrows to true centre
+    n = max(len(tracks), 1)
+    fig, axes = plt.subplots(1, n, figsize=(3.6 * n, 4.5), squeeze=False)
+    for i, (ax, t) in enumerate(zip(axes[0], tracks)):
+        d = decs[t]
+        total = d["cycle_ms"] or d["model_cyc_ms"]  # cycle if joined, else enc+pred only
+        outward_right = len(tracks) == 1 or i == len(tracks) - 1  # last panel fans right, first fans left
+        tip_x, text_x, ha = (0.35, 0.62, "left") if outward_right else (-0.35, -0.62, "right")
+        ax.set_xlim((-0.5, 2.0) if outward_right else (-2.0, 0.5))
+        bottom = 0.0
+        for label, key in segments:
+            ms = d[key]
+            if ms is None:
+                continue
+            pct = 100.0 * ms / total
+            ax.bar(0, pct, bottom=bottom, width=0.7, color=_COMPONENT_COLOR[label.lower()],
+                   edgecolor="white", linewidth=1.2, zorder=2)
+            ax.annotate(f"{label} ({_fmt_time_ms(ms)}, {pct:.0f}%)",
+                        xy=(tip_x, bottom + pct / 2), xytext=(text_x, anchor_y[label]),
+                        ha=ha, va="center", fontsize=8, color=_INK,
+                        arrowprops=dict(arrowstyle="-", color=_MUTED, lw=0.8))
+            bottom += pct
+        cyc = d["cycle_ms"]
+        ax.set_title(f"{_TRACK_DISPLAY[t]}\n{_fmt_time_ms(cyc) if cyc else 'cycle pending'} / cycle",
+                     fontsize=9)
+        ax.set_xticks([])
+        ax.set_ylim(0, 100)
+        _style(ax, grid_axis="y")
+    axes[0][0].set_ylabel("Share of per-cycle time (%)")
     fig.tight_layout()
     path = out_dir / f"component_breakdown_{precision}.png"
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return path
 
@@ -857,9 +948,10 @@ def report(
     }
 
     plots = {
-        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir),
+        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir, method),  # untitled (RESULTS.md)
         "component_breakdown": plot_component_breakdown(bench, out_dir),
     }
+    plots["speed_vs_sr_titled"] = plots["speed_vs_sr"].with_name("speed_vs_sr.titled.png")  # README headline
     # The cross-track (LeWM-vs-DINOv3) ratio plot needs BOTH tracks at a shared precision; a
     # single-track render would emit misleading empty bars, so skip it unless a ratio exists
     # (SPEC §Headline-artifact durability).
