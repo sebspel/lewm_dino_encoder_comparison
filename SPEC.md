@@ -61,6 +61,11 @@ Layering rationale: `docs/architecture.md` §1.
 
 - **Inference runs on one machine: L40S** — both tracks are exported and benchmarked on the same
   L40S (same hardware class as the LeWM paper, so speed numbers are comparable).
+- **GPU clocks cannot be locked on the benchmark platform.** `nvidia-smi -lgc` is denied by the
+  RunPod virtualization layer (confirmed as root, persistence mode on), so both tracks run at stock
+  boost/throttle behaviour and the per-run clock/thermal state is *recorded* by the telemetry
+  observer (§Parity), not controlled. A clock-locked re-run is unavailable here and deferred to
+  future work.
 - **Training hardware differs by track:** LeWM is trained on the L40S; DINOv3-WM is trained on an
   **H200 SXM**. Training hardware, like training batch size, does **not** carry into inference — the
   exported engine is built and benchmarked on the same L40S from the checkpoint weights alone — so
@@ -259,6 +264,19 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   clock/thermal state is recorded rather than assumed. Its logs persist to
   `$STABLEWM_HOME/reports/phase5/gpu_logs/` (same durability contract as the headline artifacts).
   The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
+- **The clock-state confound is bounded and disclosed, not assumed away.** The observed throttle is
+  **differential** — the heavier track power-throttles to a lower SM clock while the lighter track
+  holds the boost ceiling — so it does **not** cancel in the ratio. The logged telemetry is used to
+  quantify it on the three surfaces it touches — the cross-model per-cycle ratio, the within-model
+  precision deltas, and the component/overhead decomposition — and the result is reported as a
+  limitation alongside the measured numbers. (`docs/architecture.md` §6.)
+- **Clock-normalized figures are DERIVED and a BOUND.** Any clock-normalized latency is a `1/f_sm`
+  rescaling that **over-corrects** — memory-bound and host-overhead time do not scale with SM clock
+  — so it is reported as the **maximum plausible correction**, a bound beside the measured value,
+  never a point estimate and never a replacement. Its construction — the scaling model and reference
+  clock — is **owner-gated** (§Implementation Boundaries). The measured numbers stay **canonical and remain
+  the headline**; normalized numbers are **additive, labelled `derived`, and never overwrite**
+  `results.*.json` or the measured tables (CLAUDE §8).
 - Training batch size is held equal across tracks (128, LeWM's paper value); training **hardware**
   is not (LeWM on the L40S, DINOv3-WM on an H200 SXM). Neither carries into inference — the exported
   engine is built and benchmarked on the same L40S from the checkpoint weights alone.
@@ -267,9 +285,12 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   must be visible.
 - **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap is an architectural
   asymmetry between the two models — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
-  DINOv3's large backbone exposing the full patch-token grid. No batch or precision mismatch may
-  confound it; **which component carries the gap is a result the profile reports, not one the spec
-  fixes in advance** — the encoder/predictor/overhead profile must attribute the gap to the right
+  DINOv3's large backbone exposing the full patch-token grid. Batch and precision are held equal by
+  construction, so neither may confound it; **GPU clock/thermal state cannot be held equal — clocks
+  are unlockable (§Execution Environment) — so it is a named confound to the ratio's exact
+  magnitude, bounded and disclosed (§Parity), not eliminated, and does not flip the qualitative
+  direction**. Which component carries the gap is a result the profile reports, not one the spec
+  fixes in advance — the encoder/predictor/overhead profile must attribute the gap to the right
   component.
 - **FP8 rides the identical parity conditions as the other precisions** — same CEM config, seeds,
   normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone,
@@ -304,6 +325,13 @@ touching:
 - The benchmark fairness conditions (matched precision, env/goal).
 - The model adapter dims (the Constants above).
 - Any change to the platform's eval/CEM config that would break the LeWM-vs-DINO parity.
+- Whether the headline is the measured stock-hardware ratio (with disclosure) or a reframed
+  presentation (e.g. deployment-cost), and which number is *the* headline — it touches the
+  parity/mechanistic framing.
+- The clock-normalization construction — the scaling model (`time ∝ 1/f_sm` → `T_ref = T ×
+  f_measured/f_ref`), the reference clock `f_ref`, the per-run clock statistic feeding it, and which
+  time is treated as clock-bound. A wrong choice is a plausible wrong corrected number (silent);
+  CLAUDE Code wires the harvest/apply/render only once the owner has fixed the formula.
 
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
 
@@ -320,6 +348,11 @@ touching:
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory
   logging, the passive `nvidia-smi dmon` GPU-telemetry logging, table/plot runners).
 - The tracer-bullet smoke script.
+- The clock-confound derived-render *plumbing* — harvesting the per-run clock statistic from the
+  telemetry, applying the **owner-set** normalization formula to the canonical latencies, and
+  rendering the disclosure table/plot and limitations doc — off-pod over the existing canonical
+  artifacts, like the current decoupled render. The normalization's construction itself is
+  OWNER-ONLY (above).
 
 ---
 
@@ -399,6 +432,14 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   recommended configuration. Results are recorded under composite `enc-<A>+pred-<B>` keys that cannot
   collide with a pure precision, so they are additive and the headline is unchanged by construction.
   Rendered as its own table immediately after the FP32-relative table. (`docs/architecture.md` §9.)
+- **Clock-state confound disclosure.** Because GPU clocks cannot be locked (§Execution Environment)
+  and the observed throttle is differential — one-sided on the heavier track, so it does not cancel
+  in the ratio — the study discloses the confound and bounds it from the logged telemetry: the
+  cross-model ratio plus its clock-normalized bound; the within-model precision deltas re-expressed
+  at a common clock; and the overhead decomposition recomputed with components and cycle at matched
+  clock. Disclosure is a **durable artifact** persisted like the other headline outputs (never
+  git-only); the normalized numbers are additive and labelled `derived` (§Parity). A clock-locked
+  re-run is deferred future work, unavailable on the current platform.
 
 ---
 
