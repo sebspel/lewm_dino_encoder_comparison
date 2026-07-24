@@ -20,7 +20,7 @@ expose the true 196-patch grid. The platform wheel is never edited; the vendored
 import the override.
 
 **Why not pool DINO's grid to one token.** It would diverge from the DINO-WM paper and erase
-part of the encoder-compute asymmetry the study exists to measure. The two tracks therefore
+part of the architectural asymmetry the study exists to measure. The two tracks therefore
 carry different latent ranks by design — LeWM `(B, D)`, DINO-WM `(B, N_patches, D)`.
 
 ---
@@ -283,7 +283,7 @@ track-dependent: a parity break. A `current_bs == 1` guard fails loud if `batch_
 ### Three statistics, three jobs
 
 - **p50 — the comparison basis.** The LeWM-vs-DINOv3 headline ratio and the FP32-relative speedup
-  are quoted at p50. The headline is a *mechanistic* central-tendency claim (encoder compute
+  are quoted at p50. The headline is a *mechanistic* central-tendency claim (architectural
   asymmetry), and per-cycle n is 50–100 — p50 is the statistic that sample supports.
 - **p95 — the reported tail, never a comparison basis.** Kept for all three distributions as a
   descriptive figure; at n = 50–100 it is roughly the 3rd-to-10th largest sample and carries no
@@ -330,15 +330,13 @@ TensorRT's engine and execution-context device allocations bypass torch's cachin
 the one the study is trying to measure. Peak memory is sampled via `cudaMemGetInfo` /
 `torch.cuda.mem_get_info` (device-level used).
 
-### GPU clocks are not locked — the shared state is recorded, not assumed
+### GPU clocks are not locked — the per-run clock/thermal state is recorded
 
-Both tracks run back-to-back at the same precision on the same L40S with warm-up dropped, and the
-comparison is a **ratio** on that shared hardware state, so any residual boost/thermal drift
-applies to both tracks alike rather than to one. To make that assumption verifiable, a passive
-`nvidia-smi dmon` observer (`src/gpu_clocks.py`) logs per-sample telemetry (SM/mem clock, power,
-temperature, utilization, memory) alongside every timed run — both the isolated component loops
-and the per-cycle eval-shim run. It is a separate subprocess and never touches seeds, samples, or
-the plan.
+GPU clocks are not locked. A passive `nvidia-smi dmon` observer (`src/gpu_clocks.py`) logs
+per-sample telemetry (SM/mem clock, power, temperature, utilization, memory) alongside every timed
+run — both the isolated component loops and the per-cycle eval-shim run — so the actual per-run
+clock/thermal state is recorded rather than assumed. It is a separate subprocess and never touches
+seeds, samples, or the plan.
 
 ### Why the decomposition subtracts rather than mirrors the solver
 

@@ -49,7 +49,7 @@ Layering rationale: `docs/architecture.md` §1.
   register tokens (verify the token layout first) and preserve the patch dimension. **The two
   tracks have different latent ranks** — LeWM exposes a single-token latent `(B, D)`; DINO-WM
   exposes the full patch grid `(B, N_patches, D)`. **Do not pool DINO to one token:** it would
-  diverge from the paper and erase part of the encoder-compute asymmetry the study measures.
+  diverge from the paper and erase part of the architectural asymmetry the study measures.
 - **LeWM = the platform's `lewm` training unchanged.** SIGReg and the scratch encoder are the
   platform's; do not reimplement or retune them beyond what training requires.
 - **The contribution lives downstream of a trained checkpoint:** export, quantize, benchmark.
@@ -253,11 +253,10 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   There is no fixed-wall-clock budget run; **latency is the headline** and the model is the only
   difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
   measured in equal-n fixed-iteration loops (§Interface Contracts).
-- **GPU clocks are not locked** — the comparison is a *ratio* on shared back-to-back hardware
-  state, so residual boost/thermal drift applies to both tracks alike. To make that assumption
-  **verifiable rather than asserted**, a passive `nvidia-smi dmon` observer logs per-sample GPU
+- **GPU clocks are not locked.** A passive `nvidia-smi dmon` observer logs per-sample GPU
   telemetry (SM/mem clock, power, temperature, utilization, memory) alongside every timed engine
-  run — both the isolated component loops and the per-cycle eval-shim run. Its logs persist to
+  run — both the isolated component loops and the per-cycle eval-shim run — so the actual per-run
+  clock/thermal state is recorded rather than assumed. Its logs persist to
   `$STABLEWM_HOME/reports/phase5/gpu_logs/` (same durability contract as the headline artifacts).
   The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
 - Training batch size is held equal across tracks (128, LeWM's paper value); training **hardware**
@@ -266,10 +265,11 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
 - **Every speed figure is reported with its SR**, and FP16/INT8/FP8 results quote **SR and
   latency degradation relative to FP32** — a precision that is faster but degrades task quality
   must be visible.
-- **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap comes from the
-  encoder-compute asymmetry — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
+- **The speedup is mechanistic, not configuration.** The LeWM-vs-DINOv3 gap is an architectural
+  asymmetry between the two models — LeWM's tiny scratch ViT-Tiny exposing a single latent token vs
   DINOv3's large backbone exposing the full patch-token grid. No batch or precision mismatch may
-  confound it; the encoder/predictor/overhead profile must attribute the gap to the right
+  confound it; **which component carries the gap is a result the profile reports, not one the spec
+  fixes in advance** — the encoder/predictor/overhead profile must attribute the gap to the right
   component.
 - **FP8 rides the identical parity conditions as the other precisions** — same CEM config, seeds,
   normalization, L40S, and shared inference batch — so its degradation vs FP32 is the format alone,

@@ -1,12 +1,10 @@
 """GPU telemetry logger — wraps a timed engine run with an `nvidia-smi dmon` observer.
 
-Owned PLUMBING (fails LOUDLY). SPEC §Parity: **GPU clocks are not locked**; the LeWM-vs-DINOv3
-comparison is a *ratio* on the shared back-to-back hardware state, so any residual boost/thermal
-drift applies to both tracks alike. This passive observer records per-sample telemetry — SM/mem
-**clock (MHz)**, **power (W)**, **temperature (C)**, utilization, and memory — alongside every
-timed engine run, so that shared-hardware-state assumption is **verifiable off the log** rather
-than merely asserted. Like the `cudaMemGetInfo` peak-mem sampling in `src.benchmark`, it is a
-separate `nvidia-smi` subprocess and does NOT touch seeds / samples / the plan.
+Owned PLUMBING (fails LOUDLY). SPEC §Parity: **GPU clocks are not locked.** This passive observer
+records per-sample telemetry — SM/mem **clock (MHz)**, **power (W)**, **temperature (C)**,
+utilization, and memory — alongside every timed engine run, so the actual per-run clock/thermal
+state is logged rather than assumed. Like the `cudaMemGetInfo` peak-mem sampling in `src.benchmark`,
+it is a separate `nvidia-smi` subprocess and does NOT touch seeds / samples / the plan.
 
 Runs ONLY where `nvidia-smi` is present (the L40S pod); the context manager fails loud if it is
 absent. The logs persist to `$STABLEWM_HOME/reports/phase5/gpu_logs/` (network volume, same
