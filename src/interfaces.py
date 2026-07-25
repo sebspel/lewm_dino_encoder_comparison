@@ -100,6 +100,32 @@ PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, ba
 # way (median robustness) — this is for the mean-based decomposition.
 PER_CYCLE_WARMUP_DROP = 1
 
+# --- Clock normalization (owner-gated; SPEC §Implementation Boundaries "clock-normalization
+# construction", signed off 2026-07-25). GPU clocks are unlockable on this platform, and the
+# observed throttle is DIFFERENTIAL — the heavier track power-throttles while the lighter one holds
+# the boost ceiling — so it does not cancel in the cross-model ratio. These fix the derived-bound
+# construction; a wrong value is a plausible wrong CORRECTED number (silent), hence owner-set.
+#
+# Scaling model: `T_ref = T × f_measured / f_ref` (time ∝ 1/f_sm). It knowingly OVER-corrects —
+# memory-bound and host/Python time do not scale with SM clock — which is exactly what makes the
+# normalized figure a BOUND (the maximum plausible correction) rather than a point estimate
+# (SPEC §Parity). ALL measured latency is treated as clock-bound: per-cycle, encode-step and
+# predict-step alike, so the overhead decomposition subtracts terms taken at a matched clock.
+# `f_ref` cancels in every ratio (R′ and the within-model deltas); it only scales the absolute
+# derived ms values, which read as "as if unthrottled" at the boost ceiling.
+CLOCK_F_REF_MHZ = 2520  # L40S boost ceiling — the clock the lighter track (LeWM) actually held
+# `f_measured` is the UTIL-CONDITIONED median SM clock: the median `pclk` over the run's dmon
+# samples with SM utilization ≥ the threshold. Conditioning is load-bearing, not cosmetic — a
+# 1 Hz dmon over a short run catches idle/ramp samples (one log medians to 1260 MHz at 7% util),
+# and an unconditioned median would halve that run's normalized time from a sample where nothing
+# was running.
+CLOCK_BUSY_UTIL_PCT = 50
+# A run with fewer than this many busy samples is recorded as UNMEASURED (null) and excluded from
+# normalization — its measured latency is reported without a derived counterpart and the gap is
+# disclosed. Never invent a clock: asserting one from an idle sample is the silent-failure mode
+# this whole gate exists to prevent.
+CLOCK_MIN_BUSY_SAMPLES = 3
+
 # CEM action-proposal shape — the distribution `predict` is ACTUALLY driven by at eval, and
 # what the INT8 predictor calibration stream reproduces (SPEC §Interface Contracts —
 # calibration distribution). Read from the vendored configs + `CEMSolver` source, not assumed:

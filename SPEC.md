@@ -332,6 +332,10 @@ touching:
   f_measured/f_ref`), the reference clock `f_ref`, the per-run clock statistic feeding it, and which
   time is treated as clock-bound. A wrong choice is a plausible wrong corrected number (silent);
   CLAUDE Code wires the harvest/apply/render only once the owner has fixed the formula.
+- **The clock-confound limitations write-up itself.** Deciding how the confound is framed, what the
+  bound licenses, and which caveats are load-bearing is an *interpretation* of the measured result,
+  not plumbing over it — the same reason the headline framing is owner-gated. CLAUDE Code produces
+  the derived numbers, tables, and plot the write-up draws on; the owner writes the prose.
 
 **CLAUDE CODE** — fails *loudly* (throws when wrong). Owns freely:
 
@@ -350,9 +354,9 @@ touching:
 - The tracer-bullet smoke script.
 - The clock-confound derived-render *plumbing* — harvesting the per-run clock statistic from the
   telemetry, applying the **owner-set** normalization formula to the canonical latencies, and
-  rendering the disclosure table/plot and limitations doc — off-pod over the existing canonical
-  artifacts, like the current decoupled render. The normalization's construction itself is
-  OWNER-ONLY (above).
+  rendering the derived tables + throttle plot — off-pod over the existing canonical artifacts, like
+  the current decoupled render. The normalization's construction, and the limitations write-up that
+  interprets the output, are both OWNER-ONLY (above).
 
 ---
 
@@ -437,9 +441,14 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   in the ratio — the study discloses the confound and bounds it from the logged telemetry: the
   cross-model ratio plus its clock-normalized bound; the within-model precision deltas re-expressed
   at a common clock; and the overhead decomposition recomputed with components and cycle at matched
-  clock. Disclosure is a **durable artifact** persisted like the other headline outputs (never
-  git-only); the normalized numbers are additive and labelled `derived` (§Parity). A clock-locked
-  re-run is deferred future work, unavailable on the current platform.
+  clock. The derived numbers, tables, and throttle plot are **CLAUDE-owned plumbing**; the
+  **limitations write-up that interprets them is OWNER-authored** (§Implementation Boundaries), since
+  how the confound is framed is a judgement about the result, not a render of it. Both are **durable
+  artifacts** persisted to the network volume like the other headline outputs (never git-only), and
+  the normalized numbers are additive and labelled `derived` (§Parity). Unlike the headline outputs
+  they are **not** mirrored to W&B — the volume copy is the only copy, so there is no second place
+  for a derived number to be read as a measured one. A clock-locked re-run is deferred future work,
+  unavailable on the current platform.
 
 ---
 

@@ -421,7 +421,56 @@ reconciliation one. The two are rendered in separate tables and are never confla
 
 ---
 
-## 11. Rejected & retired approaches
+## 11. Clock-state confound: why it is bounded rather than eliminated
+
+GPU clocks cannot be locked on the benchmark platform — `nvidia-smi -lgc` is denied by the RunPod
+virtualization layer, confirmed as root with persistence mode on. The telemetry observer
+(`src/gpu_clocks.py`) therefore *records* the per-run clock state; §Parity's ask is to bound the
+resulting confound, not to assume it away.
+
+**Why it does not cancel.** A common-mode slowdown would divide out of a cross-model ratio. This
+throttle is **one-sided**: the heavier track runs at 100% SM utilization against the board power
+limit and trades clock for it (median SM clock 2160–2400 MHz), while the lighter track never
+approaches the limit and holds the 2520 MHz boost ceiling. Because the throttled track is the
+*slower* one, the confound **inflates** the measured ratio — the measured value is the pessimistic
+end for DINO, which is why the bound is one-sided too (`R′ ≤ R`).
+
+**The owner-set construction** (2026-07-25; the constants live in `src/interfaces.py`):
+
+- **`T_ref = T × f_measured/f_ref`.** A `1/f_sm` rescaling, applied to **all** measured latency —
+  per-cycle, encode-step, predict-step. It knowingly over-corrects, since memory-bound and
+  host/Python time do not scale with SM clock. That is deliberate: it makes the derived number the
+  **maximum plausible correction**, so the measured and derived values bracket the truth instead of
+  competing as two point estimates.
+- **`f_ref = 2520` MHz**, the boost ceiling the lighter track actually held. `f_ref` cancels in every
+  ratio — `R′ = R × f_dino/f_lewm`, and the within-model speedups likewise — so it sets only the
+  absolute derived ms, which then read as "as if unthrottled".
+- **`f_measured` = the util-conditioned median SM clock** (samples at SM util ≥ 50%). `dmon` samples
+  at ~1 Hz, so a short run's log is mostly idle/ramp samples and an unconditioned median can land at
+  a clock nothing ran at (one log medians to 1260 MHz at 7% util). A run with fewer than 3 busy
+  samples is **unmeasured** and gets no derived value; asserting a clock from an idle sample is the
+  silent wrong-number failure the gate exists to prevent.
+
+**What the three surfaces show.** The cross-model ratio moves by a low-tens-of-percent on a ratio of
+two-to-three orders of magnitude, so the architectural asymmetry survives the whole bracket. The
+within-model precision deltas can move in **either** direction (a speedup shrinks when the FP32
+baseline was the more throttled run), so that is a caveat on the *spread*, not a signed bias. The
+**overhead decomposition is the surface the confound actually damages**: `overhead = cycle − enc −
+pred` differences terms measured on two different runs at two different clocks, and the term is only
+resolvable where its share of the cycle `(1−p)` exceeds the clock mismatch `Δf/f_ref`. For DINO
+`1−p ≈ 0.01–0.03` against a mismatch of `0.04–0.07`, so the derived overhead flips negative — the
+honest reading is that DINO's absolute overhead floor is *not resolvable* on unlocked clocks, only
+bounded as small. That negative value is surfaced, never clamped.
+
+**Why derived numbers stay additive.** Measured is canonical and remains the headline (owner
+framing). The derived artifacts are separately named `*_normalized.derived.<method>.txt` +
+`derived_clocks.json`, and `src/clock_norm.py` never writes `results.*.json`, `sr.json`, or a
+measured table — the same read-only discipline as the `src.report` re-render (CLAUDE §8). A
+clock-locked re-run remains the correct fix and is recorded as deferred future work.
+
+---
+
+## 12. Rejected & retired approaches
 
 - **Standalone profiler + its CEM-iteration mirror — retired.** The PyTorch per-call timing could
   not reconcile with the engine-context cycle. The decomposition moved into
