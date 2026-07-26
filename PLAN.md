@@ -533,27 +533,29 @@ owner-authored** — CLAUDE renders tables/plots, never the prose. (SPEC §Execu
   clock-locked re-run is deferred (future work).
   → verify: SPEC §Execution Environment states the denial; no pod phase attempts a clock lock.
 
-- [ ] 🔴 **OWNER GATE — normalization construction + headline framing.** Owner fixes (a) the scaling
+- [x] 🔴 **OWNER GATE — normalization construction + headline framing.** Owner fixes (a) the scaling
   model (`T_ref = T × f_measured/f_ref`), reference clock `f_ref`, the per-run clock statistic feeding
   `f_measured` (e.g. util-conditioned median SM clock), and which time is clock-bound; and (b) whether
   the headline stays the measured stock-hardware ratio (with disclosure) or is reframed. CLAUDE builds
   the render only after sign-off.
   → verify: owner sign-off on the formula + `f_ref` + statistic + framing recorded **before** any
-  `*_normalized.derived.*` is written.
+  `*_normalized.derived.*` is written. (Sign-off 2026-07-25, recorded in `docs/architecture.md` §11 +
+  the `src.clock_norm` docstring; headline stays the measured ratio, with disclosure. First derived
+  render 2026-07-26.)
 
-- [ ] 🟢 **Throttle diagnostic.** `src/clock_norm.py` parses `gpu_logs/*.dmon.log` → per-run telemetry
+- [x] 🟢 **Throttle diagnostic.** `src/clock_norm.py` parses `gpu_logs/*.dmon.log` → per-run telemetry
   summary (SM/mem clock, power, temp, util medians + util-conditioned clock) and a differential-throttle
   plot (LeWM vs DINO, per precision) → `$STABLEWM_HOME/reports/phase5/gpu_logs/*_clock_diag.png`.
   → verify: plot renders from the saved `dmon` logs; the summary shows the lighter track at the boost
   ceiling and the heavier track throttled below it.
 
-- [ ] 🟢 **Harvest → `derived_clocks.json`.** `src/clock_norm.py` writes the owner-set per-run clock
+- [x] 🟢 **Harvest → `derived_clocks.json`.** `src/clock_norm.py` writes the owner-set per-run clock
   statistic + power per (track, precision, {sr_eval, benchmark}) to
   `$STABLEWM_HOME/reports/phase5/derived_clocks.json`. Read-only over `gpu_logs/`; `results.*.json`
   untouched.
   → verify: round-trips; one entry per (track, precision, run-type); values match the diagnostic.
 
-- [ ] 🟢 **Apply normalization → three surfaces.** `src/clock_norm.py` applies the owner-set formula to
+- [x] 🟢 **Apply normalization → three surfaces.** `src/clock_norm.py` applies the owner-set formula to
   the canonical latencies (`results.*.json` via `report.load_results` + `derived_clocks.json`):
   (a) cross-model per-cycle ratio `R` and normalized `R′`; (b) within-model FP32→FP16→INT8→FP8 deltas
   at a common clock; (c) overhead recomputed with component-loop and cycle latencies at a matched clock.
@@ -562,7 +564,7 @@ owner-authored** — CLAUDE renders tables/plots, never the prose. (SPEC §Execu
   `test_report_never_rewrites_canonical_results`); each derived table names itself `derived` + the
   `f_ref`/statistic used.
 
-- [ ] 🟢 **Throttle plot → committed display copy.** `src/clock_norm.py` copies the cycle-run
+- [x] 🟢 **Throttle plot → committed display copy.** `src/clock_norm.py` copies the cycle-run
   throttle plot to `reports/figs/` (display-only exception); the canonical copy stays under
   `$STABLEWM_HOME/reports/phase5/gpu_logs/`.
   → verify: `reports/figs/sr_eval_clock_diag.png` matches the volume copy byte-for-byte.
@@ -570,18 +572,16 @@ owner-authored** — CLAUDE renders tables/plots, never the prose. (SPEC §Execu
 - [ ] 🔴 **OWNER-ONLY — disclosure write-up.** The limitations doc is **owner-authored**, not
   generated (SPEC §Implementation Boundaries): framing the confound is a judgement about the result,
   not a render of it. CLAUDE supplies the inputs only (`derived_clocks.json`, the three
-  `*_normalized.derived.<method>.txt` tables, the throttle plot) and writes no prose.
-  Content the write-up must cover: clocks unlockable (attempt + denial), the differential throttle
-  (one-sided on the heavier track), the cross-model ratio's clock-normalized bound, the within-model
-  spread caveat, the unresolvable-overhead rows, the pod-conditional-under-virtualization caveat, and
-  the owner-set framing. Persisted to `$STABLEWM_HOME/reports/phase5/`.
-  → verify: disclosure names the confound, the bound, and the framing; measured numbers remain the
-  headline; normalized clearly labelled `derived`; artifact on the volume (not git-only).
+  `*_normalized.derived.<method>.txt` tables, the throttle plot) and writes no prose. Persisted to
+  `$STABLEWM_HOME/reports/phase5/`.
+  → verify: artifact on the volume (not git-only); measured numbers remain the headline; normalized
+  clearly labelled `derived`.
 
 **Verify:** owner sign-off on the normalization construction + framing recorded; `derived_clocks.json`
 + `*_normalized.derived.*` written additively with `results.*.json` / `.entropy.txt` untouched; the
-`R`/`R′` bound reported on all three surfaces; throttle plot committed to `reports/figs/`; the
-owner-authored disclosure write-up covers the confound + the bound + the framing.
+`R`/`R′` bound reported on surfaces (a)/(b) and, on surface (c), the bound **or its resolvability
+verdict** where the overhead share is below the clock mismatch; throttle plot committed to
+`reports/figs/`; the owner-authored disclosure write-up covers the confound + the bound + the framing.
 
 ---
 

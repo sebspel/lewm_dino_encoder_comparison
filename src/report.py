@@ -642,7 +642,11 @@ def plot_speed_vs_sr(bench: dict, out_dir: Path, method: str = DEFAULT_CALIBRATI
 def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
     """DINOv3-WM ÷ LeWM per-cycle p50 latency ratio per precision. RESULTS.md only, so NO figure
     title; one series → orange bars, no legend; zero baseline KEPT (truncating a ratio axis
-    misleads); each bar value-labelled so the 310-410× spread is exact rather than muted."""
+    misleads); each bar value-labelled so the 310-410× spread is exact rather than muted.
+
+    Measured values only, and no caveat text on the PNG (owner ruling, 2026-07-26): the bar-to-bar
+    (cross-precision) spread partly reflects the differential throttle (architecture.md §11), but
+    that caveat lives in the surrounding prose and the derived ratio table, never on the figure."""
     vals = {
         p: per_cycle_ratio(bench, p, "p50")
         for p in _PRECISIONS
@@ -671,7 +675,12 @@ def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32"
     cycle time is kept in each panel title so the gap is not erased. Runtime-WEIGHTED (step mean ×
     CEM call counts) with overhead by subtraction. Each component is a LEADER-LINE callout (so the
     ~0% encoder sliver is still labelled), the callouts fanning outward per panel to avoid
-    collisions; callout text is black, leader lines grey."""
+    collisions; callout text is black, leader lines grey.
+
+    No caveat text on the PNG (owner ruling, 2026-07-26): the overhead slice's absolute ms is
+    measured on unlocked clocks and an overhead share below the run-to-run clock mismatch is
+    bounded small, not resolved (architecture.md §11) — that caveat lives in the surrounding
+    prose and the derived overhead table, never on the figure."""
     tracks = [t for t in _TRACKS if precision in bench.get(t, {})]
     decs = {t: decompose(bench[t][precision]) for t in tracks}
     segments = (("Encoder", "enc_cyc_ms"), ("Predictor", "pred_cyc_ms"), ("Overhead", "overhead_ms"))

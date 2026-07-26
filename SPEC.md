@@ -266,10 +266,13 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   The observer never touches seeds, samples, or the plan. (`docs/architecture.md` §6.)
 - **The clock-state confound is bounded and disclosed, not assumed away.** The observed throttle is
   **differential** — the heavier track power-throttles to a lower SM clock while the lighter track
-  holds the boost ceiling — so it does **not** cancel in the ratio. The logged telemetry is used to
+  holds the boost ceiling — so it does **not** cancel in the ratio. It is also **endogenous**: the
+  throttle is driven by the benchmarked workload's own power draw, not by ambient conditions, so the
+  measured numbers are what that workload experiences on stock hardware, while the normalized bound
+  isolates the architecture at a common clock. The logged telemetry is used to
   quantify it on the three surfaces it touches — the cross-model per-cycle ratio, the within-model
   precision deltas, and the component/overhead decomposition — and the result is reported as a
-  limitation alongside the measured numbers. (`docs/architecture.md` §6.)
+  limitation alongside the measured numbers. (`docs/architecture.md` §11.)
 - **Clock-normalized figures are DERIVED and a BOUND.** Any clock-normalized latency is a `1/f_sm`
   rescaling that **over-corrects** — memory-bound and host-overhead time do not scale with SM clock
   — so it is reported as the **maximum plausible correction**, a bound beside the measured value,
@@ -441,7 +444,11 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   in the ratio — the study discloses the confound and bounds it from the logged telemetry: the
   cross-model ratio plus its clock-normalized bound; the within-model precision deltas re-expressed
   at a common clock; and the overhead decomposition recomputed with components and cycle at matched
-  clock. The derived numbers, tables, and throttle plot are **CLAUDE-owned plumbing**; the
+  clock. On the overhead surface a corrected value only exists where the overhead's measured share
+  of the cycle (1−p) exceeds the cycle-vs-component clock mismatch; below that threshold the
+  required disclosure is the **resolvability verdict** — not resolvable under unlocked clocks,
+  bounded as small — never a corrected number. The derived numbers, tables, and throttle plot are
+  **CLAUDE-owned plumbing**; the
   **limitations write-up that interprets them is OWNER-authored** (§Implementation Boundaries), since
   how the confound is framed is a judgement about the result, not a render of it. Both are **durable
   artifacts** persisted to the network volume like the other headline outputs (never git-only), and

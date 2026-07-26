@@ -453,17 +453,30 @@ end for DINO, which is why the bound is one-sided too (`R′ ≤ R`).
 
 **What the three surfaces show.** The cross-model ratio moves by a low-tens-of-percent on a ratio of
 two-to-three orders of magnitude, so the architectural asymmetry survives the whole bracket. The
-within-model precision deltas can move in **either** direction (a speedup shrinks when the FP32
-baseline was the more throttled run), so that is a caveat on the *spread*, not a signed bias. The
+within-model precision deltas can in principle move in **either** direction (a speedup shrinks when
+the FP32 baseline was the more throttled run, grows when the quantized run was); on the recorded
+data the shift is one-sided — DINO's FP32 baseline was the most-throttled run of all (2160 MHz), so
+every DINO speedup shrinks under normalization and the measured within-model speedups are the upper
+ends of their brackets, while LeWM's are unchanged (every LeWM cycle run held the ceiling). The
 **overhead decomposition is the surface the confound actually damages**: `overhead = cycle − enc −
-pred` differences terms measured on two different runs at two different clocks, and the term is only
-resolvable where its share of the cycle `(1−p)` exceeds the clock mismatch `Δf/f_cmp`. For DINO
-`1−p ≈ 0.01–0.03` against a mismatch of `0.04–0.07`, so the derived overhead flips negative — the
-honest reading is that DINO's absolute overhead floor is *not resolvable* on unlocked clocks, only
-bounded as small. That negative value is surfaced, never clamped.
+pred` differences terms measured on two different runs at two different clocks — and that mismatch
+is **systematic, not incidental**: the isolated component loops are short bursts (tens of seconds)
+on a cool, freshly idle GPU, while the eval-shim cycle run is a multi-hour steady state pinned at
+the board power limit, so the component run always holds the higher clock (`f_cmp > f_cyc`). The
+term is only resolvable where its share of the cycle `(1−p)` exceeds the clock mismatch `Δf/f_cmp`.
+For DINO `1−p ≈ 0.01–0.03` against a mismatch of `0.04–0.07`, so every derived overhead flips the
+same way (negative) rather than scattering around zero — the honest reading is that DINO's absolute
+overhead floor is *not resolvable* on unlocked clocks, only bounded as small. That negative value is
+surfaced, never clamped. LeWM's derived overhead rows are blank for a different reason: its
+component loops finish inside one or two 1 Hz `dmon` samples, so their clocks are **unmeasured** —
+an instrumentation limit of the 1 Hz sampler, not a render failure; a future run would lengthen the
+component loops or sample faster.
 
 **Why derived numbers stay additive.** Measured is canonical and remains the headline (owner
-framing). The derived artifacts are separately named `*_normalized.derived.<method>.txt` +
+framing). The confound is also **endogenous** — the heavier track throttles the GPU through its own
+power draw — so the measured value is what the workload experiences on stock hardware, which is part
+of why it stays canonical; the normalized bound answers the narrower iso-clock question. The derived
+artifacts are separately named `*_normalized.derived.<method>.txt` +
 `derived_clocks.json`, and `src/clock_norm.py` never writes `results.*.json`, `sr.json`, or a
 measured table — the same read-only discipline as the `src.report` re-render (CLAUDE §8). A
 clock-locked re-run remains the correct fix and is recorded as deferred future work.

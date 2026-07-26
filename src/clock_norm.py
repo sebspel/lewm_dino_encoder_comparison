@@ -36,6 +36,11 @@ The rescaling **over-corrects** (memory-bound and host/Python time do not scale 
 that is the point: the normalized figure is the **maximum plausible correction**, a bound beside
 the measured value, never a point estimate and never a replacement.
 
+On the recorded Phase-5 data the overhead surface is unresolvable by construction for DINO — its
+overhead share of the cycle (1−p ≈ 0.01–0.03) sits below the cycle-vs-component clock mismatch
+(Δf/f_cmp ≈ 0.04–0.07) — so its derived overhead rows flip negative, and LeWM's are blank (component
+runs too short for the 1 Hz sampler). Expected output, not a defect: architecture.md §11.
+
 Which run's clock normalizes which latency follows where the latency was measured: per-cycle rides
 the SR eval-shim run (`*.sr_eval.dmon.log`), the isolated encode/predict engine loops ride the
 benchmark run (`*.benchmark.dmon.log`), each selected at the render's calibration method
@@ -85,6 +90,10 @@ _STATISTIC = (
     f"util-conditioned median SM clock (dmon samples with SM util >= {CLOCK_BUSY_UTIL_PCT}%)"
 )
 _SCALING_MODEL = "T_ref = T * f_measured / f_ref"
+
+# L40S board power limit (W) — the cap the heavier track saturates and trades clock against.
+# Display-only reference line in the throttle diagnostic; it normalizes nothing.
+_POWER_LIMIT_W = 350
 
 # Where the committed display copy of the throttle plot lands (`reports/figs/`), resolved relative
 # to this file so the render does not depend on the working directory.
@@ -548,10 +557,14 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Pa
 
     Two panels — **SM clock** (the confound) over **power** (its cause) — because the story is
     that the heavier track saturates the board power limit and trades clock for it while the
-    lighter track never approaches the limit. The `f_ref` boost ceiling is drawn as a reference
-    line, so "at the ceiling" vs "throttled below it" is readable without arithmetic. Bars use the
-    measured (util-conditioned) statistic; an UNMEASURED run is labelled as such rather than
-    plotted at some fallback value.
+    lighter track never approaches the limit. The `f_ref` boost ceiling and the board power limit
+    are each drawn as a reference line, so "at the ceiling" vs "throttled below it" and "pinned at
+    the cap" vs "never near it" are readable without arithmetic or knowing the L40S TDP. Bars use
+    the measured (util-conditioned) statistic; an UNMEASURED run is labelled as such rather than
+    plotted at some fallback value. Each measured clock bar carries its busy-sample count `n=…` —
+    the lighter track's eval-shim medians rest on an order of magnitude fewer samples than the
+    heavier track's, and the label keeps that visible instead of rendering both with equal
+    authority.
 
     Composite component-isolation runs are excluded, like everywhere else outside the isolation
     table (architecture.md §9)."""
@@ -567,7 +580,8 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Pa
     ):
         for i, track in enumerate(report._TRACKS):
             xs = [j + (i - 0.5) * width for j in range(len(precs))]
-            vals = [_summary(clocks, track, p, run_type, method).get(field) for p in precs]
+            runs = [_summary(clocks, track, p, run_type, method) for p in precs]
+            vals = [r.get(field) for r in runs]
             ax.bar(
                 xs,
                 [v or 0.0 for v in vals],
@@ -576,7 +590,7 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Pa
                 label=report._TRACK_DISPLAY[track],
                 zorder=2,
             )
-            for x, v in zip(xs, vals):
+            for x, v, run in zip(xs, vals, runs):
                 # Value-label every bar: the throttle is a low-tens-of-percent effect, so a
                 # zero-based axis (never truncated for bars) reads it as a small notch. The exact
                 # number belongs on the mark rather than in a truncated axis.
@@ -591,21 +605,35 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Pa
                     fontsize=7,
                     color=report._MUTED if v is None else report._INK,
                 )
+                if field == "f_measured_mhz" and v is not None:
+                    # The busy-sample count behind the median, inside the bar: a 6-sample median
+                    # and a 4000-sample one must not read with equal authority.
+                    ax.annotate(
+                        f"n={run['n_busy']}",
+                        (x, 0),
+                        rotation=90,
+                        textcoords="offset points",
+                        xytext=(0, 4),
+                        ha="center",
+                        va="bottom",
+                        fontsize=6,
+                        color="white",
+                        zorder=3,
+                    )
         ax.set_ylabel(label)
         report._style(ax, grid_axis="y")
-    # The ceiling reference line; named in the xlabel caption rather than annotated in-plot, where
-    # it would collide with the value labels of the bars that sit ON the ceiling.
+    # The reference lines (boost ceiling, board power limit). Deliberately unexplained in-figure —
+    # the PNG carries no caption text (owner ruling, 2026-07-26); what the dashes and the n=…
+    # labels mean is documented here and in the disclosure prose, not on the figure.
     axes[0].axhline(CLOCK_F_REF_MHZ, color=report._MUTED, ls="--", lw=0.9, zorder=1)
-    # Headroom above the bars for the legend, so it never sits over a mark. The bar axis itself
-    # keeps its zero baseline — truncating it to dramatize the gap would overstate the confound.
+    axes[1].axhline(_POWER_LIMIT_W, color=report._MUTED, ls="--", lw=0.9, zorder=1)
+    # Headroom above the bars for the legend / the value labels of bars at the cap. The bar axes
+    # keep their zero baseline — truncating one to dramatize the gap would overstate the confound.
     axes[0].set_ylim(0, CLOCK_F_REF_MHZ * 1.32)
+    axes[1].set_ylim(0, _POWER_LIMIT_W * 1.2)
     axes[0].legend(fontsize=8, loc="upper left")
     axes[-1].set_xticks(range(len(precs)), [report._PREC_DISPLAY[p] for p in precs])
-    axes[-1].set_xlabel(
-        f"Precision  ({run_type} runs)\nBars: median over samples at SM util ≥ "
-        f"{CLOCK_BUSY_UTIL_PCT}%; dashes = the {CLOCK_F_REF_MHZ} MHz boost ceiling",
-        fontsize=8,
-    )
+    axes[-1].set_xlabel(f"Precision  ({run_type} runs)", fontsize=8)
     fig.tight_layout()
     path = Path(out_dir) / f"{run_type}_clock_diag.png"
     fig.savefig(path, dpi=150)
