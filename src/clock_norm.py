@@ -38,7 +38,9 @@ the measured value, never a point estimate and never a replacement.
 
 Which run's clock normalizes which latency follows where the latency was measured: per-cycle rides
 the SR eval-shim run (`*.sr_eval.dmon.log`), the isolated encode/predict engine loops ride the
-benchmark run (`*.benchmark.dmon.log`).
+benchmark run (`*.benchmark.dmon.log`), each selected at the render's calibration method
+(`gpu_clocks.run_tag`). Logs written before that tag carried the method are read as `unscoped` and
+their provenance is recorded by `attribute_unscoped_runs`, never assumed.
 
     uv run python -m src.clock_norm
     uv run python -m src.clock_norm from=$STABLEWM_HOME/reports/phase5 calibration_method=entropy
@@ -74,6 +76,10 @@ from src.interfaces import (  # noqa: E402
 # distributions come from the isolated per-precision engine loops in `src.benchmark`.
 _CYCLE_RUN = "sr_eval"
 _COMPONENT_RUN = "benchmark"
+
+# Reserved method key for legacy logs tagged before `gpu_clocks.run_tag` carried the calibration
+# method. Not a method any run was made at — a marker that the log's method is unrecorded.
+_UNSCOPED = "unscoped"
 
 _STATISTIC = (
     f"util-conditioned median SM clock (dmon samples with SM util >= {CLOCK_BUSY_UTIL_PCT}%)"
@@ -157,31 +163,87 @@ def summarize_run(rows: list[dict]) -> dict:
 
 
 def harvest(gpu_log_dir) -> dict:
-    """`gpu_logs/*.dmon.log` -> `{track: {precision: {run_type: summary}}}`.
+    """`gpu_logs/*.dmon.log` -> `{track: {precision: {method: {run_type: summary}}}}`.
 
-    Log basenames are the tags `src.gpu_clocks.log_gpu` was called with:
-    `<track>.<precision>.<run_type>.dmon.log` (`src.study` / `src.sr_eval`). `precision` may be a
-    composite component-isolation key (`enc-fp16+pred-int8`); those are harvested like any other
-    run but reach no derived surface, exactly as they reach no headline table (architecture.md §9).
+    Log basenames are the tags `src.gpu_clocks.run_tag` builds:
+    `<track>.<precision>.<method>.<run_type>.dmon.log` (`src.study` / `src.sr_eval`). `precision`
+    may be a composite component-isolation key (`enc-fp16+pred-int8`); those are harvested like any
+    other run but reach no derived surface, exactly as they reach no headline table
+    (architecture.md §9).
+
+    **Legacy 3-part `<track>.<precision>.<run_type>` logs are still read**, under the reserved
+    method key `unscoped` — they are durable artifacts already on the volume and predate the
+    method-scoped tag (CLAUDE §8). Because the pre-fix tag was overwritten in place by a re-run,
+    an `unscoped` sr_eval log for a quantized precision cannot be attributed to a method from its
+    name alone; `attribute_unscoped_runs` records the evidence for which run wrote it.
 
     An unexpected basename raises rather than being skipped — a silently-dropped run would look
     like a run that was never made."""
     clocks: dict = {}
     for path in sorted(Path(gpu_log_dir).glob("*.dmon.log")):
         parts = path.name[: -len(".dmon.log")].split(".")
-        if len(parts) != 3:
+        if len(parts) == 4:
+            track, precision, method, run_type = parts
+        elif len(parts) == 3:  # legacy, pre method-scoped tag
+            (track, precision, run_type), method = parts, _UNSCOPED
+        else:
             raise SystemExit(
-                f"[clock_norm] cannot read a (track, precision, run_type) tag off "
-                f"{path.name!r} — expected <track>.<precision>.<run_type>.dmon.log"
+                f"[clock_norm] cannot read a (track, precision, method, run_type) tag off "
+                f"{path.name!r} — expected <track>.<precision>.<method>.<run_type>.dmon.log "
+                f"(or the legacy <track>.<precision>.<run_type>.dmon.log)"
             )
-        track, precision, run_type = parts
-        clocks.setdefault(track, {}).setdefault(precision, {})[run_type] = summarize_run(
-            parse_dmon(path)
-        )
+        by_method = clocks.setdefault(track, {}).setdefault(precision, {})
+        by_method.setdefault(method, {})[run_type] = summarize_run(parse_dmon(path))
     return clocks
 
 
-def write_derived_clocks(clocks: dict, out_dir: Path) -> Path:
+def attribute_unscoped_runs(clocks: dict, sr: dict | None) -> dict:
+    """Which calibration method's run wrote each LEGACY unscoped `sr_eval` log?
+
+    The pre-fix tag omitted the method and `log_gpu` opens with `"w"`, so where a precision was
+    evaluated under both methods only the last run's telemetry survives. This does **not** repair
+    that — one log is one log — it records the evidence so the pairing is auditable rather than
+    fortunate.
+
+    The test: a dmon log samples at ~1 Hz for the whole run, so `n_samples ≈ run seconds`, and the
+    run must contain at least its own planning time. `residual_s = n_samples − Σ per-cycle
+    latencies` is therefore **≥ 0 for the method that actually wrote the log** and the leftover is
+    that run's non-planning time (setup, env stepping, teardown). A candidate whose planning alone
+    exceeds the log is physically **excluded**.
+
+    Verdicts: `single-method` (only one method ran — unambiguous by construction), `decisive`
+    (exactly one candidate survives the ≥ 0 test), `ambiguous` (several do; `best_fit` is the
+    smallest residual but the log does not settle it). Only `sr_eval` is checked — the benchmark
+    logs have no per-run duration recorded anywhere to check against."""
+    out: dict = {}
+    for track, precisions in sorted(clocks.items()):
+        for precision, by_method in sorted(precisions.items()):
+            if _CYCLE_RUN not in by_method.get(_UNSCOPED, {}):
+                continue
+            n_samples = by_method[_UNSCOPED][_CYCLE_RUN]["n_samples"]
+            cands = {
+                m: n_samples - sum(v["per_cycle_latencies_ms"]) / 1000.0
+                for m, v in sorted((sr or {}).get(track, {}).get(precision, {}).items())
+                if "per_cycle_latencies_ms" in v
+            }
+            feasible = [m for m, resid in cands.items() if resid >= 0]
+            out[f"{track}.{precision}.{_CYCLE_RUN}"] = {
+                "n_samples": n_samples,
+                "residual_s": {m: round(r, 1) for m, r in cands.items()},
+                "excluded": [m for m in cands if m not in feasible],
+                "best_fit": min(feasible, key=lambda m: cands[m]) if feasible else None,
+                "verdict": (
+                    "single-method"
+                    if len(cands) == 1
+                    else "decisive"
+                    if len(feasible) == 1
+                    else "ambiguous"
+                ),
+            }
+    return out
+
+
+def write_derived_clocks(clocks: dict, attribution: dict, out_dir: Path) -> Path:
     """Persist the harvest to `derived_clocks.json` — the durable, re-readable record of the clock
     statistic every derived number was computed from (so a reader can recheck the correction
     without re-parsing 30 MB of dmon logs). Read-only over `gpu_logs/`; `results.*.json` and
@@ -201,9 +263,14 @@ def write_derived_clocks(clocks: dict, out_dir: Path) -> Path:
                     ),
                     "cycle_run": _CYCLE_RUN,
                     "component_run": _COMPONENT_RUN,
+                    "log_tag": (
+                        "<track>.<precision>.<method>.<run_type>.dmon.log; legacy 3-part logs "
+                        f"are recorded under method {_UNSCOPED!r} (see unscoped_attribution)"
+                    ),
                     "derived": True,
                     "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 },
+                "unscoped_attribution": attribution,
                 "runs": clocks,
             },
             indent=1,
@@ -214,10 +281,22 @@ def write_derived_clocks(clocks: dict, out_dir: Path) -> Path:
 
 
 # --- normalization (the owner-set formula, applied to the canonical latencies) ---------
-def _f(clocks: dict, track: str, precision: str, run_type: str):
+def _summary(clocks: dict, track: str, precision: str, run_type: str, method: str) -> dict:
+    """The one run's telemetry summary, selected by calibration method.
+
+    Prefers the method-scoped log and falls back to a legacy `unscoped` one, which is the only
+    telemetry that exists for runs made before the tag carried the method. The fallback is **per
+    run type**, not per method: after a partial re-run a precision can hold a method-scoped
+    `sr_eval` log beside a legacy `benchmark` one. `{}` when absent."""
+    by_method = clocks.get(track, {}).get(precision, {})
+    scoped = by_method.get(method, {}).get(run_type)
+    return scoped or by_method.get(_UNSCOPED, {}).get(run_type) or {}
+
+
+def _f(clocks: dict, track: str, precision: str, run_type: str, method: str):
     """The run's `f_measured` (MHz), or None when that run is unmeasured / absent."""
-    run = clocks.get(track, {}).get(precision, {}).get(run_type)
-    return None if run is None else run["f_measured_mhz"]
+    run = _summary(clocks, track, precision, run_type, method)
+    return run["f_measured_mhz"] if run else None
 
 
 def _at_ref(ms, f_measured):
@@ -228,7 +307,7 @@ def _at_ref(ms, f_measured):
     return ms * f_measured / CLOCK_F_REF_MHZ
 
 
-def normalize(bench: dict, clocks: dict) -> dict:
+def normalize(bench: dict, clocks: dict, method: str) -> dict:
     """Apply the owner-set normalization to the canonical latencies, on the **three surfaces the
     confound touches** (SPEC §Requirements "Clock-state confound disclosure"):
 
@@ -246,14 +325,18 @@ def normalize(bench: dict, clocks: dict) -> dict:
 
     `bench` must already carry the joined per-cycle statistics (`report._join_eval` +
     `report._finalize_per_cycle`), so the derived numbers describe exactly the same truncated,
-    warm-up-dropped sample as the measured tables."""
+    warm-up-dropped sample as the measured tables.
+
+    `method` selects each run's telemetry, so an `entropy` render normalizes with the `entropy`
+    run's clock — the per-cycle sample being normalized came from that run. Legacy unscoped logs
+    are the documented fallback (`_summary`)."""
     out: dict = {"ratio": [], "precision_delta": {}, "overhead": {}}
 
     for prec in report._PRECISIONS:
         if prec not in bench.get("lewm", {}) or prec not in bench.get("dino", {}):
             continue
-        f_l = _f(clocks, "lewm", prec, _CYCLE_RUN)
-        f_d = _f(clocks, "dino", prec, _CYCLE_RUN)
+        f_l = _f(clocks, "lewm", prec, _CYCLE_RUN, method)
+        f_d = _f(clocks, "dino", prec, _CYCLE_RUN, method)
         row = {"precision": prec, "f_lewm_mhz": f_l, "f_dino_mhz": f_d}
         for pct in ("p50", "p95"):
             r = report.per_cycle_ratio(bench, prec, pct)
@@ -266,13 +349,13 @@ def normalize(bench: dict, clocks: dict) -> dict:
     for track in report._TRACKS:
         base = bench.get(track, {}).get("fp32")
         deltas, overheads = [], []
-        f_base = _f(clocks, track, "fp32", _CYCLE_RUN)
+        f_base = _f(clocks, track, "fp32", _CYCLE_RUN, method)
         for prec in report._PRECISIONS:
             r = bench.get(track, {}).get(prec)
             if r is None:
                 continue
-            f_cyc = _f(clocks, track, prec, _CYCLE_RUN)
-            f_cmp = _f(clocks, track, prec, _COMPONENT_RUN)
+            f_cyc = _f(clocks, track, prec, _CYCLE_RUN, method)
+            f_cmp = _f(clocks, track, prec, _COMPONENT_RUN, method)
 
             # (b) within-model, at a common clock
             p50, p50_ref = r["per_cycle_p50_ms"], _at_ref(r["per_cycle_p50_ms"], f_cyc)
@@ -460,7 +543,7 @@ def render_overhead_table(norm: dict) -> str:
 
 
 # --- throttle diagnostic plot ---------------------------------------------------------
-def plot_throttle(clocks: dict, run_type: str, out_dir: Path) -> Path:
+def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Path:
     """The differential-throttle diagnostic for one run type: LeWM vs DINOv3-WM, per precision.
 
     Two panels — **SM clock** (the confound) over **power** (its cause) — because the story is
@@ -475,7 +558,7 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path) -> Path:
     precs = [
         p
         for p in report._PRECISIONS
-        if any(p in clocks.get(t, {}) and run_type in clocks[t][p] for t in report._TRACKS)
+        if any(_summary(clocks, t, p, run_type, method) for t in report._TRACKS)
     ]
     fig, axes = plt.subplots(2, 1, figsize=(7, 6), sharex=True)
     width = 0.38
@@ -484,7 +567,7 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path) -> Path:
     ):
         for i, track in enumerate(report._TRACKS):
             xs = [j + (i - 0.5) * width for j in range(len(precs))]
-            vals = [clocks.get(track, {}).get(p, {}).get(run_type, {}).get(field) for p in precs]
+            vals = [_summary(clocks, track, p, run_type, method).get(field) for p in precs]
             ax.bar(
                 xs,
                 [v or 0.0 for v in vals],
@@ -559,7 +642,19 @@ def run(
     report._finalize_per_cycle(bench, warmup_drop)
 
     clocks = harvest(gpu_log_dir)
-    norm = normalize(bench, clocks)
+    attribution = attribute_unscoped_runs(clocks, sr_overrides)
+    norm = normalize(bench, clocks, method)
+
+    # Surface every legacy log this render had to fall back on. Silence here is what let a
+    # method-ambiguous log be paired with a render and read as if it had been scoped.
+    for tag, ev in attribution.items():
+        if ev["verdict"] != "single-method":
+            print(
+                f"⚠ {tag}.dmon.log is UNSCOPED (legacy tag) and {ev['verdict']}: "
+                f"best fit {ev['best_fit']!r}, residual_s {ev['residual_s']}"
+                + (f", excluded {ev['excluded']}" if ev["excluded"] else "")
+                + f" — this {method} render normalized with it. Evidence in derived_clocks.json."
+            )
 
     texts = {
         "ratio": render_ratio_table(norm),
@@ -569,13 +664,16 @@ def run(
     # Method-scoped like the measured tables: the per-cycle sample these numbers reduce was
     # recorded by a method-labelled `src.sr_eval` run, so an unscoped name would let an `entropy`
     # render overwrite the `max` artefact (SPEC §Parity, CLAUDE §8).
-    paths = {"derived_clocks": write_derived_clocks(clocks, out_dir)}
+    paths = {"derived_clocks": write_derived_clocks(clocks, attribution, out_dir)}
     for key, text in texts.items():
         path = out_dir / f"{key}_normalized.derived.{method}.txt"
         path.write_text(text + "\n")
         paths[key] = path
 
-    plots = {rt: plot_throttle(clocks, rt, Path(gpu_log_dir)) for rt in (_CYCLE_RUN, _COMPONENT_RUN)}
+    plots = {
+        rt: plot_throttle(clocks, rt, Path(gpu_log_dir), method)
+        for rt in (_CYCLE_RUN, _COMPONENT_RUN)
+    }
 
     # Committed display copy in the repo — the same `reports/figs/` exception the headline plots
     # use (SPEC §Headline-artifact durability): regenerable, display-only, never the canonical copy,

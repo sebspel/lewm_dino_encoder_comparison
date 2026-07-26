@@ -34,14 +34,33 @@ def default_log_dir() -> Path:
     return base / "gpu_logs"
 
 
+def run_tag(track: str, precision: str, method: str, run_type: str) -> str:
+    """The telemetry log's basename: `<track>.<precision>.<method>.<run_type>`.
+
+    The calibration method is part of the tag because int8/fp8 are run once per method and
+    `log_gpu` opens the log with `"w"`: under an unscoped `<track>.<precision>.<run_type>` tag an
+    `entropy` re-run **overwrote the `max` run's telemetry in place**, leaving `src.clock_norm` to
+    pair the surviving log with whichever method it happened to be rendering — a silently wrong
+    normalization input. Same defect the derived tables' method-scoped filenames already guard
+    against (SPEC §Parity, CLAUDE §8).
+
+    fp32/fp16 engines are method-INVARIANT but are still tagged with the run's method: the solves
+    the observer brackets are a separate run per method, so their telemetry is too.
+
+    `src.clock_norm.harvest` parses this back, and also accepts the legacy 3-part
+    `<track>.<precision>.<run_type>` names already on the volume."""
+    return f"{track}.{precision}.{method}.{run_type}"
+
+
 @contextmanager
 def log_gpu(tag: str, log_dir: Path | None = None):
     """Run `nvidia-smi dmon` for the duration of the `with` block, streaming its timestamped
     samples (clock MHz / power / temp / utilization / memory) to `<log_dir>/<tag>.dmon.log`.
 
-    `tag` identifies the run and is the log's basename (e.g. `lewm.fp16.benchmark`). `log_dir`
-    defaults to `default_log_dir()`. The observer is terminated on block exit (SIGTERM, then
-    SIGKILL if it does not stop within 5s), so it never outlives the run it brackets."""
+    `tag` identifies the run and is the log's basename — build it with `run_tag()`, which owns the
+    naming convention. `log_dir` defaults to `default_log_dir()`. The observer is terminated on
+    block exit (SIGTERM, then SIGKILL if it does not stop within 5s), so it never outlives the run
+    it brackets."""
     log_dir = log_dir or default_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{tag}.dmon.log"

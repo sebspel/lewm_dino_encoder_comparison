@@ -63,3 +63,18 @@ def test_log_gpu_launches_dmon_and_terminates(monkeypatch, tmp_path):
     assert proc.args[:2] == ["/usr/bin/nvidia-smi", "dmon"]
     assert "-s" in proc.args and gpu_clocks._DMON_METRICS in proc.args
     assert proc.terminated  # observer stopped on block exit
+
+
+def test_run_tag_carries_the_calibration_method():
+    """int8/fp8 are run once per method and `log_gpu` opens the log with `"w"`, so a tag without
+    the method let an `entropy` re-run overwrite the `max` run's telemetry in place — and left
+    the render pairing the survivor with whichever method it was rendering (CLAUDE §8)."""
+    assert gpu_clocks.run_tag("dino", "int8", "max", "sr_eval") == "dino.int8.max.sr_eval"
+    assert gpu_clocks.run_tag("dino", "int8", "entropy", "sr_eval") != gpu_clocks.run_tag(
+        "dino", "int8", "max", "sr_eval"
+    )
+    # `src.clock_norm.harvest` splits the tag on "." — a composite isolation key must survive it
+    assert (
+        gpu_clocks.run_tag("dino", "enc-fp16+pred-int8", "entropy", "sr_eval").split(".")
+        == ["dino", "enc-fp16+pred-int8", "entropy", "sr_eval"]
+    )

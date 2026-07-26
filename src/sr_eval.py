@@ -56,7 +56,7 @@ from unittest.mock import patch
 
 from src import wandb_log
 from src.eval import _compose_eval_cfg, _parse_success_rate
-from src.gpu_clocks import log_gpu
+from src.gpu_clocks import log_gpu, run_tag
 from src.interfaces import DEFAULT_CALIBRATION_METHOD, check_calibration_method
 
 # The eval overlay name -> track. The overlay sets `policy=<track>/weights_epoch_<n>.pt`; the
@@ -273,7 +273,7 @@ def main():
                 # Bracket the per-cycle eval-shim run with the dmon telemetry observer so the
                 # unlocked GPU clock/power/temp state during the headline per-cycle solves is
                 # recorded, not merely assumed (SPEC §Parity).
-                with log_gpu(f"{track}.{precision}.sr_eval", out_dir / "gpu_logs"):
+                with log_gpu(run_tag(track, precision, method, "sr_eval"), out_dir / "gpu_logs"):
                     sr, per_cycle_ms = _eval_one(hydra_argv, shim)
                 # Carry the RAW per-decision latencies (not pre-reduced percentiles) so src.report
                 # truncates to the common min-n across tracks before taking p50/p95 (equal-n).

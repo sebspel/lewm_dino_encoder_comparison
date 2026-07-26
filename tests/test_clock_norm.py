@@ -120,11 +120,13 @@ def test_undersampled_run_is_unmeasured_never_assumed(tmp_path):
     assert s["sm_clock_median_mhz"] == 1260.0  # the value it refused to normalize with
 
 
-def test_harvest_keys_by_track_precision_runtype(tmp_path):
+def test_harvest_keys_by_track_precision_method_runtype(tmp_path):
+    """Legacy 3-part logs land under the reserved `unscoped` method rather than being dropped —
+    they are durable artifacts already on the volume (CLAUDE §8)."""
     clocks = clock_norm.harvest(_logs(tmp_path))
-    assert clocks["dino"]["fp32"]["sr_eval"]["f_measured_mhz"] == 2000.0
-    assert clocks["lewm"]["fp32"]["sr_eval"]["f_measured_mhz"] == CLOCK_F_REF_MHZ
-    assert clocks["lewm"]["fp32"]["benchmark"]["f_measured_mhz"] is None
+    assert clocks["dino"]["fp32"]["unscoped"]["sr_eval"]["f_measured_mhz"] == 2000.0
+    assert clocks["lewm"]["fp32"]["unscoped"]["sr_eval"]["f_measured_mhz"] == CLOCK_F_REF_MHZ
+    assert clocks["lewm"]["fp32"]["unscoped"]["benchmark"]["f_measured_mhz"] is None
 
 
 def test_harvest_fails_loud_on_an_unreadable_tag(tmp_path):
@@ -139,13 +141,80 @@ def test_harvest_fails_loud_on_an_unreadable_tag(tmp_path):
         raise AssertionError("a run with an unreadable tag was silently skipped")
 
 
+def test_method_scoped_logs_do_not_collide_and_are_selected_by_method(tmp_path):
+    """The bug this guards: the pre-fix tag omitted the method and `log_gpu` opens with `"w"`, so
+    an `entropy` re-run overwrote the `max` run's telemetry and the render paired the survivor with
+    whichever method it happened to be rendering. Scoped logs coexist and each render picks its
+    own."""
+    d = tmp_path / "gpu_logs"
+    d.mkdir()
+    _dmon(d / "dino.int8.max.sr_eval.dmon.log", [(100, 2000.0, 340)] * 20)
+    _dmon(d / "dino.int8.entropy.sr_eval.dmon.log", [(100, 2300.0, 340)] * 20)
+    clocks = clock_norm.harvest(d)
+    assert set(clocks["dino"]["int8"]) == {"max", "entropy"}  # neither clobbered the other
+    assert clock_norm._f(clocks, "dino", "int8", "sr_eval", "max") == 2000.0
+    assert clock_norm._f(clocks, "dino", "int8", "sr_eval", "entropy") == 2300.0
+
+
+def test_unscoped_log_is_the_fallback_and_falls_back_per_run_type(tmp_path):
+    """A partially re-run volume holds a method-scoped `sr_eval` beside a legacy `benchmark`; the
+    fallback is per run type, so the legacy component clock is still found."""
+    d = tmp_path / "gpu_logs"
+    d.mkdir()
+    _dmon(d / "dino.int8.entropy.sr_eval.dmon.log", [(100, 2300.0, 340)] * 20)
+    _dmon(d / "dino.int8.benchmark.dmon.log", [(100, 2400.0, 340)] * 20)
+    clocks = clock_norm.harvest(d)
+    assert clock_norm._f(clocks, "dino", "int8", "sr_eval", "entropy") == 2300.0
+    assert clock_norm._f(clocks, "dino", "int8", "benchmark", "entropy") == 2400.0
+
+
+def test_unscoped_attribution_excludes_a_method_whose_planning_exceeds_the_log(tmp_path):
+    """One log cannot be un-overwritten, so the render records WHICH run wrote it instead of
+    assuming. A dmon log samples at ~1 Hz, so it must be at least as long as the planning time it
+    contains: a candidate whose per-cycle latencies exceed the log is physically excluded."""
+    d = tmp_path / "gpu_logs"
+    d.mkdir()
+    _dmon(d / "dino.int8.sr_eval.dmon.log", [(100, 2300.0, 340)] * 100)  # ~100 s of run
+    sr = {
+        "dino": {
+            "int8": {
+                "max": {"per_cycle_latencies_ms": [4000.0] * 30},  # 120 s — cannot fit
+                "entropy": {"per_cycle_latencies_ms": [3000.0] * 30},  # 90 s — fits, +10 s over
+            }
+        }
+    }
+    ev = clock_norm.attribute_unscoped_runs(clock_norm.harvest(d), sr)["dino.int8.sr_eval"]
+    assert ev["verdict"] == "decisive"
+    assert ev["best_fit"] == "entropy" and ev["excluded"] == ["max"]
+    assert ev["residual_s"] == {"max": -20.0, "entropy": 10.0}
+
+
+def test_unscoped_attribution_admits_it_cannot_tell(tmp_path):
+    """Where both candidates fit the log, the record says `ambiguous` — the point is auditability,
+    not a manufactured verdict."""
+    d = tmp_path / "gpu_logs"
+    d.mkdir()
+    _dmon(d / "dino.int8.sr_eval.dmon.log", [(100, 2300.0, 340)] * 100)
+    sr = {
+        "dino": {
+            "int8": {
+                "max": {"per_cycle_latencies_ms": [3000.0] * 30},  # 90 s
+                "entropy": {"per_cycle_latencies_ms": [2900.0] * 30},  # 87 s
+            }
+        }
+    }
+    ev = clock_norm.attribute_unscoped_runs(clock_norm.harvest(d), sr)["dino.int8.sr_eval"]
+    assert ev["verdict"] == "ambiguous"
+    assert ev["excluded"] == [] and ev["best_fit"] == "max"  # smallest residual, but not settled
+
+
 # --- the three surfaces ---------------------------------------------------------------
 def _normalized(tmp_path):
     sr = _bench_and_sr(tmp_path)
     bench = report.load_results(report._resolve_result_paths(tmp_path))
     report._join_eval(bench, sr, "max")
     report._finalize_per_cycle(bench)
-    return bench, clock_norm.normalize(bench, clock_norm.harvest(_logs(tmp_path)))
+    return bench, clock_norm.normalize(bench, clock_norm.harvest(_logs(tmp_path)), "max")
 
 
 def test_ratio_bound_brackets_the_measured_ratio(tmp_path):
@@ -200,7 +269,7 @@ def test_unresolvable_overhead_is_flagged_not_clamped(tmp_path, capsys):
     row["_per_cycle_latencies_ms"] = [300.0] + [model / 0.99] * 10
     bench = {"dino": {"fp32": row}}
     report._finalize_per_cycle(bench)
-    norm = clock_norm.normalize(bench, clock_norm.harvest(d))
+    norm = clock_norm.normalize(bench, clock_norm.harvest(d), "max")
     r = norm["overhead"]["dino"][0]
     assert r["ovh_ms"] > 0 and r["ovh_ms_norm"] < 0  # measured positive, derived flips
     assert r["ovh_share"] < r["clock_mismatch"]  # ...and this is why
@@ -227,10 +296,12 @@ def test_derived_clocks_json_round_trips(tmp_path):
     data = json.loads(Path(out["paths"]["derived_clocks"]).read_text())
     assert data["meta"]["f_ref_mhz"] == CLOCK_F_REF_MHZ
     assert data["meta"]["derived"] is True
-    assert data["runs"]["dino"]["fp32"]["sr_eval"]["f_measured_mhz"] == 2000.0
-    # one entry per (track, precision, run-type), matching the diagnostic
-    assert set(data["runs"]["lewm"]["fp32"]) == {"sr_eval", "benchmark"}
+    assert data["runs"]["dino"]["fp32"]["unscoped"]["sr_eval"]["f_measured_mhz"] == 2000.0
+    # one entry per (track, precision, method, run-type), matching the diagnostic
+    assert set(data["runs"]["lewm"]["fp32"]["unscoped"]) == {"sr_eval", "benchmark"}
     assert data["runs"] == out["clocks"]
+    # the legacy logs' provenance is recorded, not assumed — one method ran, so it is unambiguous
+    assert data["unscoped_attribution"]["dino.fp32.sr_eval"]["verdict"] == "single-method"
 
 
 def test_every_derived_table_names_itself_derived_and_its_construction(tmp_path):

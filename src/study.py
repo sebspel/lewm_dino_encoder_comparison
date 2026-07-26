@@ -51,7 +51,7 @@ from src.interfaces import (
 )
 from src.export import engine_root as default_engine_root, engine_filename
 from src.benchmark import benchmark
-from src.gpu_clocks import log_gpu
+from src.gpu_clocks import log_gpu, run_tag
 from src.precision_match import _build_adapter, example_inputs
 from src.report import report
 
@@ -171,8 +171,9 @@ def run_track(
     same either way — the label just records which built engines were timed.
 
     Each precision's benchmark run is bracketed by an `nvidia-smi dmon` telemetry observer
-    (`gpu_log_dir/<track>.<precision>.benchmark.dmon.log`) so the unlocked GPU clock/power/temp
-    state during the timed loops is recorded, not merely assumed (SPEC §Parity).
+    (`gpu_log_dir/<track>.<precision>.<method>.benchmark.dmon.log` — `gpu_clocks.run_tag`) so the
+    unlocked GPU clock/power/temp state during the timed loops is recorded, not merely assumed
+    (SPEC §Parity).
     """
     root = engine_root if engine_root is not None else default_engine_root()
     adapter, name = _build_adapter(track)
@@ -190,7 +191,7 @@ def run_track(
                 f"(build with `src.export model={name} precision={precision}`)"
             )
             continue
-        with log_gpu(f"{name}.{precision}.benchmark", gpu_log_dir):
+        with log_gpu(run_tag(name, precision, method, "benchmark"), gpu_log_dir):
             bench[precision] = benchmark(
                 engines, encode_inputs, predict_inputs, cfg.n_latency_iters, cfg.warmup
             )
