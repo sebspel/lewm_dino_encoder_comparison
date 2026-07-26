@@ -193,7 +193,7 @@ def test_unresolvable_overhead_is_flagged_not_clamped(tmp_path, capsys):
     d = tmp_path / "gpu_logs"
     d.mkdir()
     _dmon(d / "dino.fp32.sr_eval.dmon.log", [(100, 2000.0, 340)] * 20)
-    _dmon(d / "dino.fp32.benchmark.dmon.log", [(100, 2400.0, 340)] * 20)  # +16% of f_ref
+    _dmon(d / "dino.fp32.benchmark.dmon.log", [(100, 2400.0, 340)] * 20)  # +17% of f_cmp
     # overhead is 1% of the cycle — far below the clock mismatch
     row = _row(1.0, 1.0, 100.0)
     model = 1.0 * 2 + 1.0 * 150
@@ -210,7 +210,7 @@ def test_unresolvable_overhead_is_flagged_not_clamped(tmp_path, capsys):
     # ...and the table carries both numbers, so the resolvability test is checkable off the artifact
     table = clock_norm.render_overhead_table(norm)
     assert "RESOLVABLE only where" in table
-    assert "1-p" in table and "Δf/f_ref" in table
+    assert "1-p" in table and "Δf/f_cmp" in table
 
 
 # --- artefacts ------------------------------------------------------------------------

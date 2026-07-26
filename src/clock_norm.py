@@ -302,14 +302,14 @@ def normalize(bench: dict, clocks: dict) -> dict:
             enc_ref = _at_ref(r["encode_mean_ms"], f_cmp)
             pred_ref = _at_ref(r["predict_mean_ms"], f_cmp)
             ovh_ref = p_ref = None
-            # The two sides were measured on different runs, so they carry different clocks; this
-            # is how much of the cycle that mismatch alone moves. The overhead term is only
-            # RESOLVABLE where the measured overhead share (1−p) exceeds it — otherwise the
-            # correction is larger than the quantity being corrected and the derived value flips
-            # sign. Carried per row so the table shows why, not just that.
-            mismatch = (
-                None if f_cyc is None or f_cmp is None else (f_cmp - f_cyc) / CLOCK_F_REF_MHZ
-            )
+            # The two sides were measured on different runs, so they carry different clocks. The
+            # overhead term is only RESOLVABLE where the measured overhead share (1−p) exceeds
+            # Δf/f_cmp — otherwise the correction is larger than the quantity being corrected and
+            # the derived value flips sign. The denominator is f_cmp, NOT f_ref: substituting
+            # model = p·cyc gives ovh′ = (cyc/f_ref)·(f_cyc − p·f_cmp), so f_ref factors out of the
+            # bracket and cannot enter the sign condition — the threshold is set by the two
+            # measurement clocks alone. Carried per row so the table shows why, not just that.
+            mismatch = None if f_cyc is None or f_cmp is None else (f_cmp - f_cyc) / f_cmp
             if None not in (cyc_ref, enc_ref, pred_ref):
                 model_ref = enc_ref * _ENCODER_CALLS + pred_ref * _PREDICTOR_CALLS
                 ovh_ref = cyc_ref - model_ref
@@ -319,7 +319,7 @@ def normalize(bench: dict, clocks: dict) -> dict:
                         f"⚠ negative DERIVED overhead ({ovh_ref:.4f} ms) for {track} {prec}: "
                         f"the measured overhead share (1−p = {1 - measured['optimizable_fraction']:.3f}) "
                         f"is smaller than the cycle-vs-component clock mismatch ({mismatch:+.3f} of "
-                        "f_ref), so this row's overhead is NOT resolvable under unlocked clocks. "
+                        "f_cmp), so this row's overhead is NOT resolvable under unlocked clocks. "
                         "Surfaced, never clamped (SPEC §Interface Contracts)."
                     )
             overheads.append(
@@ -431,14 +431,14 @@ def render_overhead_table(norm: dict) -> str:
     the derived columns blank rather than half-corrected."""
     hdr = (
         f"{'track':>6} {'prec':>5} {'f_cyc':>7} {'f_cmp':>7} {'ovh_ms':>11} {'ovh_ms′':>11} "
-        f"{'p':>7} {'p′':>7} {'1-p':>7} {'Δf/f_ref':>9}"
+        f"{'p':>7} {'p′':>7} {'1-p':>7} {'Δf/f_cmp':>9}"
     )
     lines = _derived_preamble() + [
         "  MEAN basis (means compose additively; percentiles do not — architecture.md §8). "
         "f_cyc normalizes the cycle, f_cmp the encode/predict loops.",
-        "  Δf/f_ref = (f_cmp − f_cyc)/f_ref — the clock mismatch between the two runs the "
+        "  Δf/f_cmp = (f_cmp − f_cyc)/f_cmp — the clock mismatch between the two runs the "
         "subtraction differences. The overhead term is",
-        "  RESOLVABLE only where 1-p (its measured share of the cycle) EXCEEDS |Δf/f_ref|; below "
+        "  RESOLVABLE only where 1-p (its measured share of the cycle) EXCEEDS |Δf/f_cmp|; below "
         "that the correction is bigger than the quantity",
         "  and ovh_ms′ flips negative. A negative derived overhead is SURFACED, never clamped "
         "(SPEC §Interface Contracts) — read it as",

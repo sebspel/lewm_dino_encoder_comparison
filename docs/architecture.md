@@ -457,7 +457,7 @@ within-model precision deltas can move in **either** direction (a speedup shrink
 baseline was the more throttled run), so that is a caveat on the *spread*, not a signed bias. The
 **overhead decomposition is the surface the confound actually damages**: `overhead = cycle − enc −
 pred` differences terms measured on two different runs at two different clocks, and the term is only
-resolvable where its share of the cycle `(1−p)` exceeds the clock mismatch `Δf/f_ref`. For DINO
+resolvable where its share of the cycle `(1−p)` exceeds the clock mismatch `Δf/f_cmp`. For DINO
 `1−p ≈ 0.01–0.03` against a mismatch of `0.04–0.07`, so the derived overhead flips negative — the
 honest reading is that DINO's absolute overhead floor is *not resolvable* on unlocked clocks, only
 bounded as small. That negative value is surfaced, never clamped.
