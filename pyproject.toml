@@ -30,6 +30,12 @@ dependencies = [
     "pymunk",
     "shapely",
     "onnxscript>=0.7.1",
+    # Phase-8 confidence intervals (`src/stats.py`): scipy for the exact binomial machinery
+    # (Clopper-Pearson via `binomtest.proportion_ci`, `binom.cdf` for the order-statistic ranks),
+    # numpy for the permutation null. Both are already present transitively, but a future resolve
+    # could drop them — an interval must not depend on somebody else's dependency graph.
+    "scipy",
+    "numpy",
 ]
 
 [dependency-groups]

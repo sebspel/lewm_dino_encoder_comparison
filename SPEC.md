@@ -148,6 +148,26 @@ requirements those signatures must satisfy; it does not restate the signatures.
   `docs/architecture.md` §8): **p50** is the comparison basis (headline ratio, FP32-relative speedup);
   **p95** is the reported tail and carries no claim; **mean** is the decomposition basis **only**
   and is never a reported headline.
+- **Every reported ABSOLUTE SR and ABSOLUTE per-cycle p50 carries a 95% confidence interval; no
+  difference or ratio carries one.** SR uses the **Clopper–Pearson** exact binomial interval over the
+  50 eval episodes (exact at the 0/50 and 50/50 boundaries the study actually hits); per-cycle p50
+  uses the **exact binomial order-statistic** interval, computed from the *same* warm-up-dropped,
+  equal-n-truncated sample the reported p50 is computed from — never a re-derived one. ΔSR, the
+  FP32-relative p50 speedup, the cross-model per-cycle ratio, and Δ(entropy−max) get **no** interval,
+  and the mean-based decomposition/dilution tables get none either. The order-statistic interval's
+  **i.i.d. premise is tested, not assumed**: each run's truncated sample gets a two-sided **Dwass
+  Monte-Carlo permutation test on its lag-1 autocorrelation** (α = 0.05, 50,000 permutations, no
+  Student-t transform). **The test decision is the UNADJUSTED p-value** — intervals are reported
+  separately per engine eval run, so no family-wise correction governs the reported flag. Holm
+  step-down adjusted p-values are computed and persisted as **secondary reporting only**, never
+  driving a flag or a table, so "did multiplicity matter here" stays answerable off the artefact
+  rather than argued. A rejected test is **disclosed as a flag beside the interval, never silently
+  corrected** — serial correlation makes the interval too narrow, which reads as a stronger result
+  than the sample supports. **The interval artefact is self-describing**: every point records the
+  **n it was computed over** (episodes for SR, cycles for p50), the observed lag-1 statistic, **both**
+  the pre-permutation asymptotic p-value **and** the permutation p-value, the permutation null's
+  own lag-1 summary, and the **fixed, recorded permutation seed** — so an interval can be re-derived
+  and audited off the artefact rather than taken on trust. (`docs/architecture.md` §12.)
 - **A "cycle" is ONE episode's decision, not the span of one `CEMSolver.solve` call.** A solve
   plans every still-alive episode sequentially, so its wall clock is the sum of N decisions. The
   latency callback therefore brackets **per env** (consecutive `start_batch` hooks, the last
@@ -280,6 +300,10 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   clock — is **owner-gated** (§Implementation Boundaries). The measured numbers stay **canonical and remain
   the headline**; normalized numbers are **additive, labelled `derived`, and never overwrite**
   `results.*.json` or the measured tables (CLAUDE §8).
+- **Confidence intervals are RE-ANALYSIS of the stored samples, never a new measurement.** They are
+  computed off `sr.json` alone — no eval, benchmark, or export run — and are **additive**: they land
+  in their own `stats.json` plus columns/error bars on the regenerable views, and `results.*.json`
+  and `sr.json` stay **byte-unchanged**, the same read-only discipline the derived clock render obeys.
 - Training batch size is held equal across tracks (128, LeWM's paper value); training **hardware**
   is not (LeWM on the L40S, DINOv3-WM on an H200 SXM). Neither carries into inference — the exported
   engine is built and benchmarked on the same L40S from the checkpoint weights alone.
@@ -335,6 +359,13 @@ touching:
   f_measured/f_ref`), the reference clock `f_ref`, the per-run clock statistic feeding it, and which
   time is treated as clock-bound. A wrong choice is a plausible wrong corrected number (silent);
   CLAUDE Code wires the harvest/apply/render only once the owner has fixed the formula.
+- The **confidence-interval construction** — which estimator carries each quantity (Clopper–Pearson
+  for SR, the exact binomial order-statistic interval for p50), the rank convention, α, the
+  permutation count, the choice of lag-1 autocorrelation as the independence statistic, the ruling
+  that the test decision is the **unadjusted** p-value with Holm kept as secondary reporting, and
+  what a rejected independence test licenses about the reported number. A wrong choice here is a
+  plausible wrong interval — silent. CLAUDE Code wires the computation and the render once the owner
+  has fixed the construction.
 - **The clock-confound limitations write-up itself.** Deciding how the confound is framed, what the
   bound licenses, and which caveats are load-bearing is an *interpretation* of the measured result,
   not plumbing over it — the same reason the headline framing is owner-gated. CLAUDE Code produces
@@ -355,6 +386,10 @@ touching:
   wiring — owner sets the quant config — TensorRT builder invocation, percentile timing, memory
   logging, the passive `nvidia-smi dmon` GPU-telemetry logging, table/plot runners).
 - The tracer-bullet smoke script.
+- The confidence-interval *computation and render plumbing* — evaluating the owner-set estimators
+  and permutation test over the stored samples, the Holm secondary values, the `stats.json` write,
+  the interval columns on the tables where SR and p50 appear, and the error bars on the speed-vs-SR
+  plot. Off-pod over the existing canonical artifacts, read-only, like the derived clock render.
 - The clock-confound derived-render *plumbing* — harvesting the per-run clock statistic from the
   telemetry, applying the **owner-set** normalization formula to the canonical latencies, and
   rendering the derived tables + throttle plot — off-pod over the existing canonical artifacts, like
@@ -439,6 +474,17 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   recommended configuration. Results are recorded under composite `enc-<A>+pred-<B>` keys that cannot
   collide with a pure precision, so they are additive and the headline is unchanged by construction.
   Rendered as its own table immediately after the FP32-relative table. (`docs/architecture.md` §9.)
+- **Uncertainty quantification.** Every reported absolute SR and absolute per-cycle p50 carries a 95%
+  confidence interval — Clopper–Pearson for SR, the exact binomial order-statistic interval for p50 —
+  computed from the samples already stored in `sr.json`, with **no additional eval, benchmark, or
+  export run**. The p50 interval's i.i.d. premise is tested per eval run by a two-sided Dwass
+  Monte-Carlo permutation test on lag-1 autocorrelation (α = 0.05, 50,000 permutations, fixed seed),
+  the decision taken on the unadjusted p-value with Holm values persisted as secondary reporting. No
+  interval is placed on any difference or ratio. The numbers land in a **`stats.json` on the
+  persistent network volume** (same durability contract as the other headline artifacts) and are
+  surfaced as interval columns in the tables where SR and p50 appear and as error bars on the
+  speed-vs-SR plot. `results.*.json` and `sr.json` are **read-only** to this analysis and stay
+  byte-unchanged. (`docs/architecture.md` §12.)
 - **Clock-state confound disclosure.** Because GPU clocks cannot be locked (§Execution Environment)
   and the observed throttle is differential — one-sided on the heavier track, so it does not cancel
   in the ratio — the study discloses the confound and bounds it from the logged telemetry: the

@@ -181,7 +181,7 @@ def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
     and rendering the other method must not clobber the first. Both are load-bearing — the SR and
     the per-cycle sample it was measured on are method-sourced."""
     overrides = {"lewm": {"int8": {"max": {"success_rate": 76.0},
-                                   "entropy": {"success_rate": 71.0}}}}
+                                   "entropy": {"success_rate": 72.0}}}}
 
     def _b():
         return {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, 90.0),
@@ -199,7 +199,7 @@ def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
             assert f"calibration_method = {method}" in text
     # both SRs still on disk, each under its own label
     assert "76.0" in Path(out_max["tables"]["speed_table"]).read_text()
-    assert "71.0" in Path(out_ent["tables"]["speed_table"]).read_text()
+    assert "72.0" in Path(out_ent["tables"]["speed_table"]).read_text()
 
 
 def test_speed_table_reports_equal_n(tmp_path):
@@ -219,7 +219,7 @@ def test_speed_table_reports_equal_n(tmp_path):
     assert bench["lewm"]["fp32"]["_per_cycle_n"] == 2
     text = report.render_speed_table(bench)
     assert "cyc_n" in text
-    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[4] == "2"
+    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[6] == "2"
 
 
 def test_method_invariant_precisions_join_across_methods(tmp_path):
@@ -244,7 +244,7 @@ def test_sr_pending_flagged_and_join(tmp_path):
     assert "PEND" in report.render_speed_table(bench)
 
     # a plain-number override fills SR (manual-override back-compat) -> no longer pending
-    out2 = report.report(bench, tmp_path, sr_overrides={"lewm": {"fp32": 91.5}})
+    out2 = report.report(bench, tmp_path, sr_overrides={"lewm": {"fp32": 92.0}})
     assert "lewm-fp32" not in out2["sr_pending"]
 
 
@@ -255,7 +255,7 @@ def test_method_labelled_sr_join_selects_and_coexists(tmp_path):
     overrides = {
         "lewm": {
             "fp32": {"max": {"success_rate": 90.0}},
-            "int8": {"max": {"success_rate": 76.0}, "entropy": {"success_rate": 71.0}},
+            "int8": {"max": {"success_rate": 76.0}, "entropy": {"success_rate": 72.0}},
         }
     }
 
@@ -269,7 +269,7 @@ def test_method_labelled_sr_join_selects_and_coexists(tmp_path):
     b_ent = {"lewm": {"fp32": _bench(100.0, 100.0, 1.0, 0.25, math.nan),
                       "int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
     report.report(b_ent, tmp_path, sr_overrides=overrides, method="entropy")
-    assert b_ent["lewm"]["int8"]["success_rate"] == 71.0
+    assert b_ent["lewm"]["int8"]["success_rate"] == 72.0
 
 
 def test_legacy_flat_sr_joins_only_under_max(tmp_path):
@@ -355,7 +355,7 @@ def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
     # the exclusion is ON the artefact: drop× = 100 / retained p50 (10) = 10.00
     text = report.render_speed_table(dropped)
     assert "drop×" in text
-    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[5] == "10.00"
+    assert [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]][0].split()[7] == "10.00"
 
 
 def test_warmup_drop_does_not_move_the_p50_headline(tmp_path):

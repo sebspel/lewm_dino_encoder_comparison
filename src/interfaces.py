@@ -100,6 +100,28 @@ PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, ba
 # way (median robustness) — this is for the mean-based decomposition.
 PER_CYCLE_WARMUP_DROP = 1
 
+# --- Confidence intervals (owner-gated; SPEC §Implementation Boundaries "confidence-interval
+# construction", signed off 2026-08-05; rationale `docs/architecture.md` §12). A wrong value here is
+# a plausible wrong INTERVAL — silent — so these are set by the owner, not tuned.
+#
+# Trial count for the SR binomial. It is the ONE input to the intervals that no artifact records:
+# `sr.json` stores the success RATE, not k/n. Source: `scripts/plan/config/pusht.yaml`
+# `eval.num_eval: 50` (== `world.num_envs`), unchanged by the eval overlays. Successes are recovered
+# as `round(SR/100 * n)` under a loud integrality guard — never a silent round.
+EVAL_NUM_EPISODES = 50
+# Two-sided 95% intervals throughout: Clopper-Pearson for SR, the exact binomial order-statistic
+# interval for the per-cycle p50. Also the significance level of the independence test.
+CI_ALPHA = 0.05
+# Dwass Monte-Carlo permutation test on the sample's lag-1 autocorrelation — the check on the
+# order-statistic interval's i.i.d. premise. The per-cycle vector is consecutive decisions across
+# still-alive episodes on a thermally drifting GPU, so independence is a claim, not a given; serial
+# correlation would make the interval too NARROW (a stronger result than the sample supports).
+PERMUTATION_RESAMPLES = 50_000
+# Fixed and recorded, and set to the owned layer's seed convention (`ExportConfig.seed`,
+# `calibrate.predictor_batches`) rather than a fresh value: a Monte-Carlo p-value that moves between
+# renders is not an artefact anyone can audit.
+PERMUTATION_SEED = 0
+
 # --- Clock normalization (owner-gated; SPEC §Implementation Boundaries "clock-normalization
 # construction", signed off 2026-07-25). GPU clocks are unlockable on this platform, and the
 # observed throttle is DIFFERENTIAL — the heavier track power-throttles while the lighter one holds

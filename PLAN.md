@@ -585,6 +585,73 @@ verdict** where the overhead share is below the clock mismatch; throttle plot co
 
 ---
 
+## Phase 8 — Confidence intervals & the independence premise (off-pod)  🔴 construction · 🟢 compute + render
+
+Off-pod: reads the saved `sr.json` — no L40S, **no eval/benchmark/export re-run**. Adds a 95% CI to
+every reported **absolute** SR and **absolute** per-cycle p50, and tests the i.i.d. premise the p50
+interval rests on. Canonical artifacts stay byte-unchanged; intervals are additive.
+(SPEC §Interface Contracts, §Parity, §Requirements "Uncertainty quantification",
+§Implementation Boundaries; `docs/architecture.md` §12.)
+
+- [x] 🔴 **OWNER GATE — interval construction.** Owner fixes: Clopper–Pearson for SR; the exact
+  binomial order-statistic interval for p50 (rank convention, α = 0.05) over the warm-up-dropped,
+  equal-n-truncated sample; the Dwass MC permutation test on lag-1 autocorrelation (two-sided,
+  50,000 permutations, no Student-t transform, fixed seed); the decision taken on the **unadjusted**
+  p-value with **Holm as secondary reporting only**; no interval on any difference or ratio.
+  → verify: recorded in `docs/architecture.md` §12 + the `src.stats` docstring **before** any
+  `stats.json` is written. (Signed off 2026-08-05.)
+
+- [x] 🟢 **Declare the stats dependencies.** `scipy` + `numpy` into `pyproject.toml`
+  `[project.dependencies]` (present transitively today, so a future resolve could drop them).
+  ⚠️ **Owner runs `uv lock` — NOT `uv sync` on the pod:** TensorRT lives outside the lock by design
+  (`setup.sh`), and a sync removes it. Off-pod work needs no sync.
+  → **landed:** `pyproject.toml` + `uv lock` (scipy 1.17.1, numpy; 150 packages resolved).
+  → verify (✔): both appear in `[project.dependencies]`; `uv run python -c "import scipy, numpy"`.
+
+- [x] 🟢 **`src/stats.py` + `tests/test_stats.py`.** Clopper–Pearson (scipy `binomtest
+  .proportion_ci("exact")`), `order_statistic_ci`, `lag1_autocorr`, `dwass_permutation_test`, `holm`,
+  `compute`, `write_stats_json`. The per-cycle sample rule is **shared with `src/report.py`**
+  (`per_cycle_samples`), not duplicated, so the CI's sample is byte-identical to the p50's.
+  → **landed:** `src/stats.py` + `tests/test_stats.py` (19 tests); `report._finalize_per_cycle`'s
+  sample rule extracted to `report.per_cycle_samples`, shared with `stats.compute` so the composite
+  isolation labels get the same truncation without entering `bench`.
+  → verify (✔): `pytest` 134 passed; the four scipy-deviation guards pinned (permutation_test's
+  two-sided convention, the under-covering naive rank choice, `false_discovery_control` ≠ Holm, the
+  Maritz-Jarrett / Hettmansperger-Sheather near-misses).
+
+- [x] 🟢 **Wire intervals into `src/report.py`.** `cyc_p50_CI95` + `ac` + `SR_CI95` on the speed
+  table, `SR_CI95` on the isolation table, `CI95@<method>` on the calibration table; asymmetric
+  `xerr`/`yerr` error bars on `speed_vs_sr*.png`. Ratio/difference/mean tables and
+  `per_cycle_ratio.png` / `component_breakdown_*.png` **untouched**.
+  → **landed:** `_stats_lookup` mirrors `_select_method`'s method-invariant fallback (without it an
+  `entropy` render leaves fp32/fp16 intervals blank purely from a label — `::test_method_invariant
+  _intervals_join_across_methods`). Every table cell stays ONE whitespace-delimited token (`[lo,hi]`
+  unspaced, `ac` never empty) so the artefacts remain `split()`-parseable.
+  → verify (✔): ratio/difference/mean tables unchanged; `speed_vs_sr.png` carries error bars on
+  **both** axes — the latency bars are 0.02–1.9% of the panel x-span, i.e. narrower than the marker,
+  which is the measurement, not a plotting fault.
+
+- [x] 🟢 **Generate `stats.json` — network storage by default, no re-run of anything.** `uv run
+  python -m src.stats` (and `src.report`'s re-render) default their out dir to
+  `study.default_out_dir()` = `$STABLEWM_HOME/reports/phase5/`, so on the pod it lands on the
+  persistent volume; `from=`/`out=` override it for an off-pod run. It reads `sr.json` only —
+  **no `src.study`, no `benchmark.py`, no `sr_eval`, no engines, no GPU**.
+  → verify (✔ 2026-08-05): `stats.json` carries **18** SR intervals and **18** per-cycle p50
+  intervals (composite isolation keys included), each with its n, both p-values, and the recorded
+  seed; `sha256sum` of `sr.json` + both `results.*.json` unchanged.
+
+- [x] 🟢 **Refresh the committed display copies** `reports/figs/speed_vs_sr{,.titled}.png` from the
+  render (display-only exception, re-copied never hand-edited).
+  → verify (✔): repo copies match the volume copies byte-for-byte (`cmp`).
+
+**Verify:** owner sign-off on the construction recorded before any `stats.json`; 18 SR + 18 p50
+intervals persisted with their n, observed lag-1, asymptotic **and** permutation p-values, Holm
+secondary values, and the fixed seed; the tables where SR and p50 appear carry their intervals and
+the speed-vs-SR plot carries error bars; no interval on any difference or ratio; `sr.json` and
+`results.*.json` byte-unchanged.
+
+---
+
 ## Critical files
 
 - `src/interfaces.py` — typed contract; dim constants + CEM per-cycle call counts.
@@ -600,6 +667,11 @@ verdict** where the overhead share is below the clock mismatch; throttle plot co
   `gpu_logs/`, applies the owner-set normalization, writes `derived_clocks.json` +
   `*_normalized.derived.*` + the throttle plot; reads canonical results via `report.load_results`.
   Writes **no** disclosure prose — that write-up is owner-authored (SPEC §Implementation Boundaries).
+- `src/stats.py` — Phase-8 confidence intervals (off-pod): Clopper–Pearson SR + exact binomial
+  order-statistic p50 intervals over the stored `sr.json` samples, the Dwass lag-1 permutation test,
+  Holm secondary values → `stats.json`. Shares the per-cycle sample rule with `src/report.py`.
+  Writes **no** interpretation of a rejected independence test — that is owner-authored
+  (SPEC §Implementation Boundaries).
 - `src/eval_latency.py` — observation-only **per-decision** latency callback (one record per
   episode's decision, NOT per solve — `docs/architecture.md` §8).
 - `src/eval.py` — Phase-3 eval driver over the byte-unmodified `eval_wm.run`.
@@ -640,3 +712,10 @@ verdict** where the overhead share is below the clock mismatch; throttle plot co
 7. `src.clock_norm` renders the clock-normalized derived tables + throttle plot off-pod from the
    saved results + `gpu_logs/`; the confound is bounded with canonical artifacts untouched, and the
    owner-authored write-up discloses it (Phase 7).
+8. `stats.json` lands in `$STABLEWM_HOME/reports/phase5/` by default — the network volume, same
+   durability contract as the other headline artifacts — written by the **cheap render path**
+   (`src.stats`, or `src.report`'s re-render) off the saved `sr.json`. It requires **no `src.study`
+   run**: no `benchmark.py`, no `sr_eval`, no engines, no GPU. Every reported absolute SR and
+   absolute per-cycle p50 carries its 95% interval in the tables and as error bars on the
+   speed-vs-SR plot, the lag-1 independence test is reported per run, and no interval sits on a
+   difference or ratio (Phase 8).

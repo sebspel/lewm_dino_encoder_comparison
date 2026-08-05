@@ -483,7 +483,127 @@ clock-locked re-run remains the correct fix and is recorded as deferred future w
 
 ---
 
-## 12. Rejected & retired approaches
+## 12. Confidence intervals & the independence premise
+
+§8 rules that p50 is "the statistic this sample supports" and that p95 "carries no claim" — both
+arguments from a sample size (n = 50 episodes for SR, n = 55–97 decisions for the per-cycle median)
+that the artefacts state but never quantify. This section fixes the intervals that quantify it.
+
+The whole phase is **re-analysis of stored samples**: it reads `sr.json`, adds no eval/benchmark/
+export run, and rewrites nothing. `sr.json` and `results.*.json` are strictly read-only to it — the
+same discipline §11 imposes on the derived clock render.
+
+### What gets an interval, and what deliberately does not
+
+Intervals go on the two **absolute** quantities the study reports: **success rate** and the
+**per-cycle p50 latency**. They do **not** go on any difference or ratio — not ΔSR, not the
+FP32-relative p50 speedup, not the DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max). That is an
+owner ruling with a reason behind it: the cross-model ratio is 300–400×, three orders of magnitude
+clear of any sampling noise on either leg, so an interval on it would decorate a conclusion that
+sampling error was never in a position to threaten — while inviting exactly the "overlapping
+intervals ⇒ no difference" misreading that a ratio of two medians does not license. The confound
+that *does* move the ratio is the differential clock throttle, and that already has its own bound
+(§11). Component and dilution tables are mean-based (§8) and get nothing either.
+
+### Success rate → Clopper–Pearson
+
+SR is a binomial proportion over exactly 50 episodes (`eval.num_eval: 50`, fixed seed 42). The
+observed values run to both boundaries — `dino fp8@entropy` is 0/50, `lewm fp8@entropy` is 50/50 —
+where a Wald/normal-approximation interval degenerates to zero width and reports a certainty the
+data does not contain. **Clopper–Pearson** is exact for every k including 0 and n, never leaves
+[0, 1], and is the conservative choice at this sample size. `scipy.stats.binomtest(k, n)
+.proportion_ci(method="exact")` implements it precisely; no reimplementation.
+
+The trial count is the one input not stored in any artefact — it lives in
+`scripts/plan/config/pusht.yaml`. Successes are recovered as `k = round(SR/100 × 50)`, exact for
+every stored point, and guarded by a loud integrality check rather than a silent `round`.
+
+**No multiplicity correction on SR, because no test is run on SR.** Clopper–Pearson here is interval
+construction, not hypothesis testing; there is no family of decisions to control an error rate over.
+
+### Per-cycle p50 → exact binomial order-statistic interval
+
+The interval for the median is the distribution-free **order-statistic** interval: pick ranks
+`j < k` and report `[x₍ⱼ₎, x₍ₖ₎]`, whose coverage is exactly a binomial tail sum. Chosen over a
+bootstrap because it needs no resampling assumption and no smoothness — with n ≈ 60 and a latency
+distribution that is right-skewed and clock-drifting, an exact binomial statement is worth more than
+a percentile bootstrap's asymptotics.
+
+**The rank convention is load-bearing.** Taking `j = binom.ppf(α/2)` and `k = binom.isf(α/2)` is the
+obvious move and it **under-covers**: 0.9481 at n = 59, below the nominal 0.95, because `ppf` returns
+the smallest rank whose CDF is *at least* α/2. The conservative recipe is used instead —
+
+> `j−1` = largest r with `cdf(r) ≤ α/2`;  `k−1` = smallest r with `cdf(r) ≥ 1−α/2`;
+> coverage `= cdf(k−1) − cdf(j−1) ≥ 1−α`.
+
+which measures 0.952–0.967 across the n range this study actually has. Where no rank pair achieves
+coverage ≥ 1−α (n ≤ 5 at q = 0.5), **no interval is emitted** — the same "unmeasured, never asserted"
+discipline §11 applies to undersampled clock runs.
+
+**The interval is computed from the same sample as the point.** Warm-up decision dropped (k = 1),
+then equal-n truncated to the common minimum across tracks at that label — byte-identical to what
+`_finalize_per_cycle` reduces to p50. The rule lives in one helper both callers share, so the two can
+never drift apart.
+
+One residual, documented rather than fixed: the reported p50 is `torch.quantile` linear
+interpolation while the interval endpoints are order statistics, so the interval is not symmetric
+about the point and at even n the point can fall between the two central order statistics. Changing
+the point estimate to match would alter already-published numbers for no gain.
+
+### The independence premise is tested, not assumed
+
+The order-statistic interval assumes i.i.d. observations. The per-cycle sample is emphatically not
+guaranteed to be: it is consecutive decisions across still-alive episodes within a solve, on a GPU
+whose clock and thermal state drift over a multi-hour run (§11). Serial correlation would make the
+interval **anti-conservative — too narrow** — which is the failure mode that reads as a stronger
+result than the data supports.
+
+So it is measured. Each run's truncated sample gets a **Dwass Monte-Carlo permutation test** on its
+**lag-1 autocorrelation**: two-sided, α = 0.05, B = 50,000 permutations, statistic used raw with **no
+Student-t transform**. Permuting the vector destroys temporal order while preserving the marginal
+distribution exactly, so it is the right null for "is there structure in the ordering". The p-value
+is `(1 + #{|r₁*| ≥ |r₁_obs|}) / (1 + B)` — the add-one form, which keeps the test exact rather than
+letting a zero count report p = 0.
+
+**Result reported, never silently corrected.** Where independence is rejected the interval is flagged
+in the table and the flag is what the reader acts on; widening the interval by some autocorrelation-
+adjusted factor would be a modelling choice nobody signed off on. What a rejected flag *licenses*
+about the headline is owner-authored interpretation, the same boundary §11's disclosure sits behind.
+
+**The test decision is the unadjusted p-value.** Intervals are reported separately per engine eval
+run — each run's interval is read on its own, not as one of 18 simultaneous claims — so no
+family-wise error rate governs the flag a reader acts on. No Bonferroni.
+
+**Holm is secondary reporting, not mainline.** The step-down adjusted p-values are computed over the
+18-test family and persisted unconditionally, whether or not they flip anything, so "did multiplicity
+matter here" is answerable off the artefact instead of argued. They drive no flag and appear in no
+table — `stats.json` carries them alongside the raw values, and the raw values are what the rendered
+`ac` column reflects. Holm rather than Bonferroni for the secondary view because it is uniformly more
+powerful at identical FWER control; a Bonferroni column would only be a weaker version of the same
+supplementary number.
+
+### Deviations from stock library implementations, flagged
+
+The brief was to use scipy where it matches and flag where it cannot. Four places it cannot:
+
+- **`scipy.stats.permutation_test` is not the Dwass test.** Its `two-sided` is *"twice the smaller
+  of the p-values"*, not `|r*| ≥ |r_obs|`. The permutation loop is therefore written directly.
+- **No scipy function computes the order-statistic quantile interval.** `mstats.median_cihs`
+  (Hettmansperger–Sheather) and `mstats.mquantiles_cimj` (Maritz–Jarrett) are *different
+  estimators* and must not be substituted; only `scipy.stats.binom.cdf` is used.
+- **scipy has no Holm.** `scipy.stats.false_discovery_control` is Benjamini–Hochberg/Yekutieli —
+  FDR, not FWER — and controls a different quantity. `statsmodels` is not a dependency and is not
+  being added for one function. Holm is ~5 lines and is written out.
+- **The rank convention above**, where the obvious scipy call is the wrong one.
+
+Clopper–Pearson is the one construction taken wholesale from scipy, because it is exact there.
+
+Each of these is pinned by a test in `tests/test_stats.py` whose name states the deviation, so a
+future refactor toward "just use scipy" fails loudly instead of silently changing an interval.
+
+---
+
+## 13. Rejected & retired approaches
 
 - **Standalone profiler + its CEM-iteration mirror — retired.** The PyTorch per-call timing could
   not reconcile with the engine-context cycle. The decomposition moved into

@@ -64,6 +64,7 @@ from src.interfaces import (  # noqa: E402  — CEM per-cycle call counts (the d
     PREDICTOR_CALLS_PER_CYCLE as _PREDICTOR_CALLS,
     CALIBRATION_METHODS,
     DEFAULT_CALIBRATION_METHOD,
+    EVAL_NUM_EPISODES,
     PER_CYCLE_WARMUP_DROP,
     QUANTIZED_PRECISIONS,
     check_calibration_method,
@@ -269,10 +270,57 @@ def _method_line(method: str) -> str:
     )
 
 
+def _stats_lookup(payload: dict | None, track: str, precision: str, method: str) -> dict:
+    """One point out of a `src.stats.compute` payload, or `{}` so a missing point renders as a blank
+    cell rather than raising. A plain dict walk, deliberately NOT an import of `src.stats` — that
+    module imports this one for the shared per-cycle sample rule, and the intervals must stay
+    optional here (a render without them is still a valid artefact).
+
+    **Falls back across methods for fp32/fp16 exactly as `_select_method` does.** `src.sr_eval`
+    stamps every precision in a run with that run's method label, so a method-invariant fp32/fp16
+    point recorded by a `max` run is filed under `max`; without the fallback an `entropy` render
+    shows those rows an SR but no interval, purely from a label."""
+    if not payload:
+        return {}
+    by_method = payload.get("points", {}).get(track, {}).get(precision, {})
+    hit = by_method.get(method)
+    if hit is not None or precision not in _METHOD_INVARIANT_PRECISIONS:
+        return hit or {}
+    for m in (DEFAULT_CALIBRATION_METHOD, *sorted(by_method)):
+        if by_method.get(m):
+            return by_method[m]
+    return {}
+
+
+def _ci(bounds, spec: str = ".1f") -> str:
+    """A `[lo,hi]` interval rendered for a fixed-width table, or "—" when the sample could not
+    support one (`src.stats` returns None rather than inventing an interval).
+
+    NO space after the comma, deliberately: every cell in these tables is one whitespace-delimited
+    token, which is what lets the artefacts be parsed with `split()`."""
+    if not bounds:
+        return "—"
+    return f"[{format(bounds[0], spec)},{format(bounds[1], spec)}]"
+
+
+def _ac_flag(point: dict) -> str:
+    """Independence marker for one row: `*` when the Dwass lag-1 permutation test rejects at the
+    UNADJUSTED p-value (the decision — SPEC §Interface Contracts), `-` when it does not, `—` when
+    no sample was available to test. The interval beside a `*` is anti-conservative (too NARROW),
+    so the flag is what a reader acts on. Holm values live in `stats.json` as secondary reporting
+    and deliberately drive nothing here.
+
+    Always emits a token — an empty cell would shift every column after it under `split()`."""
+    if not point or point.get("lag1_p_permutation") is None:
+        return "—"
+    return "*" if point.get("lag1_reject") else "-"
+
+
 def render_speed_table(
     bench: dict,
     method: str = DEFAULT_CALIBRATION_METHOD,
     warmup_drop: int = PER_CYCLE_WARMUP_DROP,
+    stats_payload: dict | None = None,
 ) -> str:
     # All three latency distributions at p50/p95 (SPEC §Interface Contracts): per-cycle is the
     # HEADLINE (joined from the eval-shim; PEND until then) with **p50 the comparison basis** and
@@ -280,9 +328,10 @@ def render_speed_table(
     # until the gated eval-shim pairs it. `cyc_n` is the post-truncation per-cycle sample count
     # those percentiles + the decomposition mean were computed from (architecture.md §8).
     hdr = (
-        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
+        f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p50_CI95':>22} {'ac':>3} "
+        f"{'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
         f"{'enc_p50':>8} {'enc_p95':>8} {'pred_p50':>9} {'pred_p95':>9} "
-        f"{'mem_MB':>9} {'SR':>7}"
+        f"{'mem_MB':>9} {'SR':>7} {'SR_CI95':>16}"
     )
     lines = [
         "  (cyc = per-cycle HEADLINE, joined from eval-shim; p50 = comparison basis, "
@@ -291,6 +340,12 @@ def render_speed_table(
         "precision; SR-dependent, hence why p50 carries the comparison)",
         f"  (drop× = the {warmup_drop} dropped warm-up decision(s) ÷ the retained cyc_p50 — the "
         "EXCLUSION disclosed, not hidden; ≈1 means the cold decision was unremarkable)",
+        "  (CI95 = 95% interval on the ABSOLUTE value: exact binomial order-statistic for cyc_p50 "
+        f"over cyc_n cycles, Clopper-Pearson for SR over {EVAL_NUM_EPISODES} episodes. Full "
+        "construction + p-values in stats.json — architecture.md §12)",
+        "  (ac = * where the Dwass lag-1 permutation test REJECTS independence at the unadjusted p, "
+        "- where it does not, — untested; a * interval is anti-conservative — too NARROW, not wide)",
+        "  (no interval is placed on a difference or a ratio — see the fp32-relative table)",
         _method_line(method),
         hdr,
         "-" * len(hdr),
@@ -307,13 +362,16 @@ def render_speed_table(
             dropped = r.get("_per_cycle_dropped_ms") or []
             p50 = r["per_cycle_p50_ms"]
             drop_x = max(dropped) / p50 if dropped and not _missing(p50) and p50 else None
+            point = _stats_lookup(stats_payload, track, prec, method)
             lines.append(
                 f"{track:>6} {prec:>5} "
-                f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} {_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
+                f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} "
+                f"{_ci(point.get('p50_ci95_ms'), '.1f'):>22} {_ac_flag(point):>3} "
+                f"{_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
                 f"{('—' if n is None else str(n)):>6} {_fmt(drop_x, '.2f'):>7} "
                 f"{r['encode_p50_ms']:>8.3f} {r['encode_p95_ms']:>8.3f} "
                 f"{r['predict_p50_ms']:>9.3f} {r['predict_p95_ms']:>9.3f} "
-                f"{r['peak_mem_mb']:>9.1f} {sr:>7}"
+                f"{r['peak_mem_mb']:>9.1f} {sr:>7} {_ci(point.get('sr_ci95_pct')):>16}"
             )
     return "\n".join(lines)
 
@@ -407,7 +465,9 @@ def _sr_value(point):
 
 
 def render_calibration_table(
-    overrides: dict | None, headline_method: str = DEFAULT_CALIBRATION_METHOD
+    overrides: dict | None,
+    headline_method: str = DEFAULT_CALIBRATION_METHOD,
+    stats_payload: dict | None = None,
 ) -> str:
     """The ONE table that spans calibration methods: int8/fp8 SR under `max` AND `entropy`, side
     by side (architecture.md §7).
@@ -427,7 +487,7 @@ def render_calibration_table(
     delta_label = f"Δ({CALIBRATION_METHODS[-1][:3]}−{CALIBRATION_METHODS[0][:3]})"
     hdr = (
         f"{'track':>6} {'prec':>5} "
-        + " ".join(f"{'SR@' + m:>11}" for m in CALIBRATION_METHODS)
+        + " ".join(f"{'SR@' + m:>11} {'CI95@' + m:>16}" for m in CALIBRATION_METHODS)
         + f" {delta_label:>12} {'headline':>9}"
     )
     rows = []
@@ -444,7 +504,8 @@ def render_calibration_table(
             rows.append(
                 f"{track:>6} {prec:>5} "
                 + " ".join(
-                    f"{('PEND' if srs[m] is None else format(srs[m], '.1f')):>11}"
+                    f"{('PEND' if srs[m] is None else format(srs[m], '.1f')):>11} "
+                    f"{_ci(_stats_lookup(stats_payload, track, prec, m).get('sr_ci95_pct')):>16}"
                     for m in CALIBRATION_METHODS
                 )
                 + f" {_fmt(delta, '+.1f'):>12} {headline_method:>9}"
@@ -457,6 +518,9 @@ def render_calibration_table(
             "not built/evaluated for this cell)",
             "  (`headline` = the method the single-method tables were rendered at; latency is "
             "method-invariant, so only SR differs here)",
+            f"  (CI95 = Clopper-Pearson 95% on each ABSOLUTE SR over {EVAL_NUM_EPISODES} episodes; "
+            f"{delta_label} carries none — no interval on a difference. Overlapping intervals do "
+            "NOT by themselves settle whether the methods differ.)",
             hdr,
             "-" * len(hdr),
         ]
@@ -472,7 +536,10 @@ def _parse_isolation_key(key: str):
 
 
 def render_isolation_table(
-    bench: dict, overrides: dict | None, method: str = DEFAULT_CALIBRATION_METHOD
+    bench: dict,
+    overrides: dict | None,
+    method: str = DEFAULT_CALIBRATION_METHOD,
+    stats_payload: dict | None = None,
 ) -> str:
     """Component-precision isolation (architecture.md §9): which component's quantization caused a measured
     SR drop. Placed immediately after the FP32-relative table — it answers the question that table
@@ -520,17 +587,19 @@ def render_isolation_table(
                 if cycle:
                     key_ms = "enc_cyc_ms" if component == "encoder" else "pred_cyc_ms"
                     share = d[key_ms] / cycle
+            point = _stats_lookup(stats_payload, track, key, method)
             rows.append(
                 (
                     _TRACKS.index(track), order.get(prec, len(order)), component,
                     f"{track:>6} {prec:>9} {component:>10} {sr:>7.1f} "
+                    f"{_ci(point.get('sr_ci95_pct')):>16} "
                     f"{_fmt(delta, '+.1f'):>12} {_fmt(share, '.3f'):>10}",
                 )
             )
     if not rows:
         return ""
     hdr = (
-        f"{'track':>6} {'prec':>9} {'quantized':>10} {'SR':>7} "
+        f"{'track':>6} {'prec':>9} {'quantized':>10} {'SR':>7} {'SR_CI95':>16} "
         f"{'ΔSR_vs_fp16':>12} {'cyc_share':>10}"
     )
     return "\n".join(
@@ -539,6 +608,9 @@ def render_isolation_table(
             "fp16. Never a reported configuration, never in the headline sweep.)",
             "  (ΔSR is vs that track's FP16 row — the held component's precision — NOT vs FP32. "
             "cyc_share = that component's share of the measured cycle at that precision.)",
+            f"  (SR_CI95 = Clopper-Pearson 95% interval on the ABSOLUTE SR over "
+            f"{EVAL_NUM_EPISODES} episodes; ΔSR deliberately carries none — no interval on a "
+            "difference, architecture.md §12)",
             f"  calibration_method = {method}  (isolation runs are method-dependent; a row only "
             "explains a headline row rendered at the SAME method)",
             hdr,
@@ -593,7 +665,19 @@ def _style(ax, *, grid_axis: str = "y") -> None:
         item.set_color(_INK)
 
 
-def _render_speed_vs_sr(bench: dict, path: Path, method: str, title: str | None) -> Path:
+def _asym_err(value, bounds):
+    """A `[lo, hi]` interval → matplotlib's asymmetric `(2, 1)` error array around `value`, or None.
+    Clamped at zero: the order-statistic and Clopper-Pearson intervals are NOT symmetric about the
+    point (architecture.md §12), and an interpolated p50 can even fall marginally outside its own
+    order-statistic bracket — a negative bar length would raise rather than render."""
+    if not bounds or _missing(value):
+        return None
+    return [[max(0.0, value - bounds[0])], [max(0.0, bounds[1] - value)]]
+
+
+def _render_speed_vs_sr(
+    bench: dict, path: Path, method: str, title: str | None, stats_payload: dict | None = None
+) -> Path:
     """One speed-vs-SR figure. Two panels (LeWM | DINOv3-WM) with a SHARED y-axis but SEPARATE
     linear x-axes — the ~350× latency gap that a single linear axis would collapse is handled by
     faceting, so no log scale is needed. Marker = precision, with NO connecting line (the
@@ -610,6 +694,17 @@ def _render_speed_vs_sr(bench: dict, path: Path, method: str, title: str | None)
             r = bench.get(track, {}).get(prec)
             if r is None or _missing(r["success_rate"]) or _missing(r["per_cycle_p50_ms"]):
                 continue
+            # 95% intervals on BOTH absolute axes, drawn UNDER the marker in a recessive grey so
+            # the precision points still read first: x = exact binomial order-statistic on the
+            # per-cycle p50, y = Clopper-Pearson on the SR (architecture.md §12). Absent intervals
+            # simply draw no bar.
+            point = _stats_lookup(stats_payload, track, prec, method)
+            xerr = _asym_err(r["per_cycle_p50_ms"], point.get("p50_ci95_ms"))
+            yerr = _asym_err(r["success_rate"], point.get("sr_ci95_pct"))
+            if xerr or yerr:
+                ax.errorbar(r["per_cycle_p50_ms"], r["success_rate"], xerr=xerr, yerr=yerr,
+                            fmt="none", ecolor=_MUTED, elinewidth=0.9, capsize=2.5,
+                            capthick=0.9, zorder=2)
             ax.scatter(r["per_cycle_p50_ms"], r["success_rate"], marker=_PRECISION_MARKER[prec],
                        s=90, color=_TRACK_COLOR[track], edgecolor="white", linewidth=0.8, zorder=3)
             present.append(prec)
@@ -630,13 +725,20 @@ def _render_speed_vs_sr(bench: dict, path: Path, method: str, title: str | None)
     return path
 
 
-def plot_speed_vs_sr(bench: dict, out_dir: Path, method: str = DEFAULT_CALIBRATION_METHOD) -> Path:
+def plot_speed_vs_sr(
+    bench: dict,
+    out_dir: Path,
+    method: str = DEFAULT_CALIBRATION_METHOD,
+    stats_payload: dict | None = None,
+) -> Path:
     """Speed vs SR, rendered twice: untitled `speed_vs_sr.png` (for RESULTS.md, which titles it in
     prose) and titled `speed_vs_sr.titled.png` (the README headline copy). Returns the untitled
     path (the canonical RESULTS artefact)."""
     _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.titled.png", method,
-                        title="Per-cycle planning latency vs success rate")
-    return _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.png", method, title=None)
+                        title="Per-cycle planning latency vs success rate",
+                        stats_payload=stats_payload)
+    return _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.png", method, title=None,
+                               stats_payload=stats_payload)
 
 
 def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
@@ -774,6 +876,30 @@ def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
                 row["success_rate"] = val
 
 
+def per_cycle_samples(raw_by_track: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -> dict:
+    """`{track: raw per-decision latency vector}` → `{track: THE sample}`, for one precision label.
+
+    The single definition of what "the per-cycle sample" is: drop the warm-up head, then truncate
+    every track to the common min-n across the tracks present. `_finalize_per_cycle` reduces it to
+    the reported p50/p95/mean; `src.stats` builds the confidence interval and runs the independence
+    test on it. Shared rather than reimplemented so the interval can never end up describing a
+    different sample than the point estimate it brackets (architecture.md §12) — and so the same rule
+    reaches the composite `enc-<A>+pred-<B>` isolation labels, which `_finalize_per_cycle` never
+    iterates.
+
+    A vector too short to survive the warm-up drop is left OUT rather than reduced to nothing (only
+    reachable with synthetic/degenerate data — real n is 50-100)."""
+    lat_by_track = {t: v[warmup_drop:] for t, v in raw_by_track.items() if len(v) > warmup_drop}
+    if not lat_by_track:
+        return {}
+    n = min(len(v) for v in lat_by_track.values())
+    # First n in TEMPORAL order — a representative chronological subset; NOT sorted()[:n] (the n
+    # smallest), which would censor the upper tail. Order is preserved because the independence
+    # test reads it: a permutation test on lag-1 autocorrelation is meaningless on a reordered
+    # sample. (`_percentile_ms` sorts internally, so order does not affect the percentile itself.)
+    return {t: lat[:n] for t, lat in lat_by_track.items()}
+
+
 def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -> None:
     """Compute per-cycle p50/p95 **and the mean** on each row from its joined raw per-DECISION
     latencies (one per alive episode per solve — `src.eval_latency`), after dropping a warm-up head
@@ -810,21 +936,11 @@ def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -
             for t in _TRACKS
             if prec in bench.get(t, {}) and bench[t][prec].get("_per_cycle_latencies_ms")
         }
-        # Drop the warm-up head first; a vector too short to survive it is left unreduced rather
-        # than reduced to nothing (only reachable with synthetic/degenerate data — real n is 50-100).
-        lat_by_track = {t: v[warmup_drop:] for t, v in raw_by_track.items() if len(v) > warmup_drop}
-        if not lat_by_track:
-            continue
-        n = min(len(v) for v in lat_by_track.values())
-        for t, lat in lat_by_track.items():
-            # First n in TEMPORAL order — a representative chronological subset; NOT sorted()[:n]
-            # (the n smallest), which would censor the upper tail (`_percentile_ms` sorts
-            # internally via torch.quantile, so the input order does not matter for the value).
-            sample = lat[:n]
+        for t, sample in per_cycle_samples(raw_by_track, warmup_drop).items():
             bench[t][prec]["per_cycle_p50_ms"] = _percentile_ms(sample, 0.50)
             bench[t][prec]["per_cycle_p95_ms"] = _percentile_ms(sample, 0.95)
             bench[t][prec]["per_cycle_mean_ms"] = fmean(sample)
-            bench[t][prec]["_per_cycle_n"] = n
+            bench[t][prec]["_per_cycle_n"] = len(sample)
             bench[t][prec]["_per_cycle_dropped_ms"] = raw_by_track[t][:warmup_drop]
 
 
@@ -878,14 +994,31 @@ def report(
     only when their data exists: `calibration_table.txt` (both methods' SR side by side) and
     `isolation_table.<method>.txt` (component-precision isolation, architecture.md §9).
 
-    **Writes only `.txt` and `.png` into `out_dir`.** The canonical inputs — `results.<track>.json`
-    (`src.study`) and `sr.json` (`src.sr_eval`) — are read-only here and are never rewritten, even
-    when `out_dir` is the directory holding them (CLAUDE §8; pinned by
+    When `sr_overrides` is present the render also computes the 95% confidence intervals on every
+    absolute SR and absolute per-cycle p50 plus the lag-1 independence test (`src.stats`), surfaces
+    them as table columns and plot error bars, and persists them to **`stats.json`**. It is pure
+    re-analysis of the same stored samples — no run, no GPU — so it rides this cheap render rather
+    than requiring a `src.study` pass.
+
+    **Writes only `.txt`, `.png` and `stats.json` into `out_dir`.** The canonical inputs —
+    `results.<track>.json` (`src.study`) and `sr.json` (`src.sr_eval`) — are read-only here and are
+    never rewritten, even when `out_dir` is the directory holding them (CLAUDE §8; pinned by
     `tests/test_report.py::test_report_never_rewrites_canonical_results`)."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     _join_eval(bench, sr_overrides, method)
     _finalize_per_cycle(bench, warmup_drop)
+
+    # Confidence intervals on the ABSOLUTE SR and per-cycle p50, plus the independence test the p50
+    # interval rests on (SPEC §Requirements "Uncertainty quantification"). Re-analysis of the same
+    # stored samples — no run, no GPU — so it rides the cheap render rather than needing `src.study`.
+    # Imported HERE, not at module scope: `src.stats` imports this module for the shared per-cycle
+    # sample rule, and the intervals stay optional (a render without sr.json is still valid).
+    stats_payload = None
+    if sr_overrides:
+        from src import stats as _stats
+
+        stats_payload = _stats.compute(sr_overrides, warmup_drop)
 
     missing_sr = _missing_sr_rows(bench)
     if missing_sr:
@@ -899,12 +1032,12 @@ def report(
         f"Calibration method for int8/fp8 SR: {method} "
         "(fp32/fp16 method-invariant; latency headline method-invariant — SPEC §Parity)\n"
     )
-    speed_table = render_speed_table(bench, method, warmup_drop)
+    speed_table = render_speed_table(bench, method, warmup_drop, stats_payload)
     fp32_table = render_fp32_relative_table(bench, method)
     component_table = render_component_table(bench, method)
     dilution_table = render_dilution_table(bench, method)
-    calibration_table = render_calibration_table(sr_overrides, method)
-    isolation_table = render_isolation_table(bench, sr_overrides, method)
+    calibration_table = render_calibration_table(sr_overrides, method, stats_payload)
+    isolation_table = render_isolation_table(bench, sr_overrides, method, stats_payload)
     print(speed_table)
     print()
     print("FP32-relative degradation (speed AND task quality):")
@@ -947,6 +1080,16 @@ def report(
         path.write_text(text + "\n")
         table_paths[key] = path
 
+    # The intervals' own durable artefact, beside the tables it feeds. Method-UNSCOPED (it covers
+    # every point in sr.json — both methods and the isolation composites), so unlike the
+    # single-method tables it has one fixed name and a re-render at the other method does not
+    # clobber a different set of numbers.
+    stats_path = None
+    if stats_payload is not None:
+        from src import stats as _stats
+
+        stats_path = _stats.write_stats_json(stats_payload, out_dir)
+
     ratios = {
         p: {
             "per_cycle_p50_ratio": per_cycle_ratio(bench, p, "p50"),
@@ -957,7 +1100,8 @@ def report(
     }
 
     plots = {
-        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir, method),  # untitled (RESULTS.md)
+        # untitled (RESULTS.md); error bars = the 95% intervals on both absolute axes
+        "speed_vs_sr": plot_speed_vs_sr(bench, out_dir, method, stats_payload),
         "component_breakdown": plot_component_breakdown(bench, out_dir),
     }
     plots["speed_vs_sr_titled"] = plots["speed_vs_sr"].with_name("speed_vs_sr.titled.png")  # README headline
@@ -1005,6 +1149,7 @@ def report(
 
     return {
         "tables": table_paths,  # durable .txt on disk (SPEC §Headline-artifact durability)
+        "stats": stats_path,  # stats.json — the intervals + independence test (None without sr)
         "plots": plots,
         "ratios": ratios,  # DINOv3 ÷ LeWM per-cycle latency (headline speed ratio)
         "dilution": dilution,
