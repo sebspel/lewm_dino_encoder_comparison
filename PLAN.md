@@ -652,12 +652,96 @@ the speed-vs-SR plot carries error bars; no interval on any difference or ratio;
 
 ---
 
+## Phase 9 — Per-component uncertainty: raw-latency capture + intervals  🔴 construction · 🟢 capture/compute/render · 🖥️ benchmark re-run
+
+Extends Phase 8's intervals to the two **component** p50s (encode-step, predictor-step). Their samples
+are not on disk — `src.benchmark` reduces each fixed-iteration loop to p50/p95/mean and discards the raw
+list — so the loops must persist them, which costs one benchmark run per track. **Loop conditions are
+unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and call counts.
+(SPEC §Interface Contracts, §Parity, §Requirements "Uncertainty quantification";
+`docs/architecture.md` §12 "Component p50s ride the same construction".)
+
+- [x] 🔴 **OWNER GATE — component-interval construction.** Owner fixes: the exact binomial
+  order-statistic interval on the encode-/predict-step **p50 only** (never a p95, a mean, a derived
+  share, a difference or a ratio); the sample is the **fixed-iteration loop vector as recorded** — no
+  equal-n truncation, no report-time warm-up drop; the same Dwass lag-1 permutation test (α = 0.05,
+  B = 50,000, fixed seed, decision on the **unadjusted** p-value); **Holm scoped per measurement
+  surface**, per-cycle and component families never pooled; `n_latency_iters` stays **100**; intervals
+  rendered as columns on the existing speed table.
+  → verify: recorded in SPEC §Interface Contracts + `docs/architecture.md` §12 **before** any component
+  interval is written (`src.stats` docstring lands with the compute step below). (Signed off 2026-08-06.)
+
+- [ ] 🟢 **Capture the raw component samples.** `src/benchmark.py::benchmark` returns
+  `(BenchResult, ComponentSamples)` — `_time_loop` already builds the lists; stop discarding them.
+  `ComponentSamples` + the `Benchmark` Protocol arity in `src/interfaces.py`; `BenchResult` unchanged.
+  `_percentiles_ms` computes on `float64` to match `report._percentile_ms` exactly. `src/smoke.py`
+  follows the new arity.
+  → verify: `pytest`; each component vector is `n_iters` long with the warm-up iters excluded; the
+  returned p50 equals `report._percentile_ms(sample, 0.5)` (the anti-drift guard).
+
+- [ ] 🟢 **Persist them.** `src/study.py::dump_track_latencies` writes
+  `latencies.<track>.json` beside `results.<track>.json` — `{meta: {track, n_latency_iters, warmup,
+  calibration_method, seed, written}, latencies: {precision: {encode_ms: [...], predict_ms: [...]}}}` —
+  merged **per precision** with `dump_track_results`' no-clobber discipline, called BEFORE rendering.
+  Keyed by precision only (latency is method-invariant; method is provenance in `meta`).
+  → verify: round-trips through a load; a later single-precision run preserves the other precisions;
+  `results.<track>.json` schema byte-shape unchanged.
+
+- [ ] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, component): `order_statistic_ci`
+  + `dwass_permutation_test` over the stored vector — existing helpers, no new estimator. Own Holm
+  family, separate from the per-cycle one. New top-level `points_components` section
+  (`[track][precision][encode|predict]`, method-free); `points` untouched. CLI auto-discovers
+  `latencies.*.json` beside `sr.json`, plus explicit `latencies=<dir|file>`; absent → section omitted.
+  `meta` records the component sample rule, both family sizes, and `holm_scope`.
+  → verify: the per-cycle Holm values are **byte-identical** with and without a component section
+  (pins the per-surface ruling); every component point records its n, both p-values, and the seed.
+
+- [ ] 🟢 **Render on the speed table.** `render_speed_table` gains `enc_p50_CI95`, `enc_ac`,
+  `pred_p50_CI95`, `pred_ac` beside the existing component columns (reuse `_ci` / `_ac_flag`; every
+  cell stays ONE whitespace-delimited token). `_component_stats_lookup` walks `points_components` with
+  **no** method fallback. `src.report from=` loads `latencies.*.json` from the source dir.
+  → verify: the table stays `split()`-parseable at a fixed column count; the ratio/FP32-relative/
+  component/dilution tables and `per_cycle_ratio.png` / `component_breakdown_*.png` are byte-identical
+  with and without the component payload; read-only guards extended to `latencies.*.json`.
+
+- [ ] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
+  `results.<track>.json` and `gpu_clocks.log_gpu` opens each `*.benchmark.dmon.log` with `"w"`, so the
+  run supersedes both. Copy `results.*.json`, `gpu_logs/*.benchmark.dmon.log`, `derived_clocks.json`,
+  `stats.json` and the rendered `.txt`/`.png` → `$STABLEWM_HOME/reports/phase5/archive/2026-08-06/`.
+  → verify: every superseded file has an archive copy; `sha256sum sr.json` recorded for the post-run
+  comparison.
+
+- [ ] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
+  track=<lewm|dino> calibration_method=entropy` (component latency is method-invariant → one pass per
+  track; the method is recorded as provenance).
+  → verify: `latencies.<track>.json` on the volume with **100 values per component per built
+  precision**; `sr.json` sha256 unchanged; a fresh `*.benchmark.dmon.log` per precision.
+
+- [ ] 🟢 **Regenerate downstream, in order (off-pod).** Component **means** moved, so everything derived
+  from them must be rebuilt: (1) `src.stats` → `stats.json` with both interval sections; (2) `src.report
+  from=… sr=… calibration_method=entropy` → widened speed table + the mean-based component/dilution
+  tables + `component_breakdown_fp32.png`; (3) `src.clock_norm` → `derived_clocks.json` +
+  `*_normalized.derived.*` re-harvested from the **new** benchmark telemetry (Phase-7 surfaces (b)/(c)
+  read component clocks — stale pairing would normalize new latencies with old clocks); (4) refresh
+  `reports/figs/` by re-copying from the render.
+  → verify: `stats.json` carries two family sizes and per-cycle values matching the archived copy;
+  derived tables cite the new telemetry; `reports/figs/` matches the volume copies byte-for-byte.
+
+**Verify:** owner sign-off recorded before any component interval; `latencies.{lewm,dino}.json` on the
+volume with the loops' raw samples; every benchmarked speed-table row carries a component p50 interval
+and an `ac` flag; no interval on any p95, mean, difference or ratio; `sr.json` and `results.*.json`
+byte-unchanged by the analysis.
+
+---
+
 ## Critical files
 
 - `src/interfaces.py` — typed contract; dim constants + CEM per-cycle call counts.
 - `src/adapter.py`, `src/shim.py`, `src/export.py` (incl. the Model-Optimizer INT8 Q/DQ step),
   `src/calibrate.py`, `src/probe_ranges.py`, `src/benchmark.py`, `src/report.py`, `src/study.py`,
-  `src/smoke.py` — the owned layer (Phases 4–6).
+  `src/smoke.py` — the owned layer (Phases 4–6). From Phase 9 `src/benchmark.py` also returns the
+  engine-step loops' raw per-call samples and `src/study.py` persists them to
+  `latencies.<track>.json`, beside (never inside) `results.<track>.json`.
 - `src/precision_match.py`, `src/fidelity.py`, `src/sr_shim.py`, `src/sr_eval.py`,
   `src/trt_runtime.py` — the gates + engine-backed SR path.
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
@@ -667,9 +751,10 @@ the speed-vs-SR plot carries error bars; no interval on any difference or ratio;
   `gpu_logs/`, applies the owner-set normalization, writes `derived_clocks.json` +
   `*_normalized.derived.*` + the throttle plot; reads canonical results via `report.load_results`.
   Writes **no** disclosure prose — that write-up is owner-authored (SPEC §Implementation Boundaries).
-- `src/stats.py` — Phase-8 confidence intervals (off-pod): Clopper–Pearson SR + exact binomial
-  order-statistic p50 intervals over the stored `sr.json` samples, the Dwass lag-1 permutation test,
-  Holm secondary values → `stats.json`. Shares the per-cycle sample rule with `src/report.py`.
+- `src/stats.py` — Phase-8/9 confidence intervals (off-pod): Clopper–Pearson SR + exact binomial
+  order-statistic p50 intervals over the stored `sr.json` samples **and the component p50 intervals
+  over `latencies.<track>.json`** (Holm scoped per measurement surface), the Dwass lag-1 permutation
+  test, Holm secondary values → `stats.json`. Shares the per-cycle sample rule with `src/report.py`.
   Writes **no** interpretation of a rejected independence test — that is owner-authored
   (SPEC §Implementation Boundaries).
 - `src/eval_latency.py` — observation-only **per-decision** latency callback (one record per
@@ -719,3 +804,7 @@ the speed-vs-SR plot carries error bars; no interval on any difference or ratio;
    absolute per-cycle p50 carries its 95% interval in the tables and as error bars on the
    speed-vs-SR plot, the lag-1 independence test is reported per run, and no interval sits on a
    difference or ratio (Phase 8).
+9. The engine-step loops persist their raw per-call samples to `latencies.<track>.json` on the volume;
+   `src.stats` extends the intervals to the encode-/predictor-step p50s off those samples (own Holm
+   family, no truncation, no report-time drop) and the speed table carries a component interval + `ac`
+   flag on every benchmarked row, with `sr.json` / `results.*.json` byte-unchanged (Phase 9).

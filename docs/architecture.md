@@ -308,6 +308,13 @@ track-dependent. The equal-n truncation neutralises this by taking the common mi
 tracks; the n each percentile was computed from is reported on the speed table, so the equal-n
 comparison is verifiable off the artefact rather than asserted.
 
+The **component** loops need none of this: they are fixed-iteration (100 timed, 10 warm-up dropped
+before the first timed call), so their equal-n is structural rather than enforced, and their recorded
+vector is already the sample any statistic runs on (§12). Those raw vectors are **persisted** beside
+the canonical results, and the percentile definition is shared across the benchmark, the report and the
+stats path — one helper, so a stored p50 and a later interval around it can never be computed two
+different ways.
+
 ### Per-cycle warm-up drop
 
 The engine-step loops drop `warmup` iters; the per-cycle callback records from the **first
@@ -489,9 +496,10 @@ clock-locked re-run remains the correct fix and is recorded as deferred future w
 arguments from a sample size (n = 50 episodes for SR, n = 55–97 decisions for the per-cycle median)
 that the artefacts state but never quantify. This section fixes the intervals that quantify it.
 
-The whole phase is **re-analysis of stored samples**: it reads `sr.json`, adds no eval/benchmark/
-export run, and rewrites nothing. `sr.json` and `results.*.json` are strictly read-only to it — the
-same discipline §11 imposes on the derived clock render.
+The whole phase is **re-analysis of stored samples**: it reads `sr.json` and the per-track
+component-latency artefact, adds no eval/benchmark/export run, and rewrites nothing. Those two files
+and `results.*.json` are strictly read-only to it — the same discipline §11 imposes on the derived
+clock render.
 
 ### What gets an interval, and what deliberately does not
 
@@ -575,12 +583,71 @@ run — each run's interval is read on its own, not as one of 18 simultaneous cl
 family-wise error rate governs the flag a reader acts on. No Bonferroni.
 
 **Holm is secondary reporting, not mainline.** The step-down adjusted p-values are computed over the
-18-test family and persisted unconditionally, whether or not they flip anything, so "did multiplicity
-matter here" is answerable off the artefact instead of argued. They drive no flag and appear in no
+family of per-cycle tests — one family per measurement surface, never pooled across surfaces (see
+"Component p50s ride the same construction" below) — and persisted unconditionally, whether or not
+they flip anything, so "did multiplicity matter here" is answerable off the artefact instead of argued. They drive no flag and appear in no
 table — `stats.json` carries them alongside the raw values, and the raw values are what the rendered
 `ac` column reflects. Holm rather than Bonferroni for the secondary view because it is uniformly more
 powerful at identical FWER control; a Bonferroni column would only be a weaker version of the same
 supplementary number.
+
+### Component p50s ride the same construction
+
+The two component distributions (encode-step, predictor-step) get the same order-statistic interval
+and the same lag-1 independence test as the per-cycle p50. The estimator is unchanged; what differs is
+the **sample**, and it differs by being *simpler*.
+
+The per-cycle sample needs two corrections before it can be used — a warm-up head dropped (§8) and an
+equal-n truncation across tracks (§8) — because the callback records from the first decision of the
+first solve and because n is SR-dependent. The component sample needs **neither**: the loop drops its
+warm-up iters at *record* time, before the first timed call, and the loop is fixed-iteration, so n is
+100 on both tracks at every precision by construction rather than by correction. **The stored vector is
+the sample.** No rule to keep in sync, and nothing for the interval and the point estimate to disagree
+about — the property §12 has to engineer on the per-cycle side is free here.
+
+**Only the p50 carries an interval.** p95 does not, for the reason §8 already gives — it carries no
+claim, and putting a 95% interval on a statistic the study declines to compare would invite exactly the
+comparison the ruling forbids. The means carry none either: they exist to make
+`cycle = enc·calls + pred·calls + overhead` exact by linearity of expectation, and that identity is an
+algebraic decomposition of measured quantities, not an inference about a population. For the same reason
+the call-count-weighted `enc_cyc_ms` / `pred_cyc_ms` and everything derived from them (`overhead_ms`,
+`p`, the Amdahl ceiling) carry none — an interval there would be a rescaled interval on a mean, dressed
+as a statement about a measured quantity. Clopper–Pearson does not appear on this surface at all: there
+is no proportion to bound, only a latency quantile.
+
+**The independence test matters more here, not less.** It is tempting to treat a tight
+`for _ in range(100): run(); record()` loop as the clean i.i.d. case and the messy per-cycle sample as
+the suspect one. The opposite is closer to true. The component loop calls one engine back-to-back with
+no planner work between calls, so the whole sample spans a fraction of a second to seconds of sustained
+load — precisely the window in which the unlocked GPU's DVFS ramps its clock and its power/thermal state
+drifts (§11). A monotone ramp across a short loop is textbook positive lag-1 autocorrelation, and it
+would make the interval **too narrow** in exactly the direction that flatters the result. So a rejected
+flag on a component row is an expected outcome, not an anomaly, and it is **disclosed beside the
+interval and never corrected** — the same ruling the per-cycle rows sit under.
+
+**Holm is scoped per measurement surface.** The per-cycle tests form one family; the component tests
+form another; they are never pooled. Two reasons. First, the surfaces are read independently — nobody
+asks "of all 50-odd independence tests in this study, how many would survive"; they ask it of the
+latency distribution in front of them. Second, and decisively for an artefact: pooling would make every
+already-published Holm value a function of *which other surfaces happen to exist in the file*, so adding
+a surface would silently move numbers that were correct when written. The decision p-value is unadjusted
+either way (§12), so nothing a reader acts on depends on this choice — which is exactly why the choice
+should be the one that keeps the artefact stable.
+
+**The raw vectors are persisted, not just the intervals.** An interval nobody can re-derive is an
+interval taken on trust, and §12's self-describing-artefact rule already rejects that for SR and
+per-cycle. Persisting the samples also decouples the question from the hardware: any later statistic
+over the component distributions — a different quantile, a different test — is then an off-pod
+re-analysis rather than an L40S booking. The cost is ~800 floats per track, and they live **beside**
+`results.<track>.json` rather than inside it, so the summary schema every table, plot and derived clock
+render parses stays summary-shaped.
+
+One implementation consequence worth naming: the point estimate and the interval must come from the
+same percentile definition, or the interval can bracket a number the table does not print. The
+percentile helper is therefore one shared definition across the benchmark, the report and the stats
+path. The interpolation residual documented above for per-cycle — `torch.quantile` interpolates while
+the endpoints are order statistics, so the point is not centred in its own interval — applies here
+identically, and is likewise documented rather than "fixed" by moving the point estimate.
 
 ### Deviations from stock library implementations, flagged
 
