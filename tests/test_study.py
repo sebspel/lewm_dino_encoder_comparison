@@ -74,12 +74,13 @@ def test_run_track_skips_missing_engines(tmp_path, monkeypatch):
     )
     cfg = dataclasses.replace(ExportConfig(), n_latency_iters=2, warmup=1)
 
-    name, bench = study.run_track(
+    name, bench, samples = study.run_track(
         "lewm", cfg, torch.device("cpu"), engine_root=tmp_path
     )
 
     assert name == "lewm"
     assert bench == {}  # no engines built -> all precisions skipped, no CUDA touched
+    assert samples == {}  # and no raw component samples to persist
 
 
 def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
@@ -92,7 +93,7 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
         study, "_build_adapter", lambda track: (LeWMAdapter(build_dummy_lewm()), track)
     )
     cfg = dataclasses.replace(ExportConfig(), n_latency_iters=2, warmup=1)
-    name, bench = study.run_track(
+    name, bench, _ = study.run_track(
         "lewm", cfg, torch.device("cpu"), engine_root=tmp_path
     )
 
@@ -139,3 +140,41 @@ def test_dump_track_results_is_additive_per_precision(tmp_path):
     assert set(data["bench"]) == {"fp32", "fp8"}  # additive, no silent loss
     assert data["bench"]["fp32"]["success_rate"] == 90.0
     assert data["meta"]["calibration_method"] == "entropy"  # latest run's provenance label
+
+
+def test_dump_track_latencies_roundtrips_and_records_the_loop_conditions(tmp_path):
+    """The engine-step loops' RAW samples persist to `latencies.<track>.json` beside the results
+    file, and load back in the shape `src.stats` consumes (SPEC §Interface Contracts). `meta` carries
+    the loop conditions, so the sample is self-describing: n, the warm-up that ran untimed before
+    it, and which method's engines were timed."""
+    from src import stats
+
+    cfg = dataclasses.replace(ExportConfig(), n_latency_iters=3, warmup=1)
+    samples = {"fp32": {"encode_ms": [1.0, 2.0, 3.0], "predict_ms": [4.0, 5.0, 6.0]}}
+
+    path = study.dump_track_latencies("lewm", samples, cfg, tmp_path, "entropy")
+    assert path == tmp_path / "latencies.lewm.json"
+
+    meta = json.loads(path.read_text())["meta"]
+    assert (meta["n_latency_iters"], meta["warmup"]) == (3, 1)
+    assert meta["calibration_method"] == "entropy"
+
+    loaded = stats.load_component_latencies([path])
+    assert loaded == {"lewm": samples}
+
+
+def test_dump_track_latencies_is_additive_per_precision(tmp_path):
+    """Same no-clobber discipline as `dump_track_results`: re-benchmarking one precision must not
+    discard the other precisions' stored samples (CLAUDE.md §8) — losing them would cost an L40S run
+    to recover, since nothing else on disk holds the raw vectors."""
+    cfg = ExportConfig()
+    p = study.dump_track_latencies(
+        "dino", {"fp32": {"encode_ms": [1.0], "predict_ms": [2.0]}}, cfg, tmp_path
+    )
+    study.dump_track_latencies(
+        "dino", {"fp8": {"encode_ms": [3.0], "predict_ms": [4.0]}}, cfg, tmp_path
+    )
+
+    stored = json.loads(p.read_text())["latencies"]
+    assert set(stored) == {"fp32", "fp8"}
+    assert stored["fp32"]["encode_ms"] == [1.0]

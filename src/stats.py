@@ -9,6 +9,11 @@ the latency interval rests on:
   - **per-cycle p50 latency** → the **exact binomial order-statistic** interval, computed from the
     SAME warm-up-dropped, equal-n-truncated sample the reported p50 is computed from
     (`report.per_cycle_samples` — shared, never reimplemented here).
+  - **encode-step / predictor-step p50 latency** → that same order-statistic interval over the
+    engine-step loop sample stored in `latencies.<track>.json`. That sample needs neither truncation
+    nor a warm-up drop: the loop is fixed-iteration (n equal across tracks by construction) and drops
+    its warm-up before the first timed call, so the recorded vector IS the sample. p50 only — no
+    interval on a p95 or a mean.
   - **the i.i.d. premise** that interval rests on → a two-sided **Dwass Monte-Carlo permutation
     test** on the sample's **lag-1 autocorrelation** (50,000 permutations, statistic used raw with
     NO Student-t transform). Serial correlation would make the interval too NARROW — a stronger
@@ -17,9 +22,15 @@ the latency interval rests on:
 **No interval on any difference or ratio** — not ΔSR, not the FP32-relative p50 speedup, not the
 DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max). Owner ruling; rationale in architecture.md §12.
 
-**Pure re-analysis of stored samples.** Reads `sr.json` and nothing else. It requires no
+**Holm is scoped per measurement surface**: the per-cycle tests form one family, the component tests
+another, never pooled. Pooling would make every published adjusted p-value a function of which other
+surfaces happen to exist in the file. The decision is the unadjusted p-value either way.
+
+**Pure re-analysis of stored samples.** Reads `sr.json` and `latencies.<track>.json`, nothing else.
+It requires no
 `src.study`, no `src.benchmark`, no `src.sr_eval`, no engines and no L40S — the samples it needs
-were persisted by the completed runs. `sr.json` and `results.*.json` are **read-only** here and are
+were persisted by the completed runs. `sr.json`, `latencies.*.json` and `results.*.json` are
+**read-only** here and are
 never rewritten (SPEC §Parity, CLAUDE §8), the same discipline `src.clock_norm` obeys.
 
 Writes ONE artifact, `stats.json`, defaulting to `$STABLEWM_HOME/reports/phase5/` — the persistent
@@ -46,7 +57,7 @@ owner-authored (SPEC §Implementation Boundaries), like the Phase-7 disclosure p
 
 Usage:
   uv run python -m src.stats
-  uv run python -m src.stats from=<dir> [sr=<sr.json>] [out=<dir>]
+  uv run python -m src.stats from=<dir> [sr=<sr.json>] [latencies=<dir|file>] [out=<dir>]
 """
 
 from __future__ import annotations
@@ -268,6 +279,7 @@ def compute(
     n_episodes: int = EVAL_NUM_EPISODES,
     n_resamples: int = PERMUTATION_RESAMPLES,
     seed: int = PERMUTATION_SEED,
+    component_latencies: dict | None = None,
 ) -> dict:
     """Every (track, precision-label, method) point in `sr.json` -> its intervals + independence
     test. Method-unscoped and label-complete: the composite `enc-<A>+pred-<B>` isolation points are
@@ -275,7 +287,12 @@ def compute(
 
     The per-cycle sample comes from `report.per_cycle_samples`, so it is byte-identical to the one
     `_finalize_per_cycle` reduces to the reported p50 — including the equal-n truncation across the
-    tracks present at that (label, method)."""
+    tracks present at that (label, method).
+
+    `component_latencies` (the merged `latencies.<track>.json` blocks) adds the **component**
+    surface — encode-/predict-step p50 intervals under `points_components` — with its OWN Holm
+    family. Absent, that section is simply omitted: a `stats.json` without it is still valid, and the
+    per-cycle values are byte-identical either way (docs/architecture.md §12)."""
     # Invert to (label, method) -> {track: raw vector}: the equal-n truncation is defined ACROSS
     # tracks at one label, so the grouping has to happen before any sample is cut.
     vectors: dict = {}
@@ -322,12 +339,20 @@ def compute(
                     raw_p[(track, label, method)] = entry["lag1_p_permutation"]
                 points.setdefault(track, {}).setdefault(label, {})[method] = entry
 
-    # Holm across the whole family of independence tests — SECONDARY, flags nothing.
+    # Holm across the per-cycle family of independence tests — SECONDARY, flags nothing. The
+    # component tests form their OWN family below and are never pooled into this one, so these
+    # values do not move when a component section is added (docs/architecture.md §12).
     for key, adj in holm(raw_p).items():
         track, label, method = key
         entry = points[track][label][method]
         entry["lag1_p_holm"] = adj
         entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
+
+    components = (
+        compute_components(component_latencies, alpha, n_resamples, seed)
+        if component_latencies
+        else None
+    )
 
     return {
         "meta": {
@@ -349,13 +374,97 @@ def compute(
             "student_t_adjustment": False,
             "decision_pvalue": "lag1_p_permutation (UNADJUSTED)",
             "holm": "secondary reporting only — adjusts no flag and no table",
-            "holm_family_size": len(raw_p),
+            "holm_scope": "per measurement surface — the per-cycle and component families are never pooled",
+            "holm_family_size": len(raw_p),  # the per-cycle family
             "per_cycle_warmup_drop": warmup_drop,
-            "no_interval_on": "differences and ratios (dSR, fp32-relative speedup, cross-model ratio)",
+            "no_interval_on": (
+                "differences and ratios (dSR, fp32-relative speedup, cross-model ratio); "
+                "any p95; the means and everything derived from them"
+            ),
+            **(
+                {}
+                if components is None
+                else {
+                    "component_estimator": "exact-binomial-order-statistic (p50 only)",
+                    "component_sample_rule": (
+                        "the fixed-iteration engine-step loop sample as recorded — warm-up dropped "
+                        "at record time, no truncation, no report-time drop"
+                    ),
+                    "holm_family_size_components": components["holm_family_size"],
+                }
+            ),
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "points": points,
+        **({} if components is None else {"points_components": components["points"]}),
     }
+
+
+# --- component p50s: the same construction over the engine-step loop samples ----------
+_COMPONENTS = {"encode": "encode_ms", "predict": "predict_ms"}
+
+
+def compute_components(
+    latencies_by_track: dict,
+    alpha: float = CI_ALPHA,
+    n_resamples: int = PERMUTATION_RESAMPLES,
+    seed: int = PERMUTATION_SEED,
+) -> dict:
+    """Every (track, precision, component) engine-step sample -> its p50 interval + independence
+    test. Same estimator and same test as the per-cycle p50 — only the SAMPLE differs, and it differs
+    by being simpler: the loop is fixed-iteration and drops its warm-up at RECORD time, so the stored
+    vector is already the sample (no equal-n truncation, no report-time drop —
+    docs/architecture.md §12).
+
+    `latencies_by_track` is `{track: {precision: {encode_ms: [...], predict_ms: [...]}}}` — the
+    `latencies` block of `latencies.<track>.json`. Method-free by design: component latency is
+    calibration-method-invariant (SPEC §Parity).
+
+    **p50 only.** No interval on the p95 (it carries no claim — SPEC §Interface Contracts), on the
+    means (the decomposition basis, an algebraic identity rather than an inference), or on anything
+    derived from them.
+
+    Holm is applied over THIS family alone, never pooled with the per-cycle tests: pooling would make
+    every published adjusted p-value a function of which other surfaces happen to exist in the file
+    (docs/architecture.md §12). It is secondary reporting either way — the decision is the unadjusted
+    p-value."""
+    points: dict = {}
+    raw_p: dict = {}
+    for track, by_precision in latencies_by_track.items():
+        for precision, vectors in by_precision.items():
+            for component, key in _COMPONENTS.items():
+                sample = list(vectors.get(key) or [])
+                if not sample:
+                    continue
+                ci = order_statistic_ci(sample, _MEDIAN_Q, alpha)
+                entry = {
+                    "p50_ms": report._percentile_ms(sample, _MEDIAN_Q),
+                    "n": len(sample),  # timed iterations the interval is computed over
+                    "p50_ci95_ms": None if ci is None else [ci["lo"], ci["hi"]],
+                    "p50_ci_ranks": None if ci is None else ci["ranks"],
+                    "p50_ci_coverage": None if ci is None else ci["coverage"],
+                }
+                entry.update(dwass_permutation_test(sample, n_resamples, seed, alpha))
+                points.setdefault(track, {}).setdefault(precision, {})[component] = entry
+                raw_p[(track, precision, component)] = entry["lag1_p_permutation"]
+
+    for key, adj in holm(raw_p).items():
+        track, precision, component = key
+        entry = points[track][precision][component]
+        entry["lag1_p_holm"] = adj
+        entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
+    return {"points": points, "holm_family_size": len(raw_p)}
+
+
+def load_component_latencies(paths) -> dict:
+    """Merge the per-track `latencies.<track>.json` files (written by `src.study`) into the
+    `{track: {precision: {encode_ms, predict_ms}}}` shape `compute_components` consumes. Read-only,
+    like every input to this module."""
+    out: dict = {}
+    for p in paths:
+        data = json.loads(Path(p).read_text())
+        out[data["meta"]["track"]] = data["latencies"]
+    return out
 
 
 def write_stats_json(payload: dict, out_dir: Path) -> Path:
@@ -369,17 +478,29 @@ def write_stats_json(payload: dict, out_dir: Path) -> Path:
 
 
 # --- driver ---------------------------------------------------------------------------
+def component_latency_paths(base: Path, explicit=None) -> list[Path]:
+    """The `latencies.<track>.json` files to read: an explicit `latencies=` path (a file or a dir to
+    glob), else whatever sits beside `sr.json`. Empty is fine — the component section is then omitted
+    rather than faked."""
+    src = Path(explicit) if explicit else base
+    if src.is_file():
+        return [src]
+    return sorted(src.glob("latencies.*.json"))
+
+
 def main() -> None:
     args = sys.argv[1:]
     from src.study import default_out_dir  # shared default; lazy to avoid an import cycle
 
     base = default_out_dir()
-    sr_path, out_dir = None, None
+    sr_path, out_dir, latencies_arg = None, None, None
     for a in args:
         if a.startswith("from="):
             base = Path(a.split("=", 1)[1])
         elif a.startswith("sr="):
             sr_path = Path(a.split("=", 1)[1])
+        elif a.startswith("latencies="):
+            latencies_arg = a.split("=", 1)[1]
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
     base = base.parent if base.is_file() else base
@@ -388,19 +509,30 @@ def main() -> None:
     if not sr_path.exists():
         raise SystemExit(f"[stats] no sr.json at {sr_path} — nothing to build intervals from")
 
-    payload = compute(json.loads(sr_path.read_text()))
+    latency_paths = component_latency_paths(base, latencies_arg)
+    payload = compute(
+        json.loads(sr_path.read_text()),
+        component_latencies=load_component_latencies(latency_paths) or None,
+    )
     path = write_stats_json(payload, out_dir)
     meta = payload["meta"]
     n_sr = sum(1 for t in payload["points"].values() for p in t.values()
                for e in p.values() if "sr_ci95_pct" in e)
     n_p50 = sum(1 for t in payload["points"].values() for p in t.values()
                 for e in p.values() if e.get("p50_ci95_ms"))
+    n_comp = sum(1 for t in payload.get("points_components", {}).values() for p in t.values()
+                 for e in p.values() if e.get("p50_ci95_ms"))
     print(
         f"[stats] {n_sr} SR intervals ({meta['sr_estimator']}, n={meta['n_episodes']}) + "
         f"{n_p50} per-cycle p50 intervals ({meta['p50_estimator']})\n"
+        f"[stats] {n_comp} component (encode/predict) p50 intervals from "
+        f"{len(latency_paths)} latencies.*.json"
+        + ("" if latency_paths else " — none found, component section omitted")
+        + "\n"
         f"[stats] independence: {meta['independence_test']} on {meta['test_statistic']}, "
-        f"B={meta['n_resamples']}, seed={meta['seed']}, decision on the UNADJUSTED p-value\n"
-        f"[stats] wrote {path}  (sr.json read-only, untouched)"
+        f"B={meta['n_resamples']}, seed={meta['seed']}, decision on the UNADJUSTED p-value; "
+        f"Holm {meta['holm_scope']}\n"
+        f"[stats] wrote {path}  (sr.json + latencies.*.json read-only, untouched)"
     )
 
 

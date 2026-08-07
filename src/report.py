@@ -292,6 +292,19 @@ def _stats_lookup(payload: dict | None, track: str, precision: str, method: str)
     return {}
 
 
+def _component_stats_lookup(payload: dict | None, track: str, precision: str, component: str) -> dict:
+    """One component point out of a `src.stats` payload's `points_components` section, or `{}` so a
+    missing point renders as a blank cell.
+
+    **No method fallback, because there is no method axis**: component latency is
+    calibration-method-invariant (SPEC §Parity), so `src.study` keys the stored samples by precision
+    alone. `_stats_lookup`'s fallback exists to undo a label `src.sr_eval` stamps on method-invariant
+    SR points; there is no such label to undo here."""
+    if not payload:
+        return {}
+    return payload.get("points_components", {}).get(track, {}).get(precision, {}).get(component, {})
+
+
 def _ci(bounds, spec: str = ".1f") -> str:
     """A `[lo,hi]` interval rendered for a fixed-width table, or "—" when the sample could not
     support one (`src.stats` returns None rather than inventing an interval).
@@ -330,7 +343,8 @@ def render_speed_table(
     hdr = (
         f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p50_CI95':>22} {'ac':>3} "
         f"{'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
-        f"{'enc_p50':>8} {'enc_p95':>8} {'pred_p50':>9} {'pred_p95':>9} "
+        f"{'enc_p50':>8} {'enc_p50_CI95':>16} {'enc_ac':>6} {'enc_p95':>8} "
+        f"{'pred_p50':>9} {'pred_p50_CI95':>16} {'pred_ac':>7} {'pred_p95':>9} "
         f"{'mem_MB':>9} {'SR':>7} {'SR_CI95':>16}"
     )
     lines = [
@@ -340,12 +354,16 @@ def render_speed_table(
         "precision; SR-dependent, hence why p50 carries the comparison)",
         f"  (drop× = the {warmup_drop} dropped warm-up decision(s) ÷ the retained cyc_p50 — the "
         "EXCLUSION disclosed, not hidden; ≈1 means the cold decision was unremarkable)",
-        "  (CI95 = 95% interval on the ABSOLUTE value: exact binomial order-statistic for cyc_p50 "
-        f"over cyc_n cycles, Clopper-Pearson for SR over {EVAL_NUM_EPISODES} episodes. Full "
-        "construction + p-values in stats.json — architecture.md §12)",
+        "  (CI95 = 95% interval on the ABSOLUTE value: exact binomial order-statistic for every p50 "
+        "(cyc over cyc_n cycles; enc/pred over their fixed-iteration loop sample), Clopper-Pearson "
+        f"for SR over {EVAL_NUM_EPISODES} episodes. Full construction + p-values in stats.json — "
+        "architecture.md §12)",
+        "  (the enc/pred loop sample needs no truncation and no warm-up drop — fixed-iteration, "
+        "warm-up dropped at record time — so it is the vector as recorded)",
         "  (ac = * where the Dwass lag-1 permutation test REJECTS independence at the unadjusted p, "
         "- where it does not, — untested; a * interval is anti-conservative — too NARROW, not wide)",
-        "  (no interval is placed on a difference or a ratio — see the fp32-relative table)",
+        "  (no interval on a difference or a ratio — see the fp32-relative table — nor on any p95 "
+        "or mean; the component/dilution tables are mean-based and carry none)",
         _method_line(method),
         hdr,
         "-" * len(hdr),
@@ -363,14 +381,21 @@ def render_speed_table(
             p50 = r["per_cycle_p50_ms"]
             drop_x = max(dropped) / p50 if dropped and not _missing(p50) and p50 else None
             point = _stats_lookup(stats_payload, track, prec, method)
+            # Component intervals are keyed by (track, precision) alone — no method axis, because
+            # component latency is method-invariant (SPEC §Parity). `.3f` not `.1f`: these are
+            # sub-ms to tens of ms, where one decimal would collapse the interval to a point.
+            enc_pt = _component_stats_lookup(stats_payload, track, prec, "encode")
+            pred_pt = _component_stats_lookup(stats_payload, track, prec, "predict")
             lines.append(
                 f"{track:>6} {prec:>5} "
                 f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} "
                 f"{_ci(point.get('p50_ci95_ms'), '.1f'):>22} {_ac_flag(point):>3} "
                 f"{_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
                 f"{('—' if n is None else str(n)):>6} {_fmt(drop_x, '.2f'):>7} "
-                f"{r['encode_p50_ms']:>8.3f} {r['encode_p95_ms']:>8.3f} "
-                f"{r['predict_p50_ms']:>9.3f} {r['predict_p95_ms']:>9.3f} "
+                f"{r['encode_p50_ms']:>8.3f} {_ci(enc_pt.get('p50_ci95_ms'), '.3f'):>16} "
+                f"{_ac_flag(enc_pt):>6} {r['encode_p95_ms']:>8.3f} "
+                f"{r['predict_p50_ms']:>9.3f} {_ci(pred_pt.get('p50_ci95_ms'), '.3f'):>16} "
+                f"{_ac_flag(pred_pt):>7} {r['predict_p95_ms']:>9.3f} "
                 f"{r['peak_mem_mb']:>9.1f} {sr:>7} {_ci(point.get('sr_ci95_pct')):>16}"
             )
     return "\n".join(lines)
@@ -971,6 +996,7 @@ def report(
     sr_overrides: dict | None = None,
     method: str = DEFAULT_CALIBRATION_METHOD,
     warmup_drop: int = PER_CYCLE_WARMUP_DROP,
+    component_latencies: dict | None = None,
 ) -> dict:
     """Emit all headline tables + plots to `out_dir`; optionally log to an open W&B run.
     Returns the artifact paths and the computed ratios for programmatic use.
@@ -1000,8 +1026,14 @@ def report(
     re-analysis of the same stored samples — no run, no GPU — so it rides this cheap render rather
     than requiring a `src.study` pass.
 
+    `component_latencies` ({track: {precision: {encode_ms, predict_ms}}}, from
+    `latencies.<track>.json`) adds the component p50 intervals + independence flags to the speed
+    table's enc/pred columns. Independent of `sr_overrides`: the component samples are their own
+    surface, so they render with or without a joined SR.
+
     **Writes only `.txt`, `.png` and `stats.json` into `out_dir`.** The canonical inputs —
-    `results.<track>.json` (`src.study`) and `sr.json` (`src.sr_eval`) — are read-only here and are
+    `results.<track>.json` + `latencies.<track>.json` (`src.study`) and `sr.json` (`src.sr_eval`) —
+    are read-only here and are
     never rewritten, even when `out_dir` is the directory holding them (CLAUDE §8; pinned by
     `tests/test_report.py::test_report_never_rewrites_canonical_results`)."""
     out_dir = Path(out_dir)
@@ -1015,10 +1047,12 @@ def report(
     # Imported HERE, not at module scope: `src.stats` imports this module for the shared per-cycle
     # sample rule, and the intervals stay optional (a render without sr.json is still valid).
     stats_payload = None
-    if sr_overrides:
+    if sr_overrides or component_latencies:
         from src import stats as _stats
 
-        stats_payload = _stats.compute(sr_overrides, warmup_drop)
+        stats_payload = _stats.compute(
+            sr_overrides or {}, warmup_drop, component_latencies=component_latencies
+        )
 
     missing_sr = _missing_sr_rows(bench)
     if missing_sr:
@@ -1173,6 +1207,9 @@ def main() -> None:
     (which holds both); re-run with `=entropy` for the entropy view — same sr.json, no rebuild.
     `per_cycle_warmup` (default 1) is the cold decisions dropped before the equal-n truncation;
     `=0` reproduces the undropped view. Neither rewrites any canonical results file.
+
+    `latencies.<track>.json` is picked up automatically from the source dir when present, adding the
+    component p50 intervals to the speed table's enc/pred columns.
     """
     src = None
     out_dir = None
@@ -1201,9 +1238,18 @@ def main() -> None:
     if not paths:
         raise SystemExit(f"[report] no results.*.json under {src} — run `src.study` first")
     bench = load_results(paths)
+    src_dir = Path(src) if Path(src).is_dir() else Path(src).parent
     if out_dir is None:
-        s = Path(src)
-        out_dir = s if s.is_dir() else s.parent
+        out_dir = src_dir
+
+    # The engine-step loops' raw samples, if `src.study` has persisted them beside the results —
+    # they carry the component p50 intervals. Absent (a pre-Phase-9 results dir), the enc/pred CI
+    # columns simply render blank; the rest of the report is unaffected.
+    from src import stats as _stats  # lazy: src.stats imports this module
+
+    component_latencies = (
+        _stats.load_component_latencies(_stats.component_latency_paths(src_dir)) or None
+    )
 
     run = None
     if wandb_experiment is not None:
@@ -1220,6 +1266,7 @@ def main() -> None:
             sr_overrides=sr_overrides,
             method=method,
             warmup_drop=warmup_drop,
+            component_latencies=component_latencies,
         )
     finally:
         if run is not None:

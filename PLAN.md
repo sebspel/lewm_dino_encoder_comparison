@@ -676,7 +676,10 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   `ComponentSamples` + the `Benchmark` Protocol arity in `src/interfaces.py`; `BenchResult` unchanged.
   `_percentiles_ms` computes on `float64` to match `report._percentile_ms` exactly. `src/smoke.py`
   follows the new arity.
-  → verify: `pytest`; each component vector is `n_iters` long with the warm-up iters excluded; the
+  → **landed (off-pod ✔):** `interfaces.ComponentSamples`; `benchmark` returns the pair;
+  `_percentiles_ms` on float64. `tests/test_benchmark.py::test_benchmark_returns_the_raw_samples
+  _beside_the_summary`, `::test_stored_p50_matches_the_percentile_the_interval_is_built_on`.
+  → verify (✔): each component vector is `n_iters` long with the warm-up iters excluded; the
   returned p50 equals `report._percentile_ms(sample, 0.5)` (the anti-drift guard).
 
 - [ ] 🟢 **Persist them.** `src/study.py::dump_track_latencies` writes
@@ -684,8 +687,11 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   calibration_method, seed, written}, latencies: {precision: {encode_ms: [...], predict_ms: [...]}}}` —
   merged **per precision** with `dump_track_results`' no-clobber discipline, called BEFORE rendering.
   Keyed by precision only (latency is method-invariant; method is provenance in `meta`).
-  → verify: round-trips through a load; a later single-precision run preserves the other precisions;
-  `results.<track>.json` schema byte-shape unchanged.
+  → **landed (off-pod ✔):** `run_track` returns `(name, bench, samples)`; `main` dumps results then
+  latencies before the render. `tests/test_study.py::test_dump_track_latencies_roundtrips_and
+  _records_the_loop_conditions`, `::test_dump_track_latencies_is_additive_per_precision`.
+  → verify (✔): round-trips through `stats.load_component_latencies`; a later single-precision run
+  preserves the other precisions; `results.<track>.json` schema unchanged.
 
 - [ ] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, component): `order_statistic_ci`
   + `dwass_permutation_test` over the stored vector — existing helpers, no new estimator. Own Holm
@@ -693,16 +699,28 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   (`[track][precision][encode|predict]`, method-free); `points` untouched. CLI auto-discovers
   `latencies.*.json` beside `sr.json`, plus explicit `latencies=<dir|file>`; absent → section omitted.
   `meta` records the component sample rule, both family sizes, and `holm_scope`.
-  → verify: the per-cycle Holm values are **byte-identical** with and without a component section
-  (pins the per-surface ruling); every component point records its n, both p-values, and the seed.
+  → **landed (off-pod ✔):** `compute(component_latencies=)` threads it through;
+  `load_component_latencies` + `component_latency_paths`. `tests/test_stats.py`
+  `::test_component_interval_uses_the_recorded_vector_as_the_sample`,
+  `::test_component_points_carry_p50_only_never_p95_or_mean`,
+  `::test_component_holm_family_is_separate_from_the_per_cycle_family`,
+  `::test_component_section_omitted_without_stored_samples`,
+  `::test_component_latency_paths_finds_the_track_files`.
+  → verify (✔): the per-cycle `points` block is **byte-identical** with and without a component
+  section (pins the per-surface ruling); every component point records its n, both p-values, the
+  ranks/coverage and the seed.
 
 - [ ] 🟢 **Render on the speed table.** `render_speed_table` gains `enc_p50_CI95`, `enc_ac`,
   `pred_p50_CI95`, `pred_ac` beside the existing component columns (reuse `_ci` / `_ac_flag`; every
   cell stays ONE whitespace-delimited token). `_component_stats_lookup` walks `points_components` with
   **no** method fallback. `src.report from=` loads `latencies.*.json` from the source dir.
-  → verify: the table stays `split()`-parseable at a fixed column count; the ratio/FP32-relative/
-  component/dilution tables and `per_cycle_ratio.png` / `component_breakdown_*.png` are byte-identical
-  with and without the component payload; read-only guards extended to `latencies.*.json`.
+  → **landed (off-pod ✔):** `report(component_latencies=)`, picked up automatically by the
+  `from=` re-render. `tests/test_report.py::test_speed_table_carries_component_intervals_and_stays
+  _parseable`, `::test_component_intervals_do_not_touch_the_derived_tables`,
+  `::test_report_never_rewrites_canonical_results` extended to `latencies.*.json`.
+  → verify (✔): 19 tokens on every row, header and rows alike; the ratio/FP32-relative/component/
+  dilution tables **and** all three plots are byte-identical with and without the component payload;
+  a track with no stored samples renders `—`, never a borrowed interval. `pytest` 145 passed.
 
 - [ ] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
   `results.<track>.json` and `gpu_clocks.log_gpu` opens each `*.benchmark.dmon.log` with `"w"`, so the

@@ -286,16 +286,109 @@ def test_method_invariant_intervals_join_across_methods(tmp_path):
 def test_stats_never_rewrites_canonical_results(tmp_path):
     """The same read-only guard as `test_report_never_rewrites_canonical_results` and
     `test_clock_norm_never_rewrites_canonical_results`: intervals are ADDITIVE re-analysis —
-    `sr.json` and `results.*.json` are inputs, never outputs (SPEC §Parity, CLAUDE §8)."""
+    `sr.json`, `latencies.*.json` and `results.*.json` are inputs, never outputs (SPEC §Parity,
+    CLAUDE §8). The latency file matters most: it is the ONLY copy of the engine-step samples, so a
+    render that rewrote it would put an L40S run at risk."""
     vec = list(np.random.default_rng(6).normal(100, 5, size=40))
     sr_path = tmp_path / "sr.json"
     sr_path.write_text(json.dumps(_sr_json(lewm__fp32=(90.0, vec))))
     results = tmp_path / "results.lewm.json"
     results.write_text(json.dumps({"meta": {"track": "lewm"}, "bench": {}}))
-    before = {p: p.read_bytes() for p in (sr_path, results)}
+    latencies = tmp_path / "latencies.lewm.json"
+    latencies.write_text(json.dumps({"meta": {"track": "lewm"}, "latencies": _components(9)}))
+    before = {p: p.read_bytes() for p in (sr_path, results, latencies)}
 
-    stats.write_stats_json(stats.compute(json.loads(sr_path.read_text()), n_resamples=200), tmp_path)
+    stats.write_stats_json(
+        stats.compute(
+            json.loads(sr_path.read_text()),
+            n_resamples=200,
+            component_latencies=stats.load_component_latencies([latencies]),
+        ),
+        tmp_path,
+    )
 
     assert (tmp_path / "stats.json").exists()
     for path, raw in before.items():
         assert path.read_bytes() == raw, f"{path.name} was rewritten by the interval render"
+
+
+# --- component p50s (Phase 9) ------------------------------------------------------------
+def _components(seed: int, n: int = 100) -> dict:
+    """One track's `latencies.<track>.json` `latencies` block: a fixed-iteration loop sample per
+    component, at one precision."""
+    rng = np.random.default_rng(seed)
+    return {
+        "fp32": {
+            "encode_ms": list(rng.normal(12.0, 0.4, size=n)),
+            "predict_ms": list(rng.normal(35.0, 1.1, size=n)),
+        }
+    }
+
+
+def test_component_interval_uses_the_recorded_vector_as_the_sample():
+    """The component sample needs NO truncation and NO warm-up drop — the loop is fixed-iteration
+    and drops its warm-up before the first timed call, so the stored vector IS the sample
+    (architecture.md §12). n must therefore equal the stored length exactly, and the interval must
+    bracket the same p50 the speed table prints (`report._percentile_ms`)."""
+    latencies = {"dino": _components(11, n=40)}
+    payload = stats.compute({}, n_resamples=200, component_latencies=latencies)
+
+    for component, key in (("encode", "encode_ms"), ("predict", "predict_ms")):
+        e = payload["points_components"]["dino"]["fp32"][component]
+        sample = latencies["dino"]["fp32"][key]
+        assert e["n"] == len(sample) == 40  # nothing dropped, nothing truncated
+        assert e["p50_ms"] == report._percentile_ms(sample, 0.50)
+        lo, hi = e["p50_ci95_ms"]
+        assert lo <= e["p50_ms"] <= hi
+        assert e["p50_ci_coverage"] >= 0.95  # the conservative rank convention, same as per-cycle
+
+
+def test_component_points_carry_p50_only_never_p95_or_mean():
+    """SPEC §Interface Contracts: the interval goes on the component p50 ALONE. p95 carries no claim
+    and the means are the decomposition basis — an interval on either would assert something the
+    owner ruling declines to."""
+    payload = stats.compute({}, n_resamples=200, component_latencies={"lewm": _components(12, 30)})
+    e = payload["points_components"]["lewm"]["fp32"]["encode"]
+    assert "p50_ci95_ms" in e
+    assert not [k for k in e if "p95" in k or "mean_ms" in k]
+
+
+def test_component_holm_family_is_separate_from_the_per_cycle_family():
+    """Holm is scoped PER MEASUREMENT SURFACE (owner ruling, architecture.md §12). Pooling would make
+    every published per-cycle adjusted p-value a function of which other surfaces happen to exist in
+    the file — so adding the component section must leave the per-cycle values byte-identical."""
+    vec = list(np.random.default_rng(13).normal(100, 5, size=40))
+    sr = _sr_json(lewm__fp32=(90.0, vec), dino__fp32=(70.0, vec))
+
+    without = stats.compute(sr, n_resamples=200)
+    with_components = stats.compute(
+        sr, n_resamples=200, component_latencies={"lewm": _components(14), "dino": _components(15)}
+    )
+
+    assert with_components["points"] == without["points"]  # untouched, Holm values included
+    assert with_components["meta"]["holm_family_size"] == without["meta"]["holm_family_size"] == 2
+    assert with_components["meta"]["holm_family_size_components"] == 4  # 2 tracks x 2 components
+    assert "never pooled" in with_components["meta"]["holm_scope"]
+
+
+def test_component_section_omitted_without_stored_samples():
+    """A `stats.json` from a results dir with no `latencies.*.json` (anything pre-Phase-9) is still a
+    valid artefact: the component section is absent rather than empty-but-present, and no component
+    meta claims a construction that was never run."""
+    payload = stats.compute(_sr_json(lewm__fp32=(90.0, [1.0] * 40)), n_resamples=200)
+    assert "points_components" not in payload
+    assert "component_sample_rule" not in payload["meta"]
+
+
+def test_component_latency_paths_finds_the_track_files(tmp_path):
+    """`src.stats` discovers the samples beside `sr.json` — the layout `src.study` writes — so the
+    off-pod re-analysis needs no path bookkeeping."""
+    for track in ("lewm", "dino"):
+        (tmp_path / f"latencies.{track}.json").write_text(
+            json.dumps({"meta": {"track": track}, "latencies": _components(1)})
+        )
+    (tmp_path / "results.lewm.json").write_text("{}")  # must not be picked up
+
+    found = stats.component_latency_paths(tmp_path)
+    assert [p.name for p in found] == ["latencies.dino.json", "latencies.lewm.json"]
+    assert set(stats.load_component_latencies(found)) == {"lewm", "dino"}

@@ -380,9 +380,10 @@ def test_warmup_drop_does_not_move_the_p50_headline(tmp_path):
 
 
 def test_report_never_rewrites_canonical_results(tmp_path):
-    """`src.report` renders VIEWS. The canonical artefacts — `results.<track>.json` (src.study) and
-    `sr.json` (src.sr_eval) — are read-only to it and must survive a render byte-for-byte, even when
-    out_dir IS the directory holding them (CLAUDE §8, SPEC §Headline-artifact durability)."""
+    """`src.report` renders VIEWS. The canonical artefacts — `results.<track>.json` +
+    `latencies.<track>.json` (src.study) and `sr.json` (src.sr_eval) — are read-only to it and must
+    survive a render byte-for-byte, even when out_dir IS the directory holding them (CLAUDE §8,
+    SPEC §Headline-artifact durability)."""
     import json
 
     bench = _synthetic()
@@ -391,15 +392,90 @@ def test_report_never_rewrites_canonical_results(tmp_path):
         p = tmp_path / f"results.{track}.json"
         p.write_text(json.dumps({"meta": {"track": track}, "bench": bench[track]}))
         canonical[p] = p.read_bytes()
+        # The engine-step samples are the ONLY copy of that measurement — a render that rewrote
+        # them would put an L40S run at risk.
+        lat = tmp_path / f"latencies.{track}.json"
+        lat.write_text(
+            json.dumps({"meta": {"track": track}, "latencies": _component_samples(3)})
+        )
+        canonical[lat] = lat.read_bytes()
     sr_path = tmp_path / "sr.json"
     sr_path.write_text(json.dumps({"lewm": {"int8": {"max": {"success_rate": 76.0}}}}))
     canonical[sr_path] = sr_path.read_bytes()
 
     loaded = report.load_results(report._resolve_result_paths(tmp_path))
-    report.report(loaded, tmp_path, sr_overrides=json.loads(sr_path.read_text()), method="max")
+    report.report(
+        loaded,
+        tmp_path,
+        sr_overrides=json.loads(sr_path.read_text()),
+        method="max",
+        component_latencies={"lewm": _component_samples(3)},
+    )
 
     for path, before in canonical.items():
         assert path.read_bytes() == before, f"{path.name} was rewritten by a render"
+
+
+# --- component p50 intervals on the speed table (Phase 9) --------------------------------
+def _component_samples(seed: int, n: int = 40) -> dict:
+    """One track's stored engine-step samples, in `latencies.<track>.json`'s `latencies` shape."""
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    return {
+        p: {
+            "encode_ms": list(rng.normal(1.0, 0.05, size=n)),
+            "predict_ms": list(rng.normal(0.25, 0.01, size=n)),
+        }
+        for p in ("fp32", "fp16")
+    }
+
+
+def test_speed_table_carries_component_intervals_and_stays_parseable(tmp_path):
+    """The component p50s get their interval + independence flag as COLUMNS on the speed table
+    (SPEC §Interface Contracts). Every cell must remain ONE whitespace-delimited token — the
+    artefacts are read with `split()`, so a stray space in an interval would shift every column
+    after it."""
+    bench = _synthetic()
+    out = report.report(
+        bench, tmp_path, component_latencies={"lewm": _component_samples(21)}
+    )
+    text = Path(out["tables"]["speed_table"]).read_text()
+
+    header = [ln for ln in text.splitlines() if ln.split()[:1] == ["track"]][0].split()
+    assert header[8:12] == ["enc_p50", "enc_p50_CI95", "enc_ac", "enc_p95"]
+    assert header[12:16] == ["pred_p50", "pred_p50_CI95", "pred_ac", "pred_p95"]
+
+    rows = [ln.split() for ln in text.splitlines() if ln.split()[:1] in (["lewm"], ["dino"])]
+    assert {len(r) for r in rows} == {len(header)}  # fixed token count, every row
+    lewm_fp32 = [r for r in rows if r[:2] == ["lewm", "fp32"]][0]
+    assert lewm_fp32[9].startswith("[") and "," in lewm_fp32[9]  # enc interval, unspaced
+    assert lewm_fp32[10] in {"*", "-"}  # independence flag, never empty
+    # dino has no stored samples here -> blank cells, not a crash and not a borrowed interval
+    assert [r for r in rows if r[:2] == ["dino", "fp32"]][0][9] == "—"
+
+
+def test_component_intervals_do_not_touch_the_derived_tables(tmp_path):
+    """The component surface adds columns to the speed table and nothing else: the ratio,
+    FP32-relative, component and dilution tables are mean-/difference-based and carry no interval
+    by ruling (architecture.md §12). Rendering with and without the samples must leave them
+    byte-identical."""
+    without = report.report(_synthetic(), tmp_path / "a")
+    with_ = report.report(
+        _synthetic(), tmp_path / "b", component_latencies={"lewm": _component_samples(22)}
+    )
+
+    for key in ("fp32_relative_table", "component_table", "dilution_table"):
+        assert (
+            Path(without["tables"][key]).read_bytes() == Path(with_["tables"][key]).read_bytes()
+        ), f"{key} changed when component intervals were added"
+    assert without["ratios"] == with_["ratios"]
+    # …and the plots: error bars come from the SR/per-cycle surface only, so a component-only
+    # payload must not touch a pixel.
+    for key in ("speed_vs_sr", "per_cycle_ratio", "component_breakdown"):
+        assert (
+            Path(without["plots"][key]).read_bytes() == Path(with_["plots"][key]).read_bytes()
+        ), f"{key}.png changed when component intervals were added"
 
 
 def test_nan_sr_is_skipped_not_crashed(tmp_path):

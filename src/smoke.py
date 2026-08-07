@@ -117,13 +117,17 @@ def _run_track(
             predict_inputs=predict_inputs,
             engine_dir=Path(d) / name,
         )
-        result = benchmark(
+        result, samples = benchmark(
             engines,
             encode_inputs=(obs,),
             predict_inputs=predict_inputs,
             n_iters=cfg.n_latency_iters,
             warmup=cfg.warmup,
         )
+    # The raw engine-step samples ride out beside the summary (persisted by `src.study` to
+    # latencies.<track>.json): one vector per component, `n_iters` long, warm-up excluded.
+    assert set(samples) == {"encode_ms", "predict_ms"}, set(samples)
+    assert all(len(v) == cfg.n_latency_iters for v in samples.values())
     assert set(result) == {
         "per_cycle_p50_ms",
         "per_cycle_p95_ms",

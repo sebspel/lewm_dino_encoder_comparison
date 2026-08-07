@@ -260,6 +260,27 @@ class BenchResult(TypedDict):
     success_rate: float  # Push-T SR paired with this engine config (gated eval shim; NaN until then)
 
 
+class ComponentSamples(TypedDict):
+    """The engine-step loops' RAW per-call latencies (ms), one list per component — the sample
+    every component statistic is computed over.
+
+    Returned ALONGSIDE `BenchResult` rather than inside it: `BenchResult` is what
+    `results.<track>.json` serializes, and that file is the summary-shaped canonical artifact every
+    table, plot and derived-clock render parses. The samples are persisted beside it
+    (`latencies.<track>.json`, `src.study.dump_track_latencies`) so a later statistic over the
+    component distributions — the p50 confidence interval + its independence test (`src.stats`), or
+    any future quantile — is an off-pod re-analysis instead of an L40S booking
+    (SPEC §Interface Contracts, docs/architecture.md §12).
+
+    Warm-up is already excluded: `benchmark` runs `warmup` untimed iters before the timed loop, so
+    the recorded vector IS the sample — no truncation and no report-time drop, unlike the per-cycle
+    vector (which needs both). Length is `n_iters` per component, equal across tracks by
+    construction."""
+
+    encode_ms: list[float]
+    predict_ms: list[float]
+
+
 class Benchmark(Protocol):
     def __call__(
         self,
@@ -268,7 +289,9 @@ class Benchmark(Protocol):
         predict_inputs: tuple[Tensor, ...],  # predictor state at the candidate fan-out batch
         n_iters: int,  # fixed-iteration count per step loop (equal-n percentiles)
         warmup: int,
-    ) -> BenchResult: ...
+        # The summary numbers AND the raw samples they were reduced from — the samples are
+        # persisted so the reduction is auditable and re-analysable off the artefact.
+    ) -> tuple[BenchResult, ComponentSamples]: ...
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,11 @@ warm-up dropped. It also samples peak GPU memory. Each step additionally carries
 **mean**, which feeds `src.report`'s per-component decomposition ONLY (means compose additively,
 percentiles do not) and is never reported as a headline.
 
+Alongside those summaries it returns the loops' **raw per-call samples** (`ComponentSamples`), which
+`src.study` persists to `latencies.<track>.json` — so the component p50's confidence interval and its
+lag-1 independence test are re-derivable off-pod rather than taken on trust, and no added statistic
+costs an L40S run (SPEC §Interface Contracts, docs/architecture.md §12).
+
 There is **no fixed-wall-clock rollout-count run** (owner decision — redundant with the
 per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (one episode's full
 decision) and the **SR** are NOT produced here: both come from the gated eval-shim re-run
@@ -32,13 +37,19 @@ from time import perf_counter
 import torch
 from torch import Tensor
 
-from src.interfaces import EnginePaths, BenchResult
+from src.interfaces import EnginePaths, BenchResult, ComponentSamples
 from src.trt_runtime import EngineRunner
 
 
 def _percentiles_ms(step_ms: list[float]) -> tuple[float, float]:
-    """(p50, p95) over a list of per-call latencies in ms."""
-    lat = torch.tensor(step_ms)
+    """(p50, p95) over a list of per-call latencies in ms.
+
+    **float64, matching `src.report._percentile_ms` exactly.** The raw sample is persisted
+    (`ComponentSamples`) and `src.stats` computes the p50's confidence interval from it, so the
+    stored point estimate and the later interval must come from the SAME percentile definition —
+    otherwise an interval could bracket a number the table does not print (docs/architecture.md §12).
+    float32 would differ in the last bits."""
+    lat = torch.tensor(step_ms, dtype=torch.float64)
     return torch.quantile(lat, 0.50).item(), torch.quantile(lat, 0.95).item()
 
 
@@ -68,7 +79,13 @@ def benchmark(
     predict_inputs: tuple[Tensor, ...],
     n_iters: int,
     warmup: int,
-) -> BenchResult:
+) -> tuple[BenchResult, ComponentSamples]:
+    """Time both engines' isolated step loops → the summary `BenchResult` **and** the raw per-call
+    samples it was reduced from (`ComponentSamples`), which `src.study` persists to
+    `latencies.<track>.json`. Retaining the samples changes nothing about the measurement — same
+    loops, same `n_iters`, same `warmup`, same inputs — it only stops throwing them away, so the
+    component p50's confidence interval and independence test can be computed off-pod later
+    (SPEC §Interface Contracts, docs/architecture.md §12)."""
     for name, path in engines.items():
         if not path.exists():
             raise FileNotFoundError(f"{name} engine missing: {path}")
@@ -101,7 +118,7 @@ def benchmark(
 
     encode_p50, encode_p95 = _percentiles_ms(encode_ms)
     predict_p50, predict_p95 = _percentiles_ms(predict_ms)
-    return BenchResult(
+    result = BenchResult(
         per_cycle_p50_ms=math.nan,  # joined by src.report from the gated eval-shim re-run
         per_cycle_p95_ms=math.nan,
         per_cycle_mean_ms=math.nan,
@@ -114,3 +131,4 @@ def benchmark(
         peak_mem_mb=peak_mem_mb,
         success_rate=math.nan,  # joined in by src.report from the gated eval-shim re-run
     )
+    return result, ComponentSamples(encode_ms=encode_ms, predict_ms=predict_ms)

@@ -18,7 +18,9 @@ HEADLINE **per-cycle** latency and the **SR** come from the separate, gated `src
 (same solves) and are joined off-pod by `src.report`. There is no fixed-wall-clock rollout-count
 run.
 
-The headline tables (`.txt`) + plots (`.png`) are persisted to `$STABLEWM_HOME/reports/phase5/`
+The canonical per-track numbers (`results.<track>.json`), the engine-step loops' **raw per-call
+samples** (`latencies.<track>.json` — what `src.stats` builds the component p50 intervals from), and
+the headline tables (`.txt`) + plots (`.png`) are persisted to `$STABLEWM_HOME/reports/phase5/`
 by default — the persistent network volume, so a completed study survives pod teardown (SPEC
 §Headline-artifact durability); off-pod (no `STABLEWM_HOME`) it falls back to repo-local
 `reports/phase5`. W&B logging stays additive.
@@ -151,6 +153,54 @@ def dump_track_results(
     return path
 
 
+def dump_track_latencies(
+    name: str,
+    samples: dict,
+    cfg: ExportConfig,
+    out_dir: Path,
+    calibration_method: str = DEFAULT_CALIBRATION_METHOD,
+) -> Path:
+    """Persist one track's RAW engine-step samples to `latencies.<name>.json` — the per-call
+    latencies `src.benchmark` reduced to the p50/p95/mean in `results.<name>.json`.
+
+    Written **beside** the results file, never inside it: `results.<track>.json` is the
+    summary-shaped canonical artifact every table, plot and derived-clock render parses, and folding
+    ~800 floats per track into it would make that schema heavier for one consumer. This file is what
+    `src.stats` computes the component p50 confidence intervals + lag-1 independence tests from, so a
+    later statistic over the component distributions is an off-pod re-analysis rather than an L40S
+    booking (SPEC §Interface Contracts, docs/architecture.md §12).
+
+    Keyed by **precision only**: component latency is calibration-method-INVARIANT (SPEC §Parity), so
+    inventing a method axis here would assert a distinction the quantity does not have; the method is
+    recorded in `meta` as provenance for which engines were timed, exactly as `dump_track_results`
+    does. Merged **per precision** with the same no-clobber discipline, so benchmarking a subset later
+    leaves the track's other precisions on disk intact (CLAUDE §8)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"latencies.{name}.json"
+    existing: dict = {}
+    if path.exists():
+        existing = json.loads(path.read_text()).get("latencies", {})
+    merged = {**existing, **samples}
+    payload = {
+        "meta": {
+            "track": name,
+            "precisions": sorted(merged),
+            # The loop conditions these samples were recorded under. n is equal across tracks by
+            # construction (fixed-iteration), and `warmup` iters ran UNTIMED before the first
+            # recorded call — so each vector is already the sample, needing no truncation and no
+            # report-time warm-up drop (docs/architecture.md §12).
+            "n_latency_iters": cfg.n_latency_iters,
+            "warmup": cfg.warmup,
+            "calibration_method": calibration_method,
+            "seed": cfg.seed,
+            "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+        "latencies": merged,
+    }
+    path.write_text(json.dumps(payload, indent=1) + "\n")
+    return path
+
+
 def run_track(
     track: str,
     cfg: ExportConfig,
@@ -158,9 +208,10 @@ def run_track(
     engine_root: Path | None = None,
     gpu_log_dir: Path | None = None,
     method: str = DEFAULT_CALIBRATION_METHOD,
-) -> tuple[str, dict]:
-    """Benchmark one track's every built precision. Returns ``(name, bench_by_precision)`` in
-    the shape `src.report` consumes.
+) -> tuple[str, dict, dict]:
+    """Benchmark one track's every built precision. Returns
+    ``(name, bench_by_precision, samples_by_precision)`` — the summary numbers in the shape
+    `src.report` consumes, plus the raw engine-step samples `dump_track_latencies` persists.
 
     The engine step loops are timed at the CYCLE's real batches so the report's runtime-weighted
     decomposition is honest: **encode** once at batch 1 (single obs), **predict** at the candidate
@@ -182,6 +233,7 @@ def run_track(
     _, predict_inputs = example_inputs(adapter, cfg, batch=CEM_NUM_SAMPLES, device=device)
 
     bench: dict = {}
+    samples: dict = {}
     for precision in cfg.precisions:
         engines = engine_paths(track, precision, root, method)
         if not (engines["encoder"].exists() and engines["predictor"].exists()):
@@ -192,10 +244,10 @@ def run_track(
             )
             continue
         with log_gpu(run_tag(name, precision, method, "benchmark"), gpu_log_dir):
-            bench[precision] = benchmark(
+            bench[precision], samples[precision] = benchmark(
                 engines, encode_inputs, predict_inputs, cfg.n_latency_iters, cfg.warmup
             )
-    return name, bench
+    return name, bench, samples
 
 
 def main() -> None:
@@ -227,7 +279,7 @@ def main() -> None:
 
     bench_all: dict = {}
     for track in tracks:
-        name, bench = run_track(
+        name, bench, samples = run_track(
             track, cfg, device, gpu_log_dir=out_dir / "gpu_logs", method=method
         )
         bench_all[name] = bench
@@ -235,6 +287,9 @@ def main() -> None:
         # even if the (cheap) render step later changes — and so `src.report from=<out_dir>`
         # can re-render/join per-cycle latency + SR off-pod without re-running this benchmark.
         dump_track_results(name, bench, cfg, out_dir, method)
+        # The samples those numbers were reduced from, beside them — likewise before rendering, so
+        # an interrupted render never costs the L40S run's samples (src.stats reads this file).
+        dump_track_latencies(name, samples, cfg, out_dir, method)
 
     run = None
     if wandb_experiment is not None:
