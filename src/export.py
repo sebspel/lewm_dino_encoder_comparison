@@ -4,8 +4,8 @@ Owned PLUMBING (fails LOUDLY):
   - the `torch.onnx.export(dynamo=True)` trace call, aimed per-method via thin nn.Module
     wrappers so `encode` and `predict` become **separate** ONNX graphs (2 per model, 4
     across both tracks); precision multiplies TensorRT *engines*, not graphs.
-  - the TensorRT-10.7 builder invocation (FP32 default, FP16 flag, dynamic candidate-batch
-    optimization profile).
+  - the TensorRT-10.7 builder invocation (FP32 default, FP16 flag, per-component optimization
+    profile pinned to each engine's production call batch — `_BATCH_PROFILE`).
   - the engine-vs-PyTorch precision-match *mechanism* (max abs/rel error).
 
 INT8 is **explicit Q/DQ** via the NVIDIA TensorRT Model Optimizer, not a build-time TRT
@@ -64,6 +64,24 @@ from src.interfaces import (
 # the DINO predictor: its (batch, 16, 588, 588) attention tensor exceeds TensorRT's 2^31
 # element-volume limit above batch 388.
 _MAX_CANDIDATE_BATCH = 300
+# The encoder engine's batch. The CEM slices the candidate axis away BEFORE encoding
+# (`PreJEPA.rollout`: `init_info_dict[k] = info[k][:, 0]`, then `.expand(...)` the latent across
+# candidates; `get_cost` embeds the goal by the same `[:, 0]` path) and the vendored solver pins
+# `batch_size = 1`, so the encoder is only ever called at batch 1 — the two cached, batch-1 encodes
+# per decision that `ENCODER_CALLS_PER_CYCLE` counts. docs/architecture.md §6.
+_ENCODER_BATCH = 1
+
+# (min, opt, max) batch per component — the shape each engine is ACTUALLY called at. TensorRT
+# selects tactics at `opt`, so this is the load-bearing knob: an engine tuned at a batch it never
+# runs at is tuned for the wrong kernel. The predictor keeps `min = 1` for the profile-min rows the
+# precision-match gate drives (a profile minimum costs nothing). Single source of truth for the
+# convention — `build_engine` takes the triple explicitly rather than inferring it from the example
+# inputs, whose batch is a TRACE property, not a build one. docs/architecture.md §6,
+# SPEC §Interface Contracts (Export shape).
+_BATCH_PROFILE: dict[str, tuple[int, int, int]] = {
+    "encoder": (_ENCODER_BATCH, _ENCODER_BATCH, _ENCODER_BATCH),
+    "predictor": (1, _MAX_CANDIDATE_BATCH, _MAX_CANDIDATE_BATCH),
+}
 _WORKSPACE_BYTES = 24 << 30  # 24 GiB TensorRT per-tactic scratch CEILING (not a reservation;
 #                              runtime uses only what the selected tactics need). L40S has
 #                              48 GiB; a 16 GiB cap still pruned a ~19.5 GiB DINO-predictor
@@ -119,7 +137,10 @@ def _batch_dynamic(n_inputs: int):
     Non-batch axes stay static. `encode` has 1 input; `predict` has 2 (LeWM) or 1 (DINO).
 
     The spec is FLAT (one entry per positional forward arg) because every trace wrapper has
-    an explicit-arity `forward` — no variadic pytree collapse to nest around."""
+    an explicit-arity `forward` — no variadic pytree collapse to nest around.
+
+    This declares the graph's admissible RANGE; it is the BUILD-time `_BATCH_PROFILE` that pins
+    each engine to its production call batch within that range."""
     batch = Dim("batch", min=1, max=_MAX_CANDIDATE_BATCH)
     return tuple({0: batch} for _ in range(n_inputs))
 
@@ -186,6 +207,18 @@ def export_onnx(
     """Trace one method to ONNX via the TorchDynamo exporter (`dynamo=True`; the legacy
     TorchScript exporter is deprecated and on torch 2.6 dynamo is not yet the default, so
     it is passed explicitly). Locally runnable."""
+    # A dim marked dynamic but handed an example extent of 1 is SILENTLY specialized: the dynamo
+    # exporter emits a frozen `dim_value: 1` instead of a symbol, with no warning and no error
+    # (verified on torch 2.6), and every engine built off that graph is batch-frozen. The trace
+    # batch is free to differ from the build profile (`_BATCH_PROFILE`) — but it must be ≥ 2 or
+    # the axis it is meant to leave open is gone. Fail here, loudly.
+    for i, (example, spec) in enumerate(zip(example_inputs, dynamic_shapes)):
+        if 0 in spec and example.shape[0] < 2:
+            raise ValueError(
+                f"input {i} of {out_path.name} declares a dynamic batch axis but is traced at "
+                f"batch {example.shape[0]}: torch.export specializes a size-1 dim, freezing the "
+                "axis in the ONNX graph. Trace at batch >= 2."
+            )
     # deepcopy first: the fold mutates submodules in place, and the encoder/predictor traces
     # share the same underlying adapter object.
     module = _fold_linear_bn_eval(copy.deepcopy(module).eval())
@@ -325,7 +358,9 @@ def quantize_onnx(
     the batch to the trace batch makes the feed agree with the fold. This does NOT touch the
     scales (per-tensor, batch-independent) and TRT keeps the axis dynamic when it later parses
     the quantized graph (verified: the FP32 engine off the same graph runs at batch 1/8/300) —
-    so it is feed plumbing, not a quant-config knob."""
+    so it is feed plumbing, not a quant-config knob. It is likewise independent of the BUILD
+    profile (`_BATCH_PROFILE`): the shape pinned here is the TRACE batch, and the profile TRT is
+    later built with is free to differ (architecture.md §6)."""
     from modelopt.onnx.quantization import quantize
 
     # Neutralize DINO's -3.4e38 attention mask sentinel before calibration (no-op on LeWM). Both
@@ -369,6 +404,7 @@ def build_engine(
     precision: Precision,
     out_path: Path,
     example_inputs: tuple[Tensor, ...],
+    batch_profile: tuple[int, int, int],
 ) -> Path:
     """TensorRT-10.7 builder invocation (owned plumbing). FP32 default, FP16 flag; INT8 and
     FP8 each set their 8-bit flag **and** FP16 and parse the **already-quantized** Q/DQ ONNX (no
@@ -377,7 +413,13 @@ def build_engine(
     remainder to FP16, so "INT8" is really INT8+FP16 and "FP8" is FP8+FP16 (see the branches
     below). Parse/build failures raise loudly (the *judgement* on how to fix them is owner's —
     ONNX/TRT debugging). Runs ONLY on the L40S (`tensorrt` imported lazily so this module imports
-    off-pod)."""
+    off-pod).
+
+    `batch_profile` is the `(min, opt, max)` for the dynamic batch axis — this engine's production
+    call shape (`_BATCH_PROFILE`). It is REQUIRED rather than inferred from `example_inputs`, whose
+    batch is a trace property: TensorRT tunes tactics at `opt`, so silently inheriting the trace
+    batch would tune every engine for a batch it never runs at. `example_inputs` here supplies the
+    NON-batch axes only."""
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
@@ -417,17 +459,18 @@ def build_engine(
         config.set_flag(trt.BuilderFlag.FP8)
         config.set_flag(trt.BuilderFlag.FP16)
 
-    # Optimization profile for the dynamic candidate-batch axis (axis 0): min 1, opt at the
-    # example batch, max the CEM candidate count. Non-batch axes stay at the example shape.
+    # Optimization profile for the dynamic batch axis (axis 0), pinned to this engine's production
+    # call shape. Non-batch axes stay at the example shape.
+    min_batch, opt_batch, max_batch = batch_profile
     profile = builder.create_optimization_profile()
     for i in range(network.num_inputs):
         inp = network.get_input(i)
         rest = tuple(example_inputs[i].shape[1:])
         profile.set_shape(
             inp.name,
-            (1, *rest),
-            tuple(example_inputs[i].shape),
-            (_MAX_CANDIDATE_BATCH, *rest),
+            (min_batch, *rest),
+            (opt_batch, *rest),
+            (max_batch, *rest),
         )
     config.add_optimization_profile(profile)
 
@@ -540,6 +583,9 @@ def export(
             # method's engines are additive and never overwrite the first's (architecture.md §7).
             engine_dir / engine_filename(name, precision, calibration_method),
             inputs,
+            # This component's production call batch — encoder 1, predictor the CEM candidate
+            # fan-out (architecture.md §6). TRT tunes tactics at `opt`.
+            _BATCH_PROFILE[name],
         )
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
 

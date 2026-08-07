@@ -114,6 +114,15 @@ requirements those signatures must satisfy; it does not restate the signatures.
   pass (INT8 integer, FP8 E4M3 floating-point).
   Only the **model** (encoder + predictor) is exported; the **CEM planner is never compiled in**
   — it stays in Python around the engines. (Rationale: `docs/architecture.md` §2.)
+- **Each engine's optimization profile is its production call shape.** TensorRT selects tactics at
+  the profile's `opt` point, so the **encoder** is built at batch **1** (`min = opt = max = 1`) —
+  the CEM encodes the initial obs and the goal once per decision at `batch_size = 1` and expands
+  the latent across candidates *after* encoding — and the **predictor** at `min = 1`,
+  `opt = max = CEM_NUM_SAMPLES` (300), the candidate fan-out `batch_size × num_samples` every
+  `predict` call carries. The profile is a **build** property, independent of the ONNX trace batch
+  (which fixes only the shape the calibration pass feeds its ORT sessions); per-tensor PTQ scales
+  are batch-independent, so the calibration path is unaffected by it.
+  (`docs/architecture.md` §6.)
 - **"INT8" means INT8 + FP16.** The Model Optimizer quantizes only the heavy layers
   (MatMul/Gemm/Conv) to INT8 and casts the non-quantized remainder to FP16, so the engine builds
   with both flags set. This makes the INT8-vs-FP16 delta the marginal benefit of pushing the
@@ -290,7 +299,9 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   encoding, eval seeds, and identical input normalization (ImageNet stats). Mostly enforced by the
   platform's eval; confirm they are not varied between tracks.
 - **Matched export/benchmark conditions:** both models exported and benchmarked at the **same
-  precision** on the **same L40S**, same env/goal, and the **same shared inference batch size**.
+  precision** on the **same L40S**, same env/goal, and the **same per-component inference batch on
+  both tracks** — encoder 1, predictor `CEM_NUM_SAMPLES` — matching the optimization profile each
+  engine is built at (§Interface Contracts), so batch cannot confound the cross-track gap.
   There is no fixed-wall-clock budget run; **latency is the headline** and the model is the only
   difference, so the **per-cycle latency gap is the measured result**. Latency percentiles are
   measured in equal-n fixed-iteration loops (§Interface Contracts).
@@ -450,7 +461,9 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   Drift is measured and reported only; the pass/fail is an **owner sign-off on the measured drift
   table** — deliberately **not** coded into a tolerance object or automated gate. The match must
   exercise the **off-nominal history windows the rollout actually feeds** (`T ∈ {1, 2}`, not only
-  the traced `HS`). It is measured on **nominal, dataset-drawn inputs**, so it does **not**
+  the traced `HS`), and each engine at **its own profile points** — the encoder at its single
+  production batch, the predictor at profile min, the trace batch, and `opt`/`max`.
+  It is measured on **nominal, dataset-drawn inputs**, so it does **not**
   exercise the unbounded CEM action proposal that drives INT8 saturation — **INT8's calibration
   health is judged by SR, not by the drift table** (`docs/architecture.md` §7).
 - **Speedup study:** both models exported PyTorch→ONNX→TensorRT with explicit-Q/DQ INT8 and FP8

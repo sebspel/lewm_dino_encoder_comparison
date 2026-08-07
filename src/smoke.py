@@ -95,6 +95,9 @@ def build_dummy_dino() -> nn.Module:
 def _run_track(
     name: str, adapter, latent_shape_no_batch: tuple[int, ...], make_predict_inputs
 ) -> None:
+    # The TRACE batch, which must stay >= 2 or torch.export specializes the dynamic axis away
+    # (`export.export_onnx` guards this). It is independent of the batch each engine is BUILT at
+    # (`export._BATCH_PROFILE`) — the engines are driven at their own batches below.
     b, t = 2, HISTORY_SIZE
     obs = torch.randn(b, t, 3, 224, 224)
 
@@ -119,7 +122,9 @@ def _run_track(
         )
         result, samples = benchmark(
             engines,
-            encode_inputs=(obs,),
+            # Driven at the batch the encoder engine is BUILT for (`_BATCH_PROFILE["encoder"]`),
+            # which is also how `src.study` times it — the trace batch above would not bind.
+            encode_inputs=(obs[:1],),
             predict_inputs=predict_inputs,
             n_iters=cfg.n_latency_iters,
             warmup=cfg.warmup,

@@ -180,6 +180,40 @@ computes it correctly. The encoder graph lacks that pattern, so it keeps the fas
 choice affects calibration speed only, not the derived per-tensor scales** — plumbing, not a
 result-affecting decision.
 
+### Optimization profiles are the production call shapes
+
+TensorRT picks kernels/tactics for a dynamic axis at the optimization profile's **`opt`** point, so
+`opt` is the load-bearing knob: an engine tuned at a batch it never runs at is tuned for the wrong
+kernel. Each engine's profile is therefore the batch that engine is *actually* called at, read off
+the platform source rather than assumed:
+
+- **Encoder — `min = opt = max = 1`.** `PreJEPA.rollout` slices the candidate axis away before
+  encoding (`init_info_dict[k] = info[k][:, 0]`) and `.expand(...)`s the resulting latent across
+  candidates *after* the encode; `get_cost` embeds the goal by the same `[:, 0]` path. Both run at
+  `B = current_bs`, and the vendored CEM pins `batch_size = 1`
+  (`scripts/plan/config/solver/cem.yaml`). So the encoder sees batch 1 and nothing else — the same
+  reason `ENCODER_CALLS_PER_CYCLE = 2` counts two *cached, batch-1* encodes per decision (§8).
+- **Predictor — `min = 1`, `opt = max = CEM_NUM_SAMPLES` (300).** `rollout` flattens `(b n) -> ...`
+  before every `self.predict`, so the predictor is called at `current_bs × num_samples = 1 × 300`
+  on every horizon step of every CEM iteration. 300 is also the feasible ceiling: the DINO
+  predictor's `(batch, 16, 588, 588)` attention tensor crosses TensorRT's 2^31 element-volume limit
+  above batch 388. `min` stays 1 because two non-headline paths drive the engine there — the
+  precision-match sweep's profile-min row, and any sub-batch call the shim's pad/slice wrappers
+  make — and a profile minimum costs nothing.
+
+**The profile is a build property, decoupled from the ONNX trace batch.** The traced example batch
+fixes only the non-batch axes of the graph and the concrete shape `quantize_onnx` pins for
+modelopt's ORT sessions (`calibration_shapes` — required because the predictor graph's batch axis
+is a `torch.export`-specialized symbol ORT constant-folds to the trace batch). TensorRT keeps the
+axis dynamic when it parses that graph and honours whatever profile the build sets, and per-tensor
+PTQ scales are batch-independent — so the profile never reaches the calibration set or its scales.
+
+The one constraint the two share is a floor: **the trace batch must be ≥ 2.** `torch.export`
+specializes a size-1 dim, so tracing at batch 1 emits a frozen `dim_value: 1` where the symbol
+should be — silently, with no warning — and every engine built off that graph is batch-frozen
+regardless of its profile. `export_onnx` raises on it rather than letting a frozen axis reach the
+builder.
+
 ---
 
 ## 7. Calibration: matching the inference-time distribution

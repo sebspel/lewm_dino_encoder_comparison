@@ -16,6 +16,11 @@ SPEC requirement bundles map to the Phases below.
 **Legend.** 🟢 CLAUDE-CODE owns (fails loud). 🔴 OWNER-ONLY — STOP and ask (SPEC §Implementation
 Boundaries). 🖥️ runs on the L40S GPU. ⏱️ capped effort with a stated fallback.
 
+**Tick state.** A box is `[x]` when the artifact it records stands. Boxes recording landed **code**
+or an owner **decision** are `[x]` once that lands; boxes whose artifact is an **engine plan, a
+measured number, or a rendered view** are `[ ]` while that artifact is outstanding — Phase 10 is
+what produces them.
+
 ---
 
 ## Phase 0 — Scaffolding & pinned dependencies  🟢
@@ -158,15 +163,20 @@ Contracts; statistic split → `docs/architecture.md` §8; cycle definition → 
   `DINOv3PreJEPA`). Pod: `uv run python -m src.fidelity` on the real checkpoint.
   → LeWM per-frame `action_encoder` boundary owner-signed-off 2026-07-11
   (`src/fidelity.py::lewm_action_encoder_per_frame`).
-- [x] 🔴 **Real export PyTorch→ONNX→TensorRT:** `uv run python -m src.export model=<lewm|dino>
+- [ ] 🔴 **Real export PyTorch→ONNX→TensorRT:** `uv run python -m src.export model=<lewm|dino>
   precision=<fp32|fp16|int8>`. `torch.onnx.export(dynamo=True)` aimed at a thin `nn.Module`
   wrapper per method → **4 base ONNX graphs** (2 methods × 2 models). FP32/FP16 build data-free;
   INT8 deferred to the quantization step below.
   → `src/export.py`: `_Predict1Module` (DINO) / `_Predict2Module` (LeWM) explicit-arity trace
   wrappers; `model=`/`precision=` CLI; writes to `engines/<track>/`.
+  → **per-component TRT optimization profile** `export._BATCH_PROFILE` — encoder `(1, 1, 1)`,
+  predictor `(1, CEM_NUM_SAMPLES, CEM_NUM_SAMPLES)`; `build_engine(batch_profile=)` takes it
+  explicitly (never inferred from the trace batch, which fixes only the non-batch axes and the
+  modelopt feed shape). `export_onnx` raises on a size-1 trace batch — `torch.export` specializes
+  it and freezes the ONNX axis silently. `docs/architecture.md` §6, `tests/test_export.py`.
   → verify (off-pod ✔): all 4 ONNX graphs trace with a dynamic batch axis; `pytest` green.
   TRT build + precision matching are pod-only 🔴.
-- [x] 🔴 **INT8 explicit quantization (Model Optimizer PTQ):** base FP32 ONNX →
+- [ ] 🔴 **INT8 explicit quantization (Model Optimizer PTQ):** base FP32 ONNX →
   `modelopt.onnx.quantization` (Q/DQ + per-tensor scales) → quantized ONNX per method →
   `build_engine` (no `int8_calibrator`, no calibration profile). Sequenced **before** the
   precision-match gate. → `docs/architecture.md` §6
@@ -202,20 +212,22 @@ Contracts; statistic split → `docs/architecture.md` §8; cycle definition → 
     → verify: action ratio ≈ 4× → mechanism confirmed, proceed. Ratio ≈ 1 → the drawn actions are
     not box-bounded, the ~4× premise is wrong → **STOP and re-diagnose**. Latent ratio sizes the
     second axis.
-  - [x] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks: `uv run python -m src.export
+  - [ ] 🖥️ Re-run INT8 PTQ + rebuild engines, both tracks: `uv run python -m src.export
     model=<lewm|dino> precision=int8`.
     → verify: quantized ONNX carries QuantizeLinear; INT8 engine builds.
-  - [x] 🖥️🔴 Re-run `uv run python -m src.precision_match track=<lewm|dino>` → new INT8 drift rows;
+  - [ ] 🖥️🔴 Re-run `uv run python -m src.precision_match track=<lewm|dino>` → new INT8 drift rows;
     owner sign-off. **Not the arbiter** (nominal inputs — SPEC §Requirements).
-  - [x] 🖥️ Re-run `uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
+  - [ ] 🖥️ Re-run `uv run python -m src.sr_eval --config-dir conf +experiment=eval_<lewm|dino>
     precision=int8`, both tracks.
     → verify (**the real gate**): lewm INT8 SR recovers toward FP16 (96%). Still collapsed →
     record the INT8 row as degraded and advance.
 
-- [x] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** `uv run python -m
+- [ ] 🖥️🔴 **Precision-match gate (before profiling/benchmark):** `uv run python -m
   src.precision_match track=<lewm|dino>` on the **real** FP32+FP16+INT8 engines →
   engine-vs-PyTorch drift table. **No coded pass/fail** — the gate is the owner's sign-off on the
-  drift table.
+  drift table. Each engine is exercised at **its own** profile points — `_MATCH_BATCHES` carries
+  `(encoder batch, predictor batch)` pairs and the table has `enc_b`/`pred_b` columns (SPEC
+  §Requirements — engine-fidelity gate).
   → **OWNER SIGN-OFF (2026-07-10):** drift judged on **abs** only (`max_rel` is a
   near-zero-denominator artifact — disregarded). FP32 engines faithful (lewm enc_abs ≤7e-3, dino
   ≤5.6e-2) → export/assembly/register-slice/reshape sound. **FP32 trusted**; **FP16
@@ -251,12 +263,12 @@ Contracts; statistic split → `docs/architecture.md` §8; cycle definition → 
     latencies. Stale "per-solve" wording corrected in `src/report.py`, `src/benchmark.py`,
     `conf/experiment/eval_{lewm,dino}.yaml`.
     → verify (off-pod ✔): `pytest` 73 passed.
-  - [x] 🖥️ **Pod-verify (the real gate):** the per-env spans must **sum to the solver's printed
+  - [ ] 🖥️ **Pod-verify (the real gate):** the per-env spans must **sum to the solver's printed
     `CEM solve time`** (`cem.py:282`) less the pre-loop warm-start.
     → also verify: records per solve == alive-env count; `overhead_ms` lands at a believable
     fraction, not ~98%.
 
-- [x] 🖥️ **Latency benchmark** on the L40S, per model × precision — three equal-n p50/p95
+- [ ] 🖥️ **Latency benchmark** on the L40S, per model × precision — three equal-n p50/p95
   distributions: **per-cycle** (headline) off the per-decision callback over the SR eval-shim run;
   **encode-step** + **predictor-step** off isolated per-precision engine loops (`n_latency_iters=100`
   timed, `warmup=10` dropped). **Peak GPU memory** via `cudaMemGetInfo`/nvidia-smi. GPU clocks
@@ -294,7 +306,7 @@ Contracts; statistic split → `docs/architecture.md` §8; cycle definition → 
   (CPU; the eval leg is pod-only). 🔴 owner-confirm on pod: the `load_pretrained` patch-seam
   (`docs/architecture.md` §5).
 
-- [x] Headline outputs (tables **and** plots): **LeWM-vs-DINOv3 per-cycle latency ratio at p50**
+- [ ] Headline outputs (tables **and** plots): **LeWM-vs-DINOv3 per-cycle latency ratio at p50**
   (p95 alongside); **per-model FP32→FP16→INT8 delta** in **both speed and SR**, degradation quoted
   vs FP32 (p50 speedup + SR delta in the same row); **speed-vs-SR plotted**; **per-component
   breakdown** with all three p50/p95 distributions; per model × precision **both** the model-only
@@ -323,7 +335,7 @@ Contracts; statistic split → `docs/architecture.md` §8; cycle definition → 
   cross-track ratio plots.
   → verify: `results.{lewm,dino}.json` round-trip through `report.load_results`; a one-track render
   emits no `*_ratio.png`.
-  - [x] **Persist headline artifacts to network storage (pending):** `src/report.py` serializes
+  - [ ] **Persist headline artifacts to network storage (pending):** `src/report.py` serializes
     each table to `.txt` (currently stdout + W&B HTML only); `src/study.py` defaults `out_dir`
     under `$STABLEWM_HOME` (env-derived, repo-local fallback).
     → verify: after a study run the three table `.txt` + four plot `.png` files exist under
@@ -399,32 +411,32 @@ statistic split → `docs/architecture.md` §8.
     shared with `study.engine_paths`), so a second method's engines are additive on the volume;
     `study`/`sr_eval` load by method (fp32/fp16 untagged/method-invariant; `method=max` falls back to the
     legacy untagged plan so pre-tagging engines aren't orphaned). `tests/{test_sr_eval,test_study,test_report}.py`.
-  - [x] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
+  - [ ] 🖥️ **Measure `entropy`, both tracks (INT8 first, additive):** rebuild INT8 with
     `calibration_method=entropy`, re-run `src.sr_eval +experiment=eval_<lewm|dino> precision=int8` →
     new `entropy`-labelled SR points beside the existing `max` ones.
     → verify: DINO-`entropy` INT8 moves off the ~20% floor; LeWM-`entropy` vs LeWM-`max` ~76% decides
     LeWM's headline method. Neither recovers DINO → per-tensor 8-bit loss inherent; report DINO 8-bit
     degraded vs FP32.
-  - [x] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
+  - [ ] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
     keep the existing `max`-labelled INT8/FP8 rows intact.
 
-- [x] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/architecture.md` §9).
+- [ ] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/architecture.md` §9).
   Attributes each material 8-bit SR drop to the encoder or the predictor. Diagnostic: composite
   `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected (track, precision) cell.
-  - [x] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
+  - [ ] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
     diagnostic explains: `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_<lewm|dino> precision=int8,fp8 calibration_method=entropy`.
     → verify: `sr.json` carries `{track}.{int8,fp8}.entropy`; a render at
     `calibration_method=entropy` shows no PEND in the int8/fp8 SR column.
-  - [x] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
+  - [ ] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
     model=lewm precision=<int8|fp8> calibration_method=entropy`.
     → verify: `engines/lewm/{encoder,predictor}.<p>.entropy.plan` exist; quantized ONNX carries
     QuantizeLinear.
-  - [x] 🖥️ **DINO isolation runs** (2026-07-21, `entropy`): int8 + fp8, both sides.
+  - [ ] 🖥️ **DINO isolation runs** (2026-07-21, `entropy`): int8 + fp8, both sides.
     → enc-fp16+pred-fp8 70.0 · enc-fp16+pred-int8 42.0 · enc-int8+pred-fp16 16.0 ·
     enc-fp8+pred-fp16 4.0 (FP16 baseline ~70). Encoder-dominant; predictor FP8-clean,
     INT8-sensitive. Recorded in `sr.json` under composite keys.
-  - [x] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
+  - [ ] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_lewm encoder_precision=int8 predictor_precision=fp16
     calibration_method=entropy` and the reverse. FP8 only if LeWM FP8 also drops.
     → verify: composite keys land beside the pure points; pure SRs unchanged. architecture.md §7 predicts
@@ -480,28 +492,28 @@ statistic split → `docs/architecture.md` §8.
     render left fp32/fp16 SR-PENDING and NaN'd every FP32-relative ΔSR purely from a label.
     `::test_method_invariant_precisions_join_across_methods`.
 
-- [x] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
+- [ ] 🖥️ **Build FP8 engines, both tracks:** `uv run python -m src.export model=<lewm|dino>
   precision=fp8` → `engines/<track>/{encoder,predictor}.fp8.plan`.
   → verify: quantized ONNX carries QuantizeLinear (E4M3); FP8 engine builds; **FP8 tactics are
   actually selected** (verbose build / layer inspection), not a silent FP16 no-op.
 
-- [x] 🖥️🔴 **Precision-match gate — FP8 rows:** `uv run python -m src.precision_match
+- [ ] 🖥️🔴 **Precision-match gate — FP8 rows:** `uv run python -m src.precision_match
   track=<lewm|dino>` gains FP8 drift rows vs the PyTorch reference (nominal + off-nominal hist
   `T ∈ {1,2}`). No coded pass/fail — owner sign-off on the drift table. **Not the arbiter**
   (nominal inputs; SR is — SPEC §Requirements).
 
-- [x] 🖥️ **SR-per-precision — FP8:** `uv run python -m src.sr_eval --config-dir conf
+- [ ] 🖥️ **SR-per-precision — FP8:** `uv run python -m src.sr_eval --config-dir conf
   +experiment=eval_<lewm|dino> precision=fp8`, both tracks. Writes the `fp8` key into the
   per-track `sr.json` (read-modify-write → no clobber, CLAUDE.md §8).
   → verify: FP8 SR recorded per track, paired with its per-cycle latencies (same solves).
 
-- [x] 🖥️ **Per-component benchmark — FP8:** `src/benchmark.py` times the FP8 encode-step +
+- [ ] 🖥️ **Per-component benchmark — FP8:** `src/benchmark.py` times the FP8 encode-step +
   predictor-step distributions (equal-n p50/p95, warm-up dropped) + peak mem; `src/report.py
   ::decompose` derives the FP8 encoder/predictor/overhead split from the FP8 engine-step means ×
   the CEM call counts. `src/gpu_clocks.py` brackets the FP8 runs.
   → verify: FP8 per-component + peak-mem rows populated; negative overhead surfaced loudly.
 
-- [x] **FP8 in the headline artifacts (tables + plots):** the FP32→FP16→INT8→FP8 speed table (all
+- [ ] **FP8 in the headline artifacts (tables + plots):** the FP32→FP16→INT8→FP8 speed table (all
   three distributions at p50 **and** p95), the FP32-relative table (p50 speedup + ΔSR per row),
   the Amdahl dilution table (model-only vs realized at FP8), and the speed-vs-SR plot all gain the
   FP8 row/point; the canonical per-track `results.<track>.json` records the FP8 numbers + fairness
@@ -543,19 +555,19 @@ owner-authored** — CLAUDE renders tables/plots, never the prose. (SPEC §Execu
   the `src.clock_norm` docstring; headline stays the measured ratio, with disclosure. First derived
   render 2026-07-26.)
 
-- [x] 🟢 **Throttle diagnostic.** `src/clock_norm.py` parses `gpu_logs/*.dmon.log` → per-run telemetry
+- [ ] 🟢 **Throttle diagnostic.** `src/clock_norm.py` parses `gpu_logs/*.dmon.log` → per-run telemetry
   summary (SM/mem clock, power, temp, util medians + util-conditioned clock) and a differential-throttle
   plot (LeWM vs DINO, per precision) → `$STABLEWM_HOME/reports/phase5/gpu_logs/*_clock_diag.png`.
   → verify: plot renders from the saved `dmon` logs; the summary shows the lighter track at the boost
   ceiling and the heavier track throttled below it.
 
-- [x] 🟢 **Harvest → `derived_clocks.json`.** `src/clock_norm.py` writes the owner-set per-run clock
+- [ ] 🟢 **Harvest → `derived_clocks.json`.** `src/clock_norm.py` writes the owner-set per-run clock
   statistic + power per (track, precision, {sr_eval, benchmark}) to
   `$STABLEWM_HOME/reports/phase5/derived_clocks.json`. Read-only over `gpu_logs/`; `results.*.json`
   untouched.
   → verify: round-trips; one entry per (track, precision, run-type); values match the diagnostic.
 
-- [x] 🟢 **Apply normalization → three surfaces.** `src/clock_norm.py` applies the owner-set formula to
+- [ ] 🟢 **Apply normalization → three surfaces.** `src/clock_norm.py` applies the owner-set formula to
   the canonical latencies (`results.*.json` via `report.load_results` + `derived_clocks.json`):
   (a) cross-model per-cycle ratio `R` and normalized `R′`; (b) within-model FP32→FP16→INT8→FP8 deltas
   at a common clock; (c) overhead recomputed with component-loop and cycle latencies at a matched clock.
@@ -564,7 +576,7 @@ owner-authored** — CLAUDE renders tables/plots, never the prose. (SPEC §Execu
   `test_report_never_rewrites_canonical_results`); each derived table names itself `derived` + the
   `f_ref`/statistic used.
 
-- [x] 🟢 **Throttle plot → committed display copy.** `src/clock_norm.py` copies the cycle-run
+- [ ] 🟢 **Throttle plot → committed display copy.** `src/clock_norm.py` copies the cycle-run
   throttle plot to `reports/figs/` (display-only exception); the canonical copy stays under
   `$STABLEWM_HOME/reports/phase5/gpu_logs/`.
   → verify: `reports/figs/sr_eval_clock_diag.png` matches the volume copy byte-for-byte.
@@ -631,7 +643,7 @@ interval rests on. Canonical artifacts stay byte-unchanged; intervals are additi
   **both** axes — the latency bars are 0.02–1.9% of the panel x-span, i.e. narrower than the marker,
   which is the measurement, not a plotting fault.
 
-- [x] 🟢 **Generate `stats.json` — network storage by default, no re-run of anything.** `uv run
+- [ ] 🟢 **Generate `stats.json` — network storage by default, no re-run of anything.** `uv run
   python -m src.stats` (and `src.report`'s re-render) default their out dir to
   `study.default_out_dir()` = `$STABLEWM_HOME/reports/phase5/`, so on the pod it lands on the
   persistent volume; `from=`/`out=` override it for an off-pod run. It reads `sr.json` only —
@@ -640,7 +652,7 @@ interval rests on. Canonical artifacts stay byte-unchanged; intervals are additi
   intervals (composite isolation keys included), each with its n, both p-values, and the recorded
   seed; `sha256sum` of `sr.json` + both `results.*.json` unchanged.
 
-- [x] 🟢 **Refresh the committed display copies** `reports/figs/speed_vs_sr{,.titled}.png` from the
+- [ ] 🟢 **Refresh the committed display copies** `reports/figs/speed_vs_sr{,.titled}.png` from the
   render (display-only exception, re-copied never hand-edited).
   → verify (✔): repo copies match the volume copies byte-for-byte (`cmp`).
 
@@ -722,7 +734,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   dilution tables **and** all three plots are byte-identical with and without the component payload;
   a track with no stored samples renders `—`, never a borrowed interval. `pytest` 145 passed.
 
-- [x] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
+- [ ] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
   `results.<track>.json` and `gpu_clocks.log_gpu` opens each `*.benchmark.dmon.log` with `"w"`, so the
   run supersedes both. Copy `results.*.json`, `gpu_logs/*.benchmark.dmon.log`, `derived_clocks.json`,
   `stats.json` and the rendered `.txt`/`.png` → `$STABLEWM_HOME/reports/phase5/archive/2026-08-07/`.
@@ -732,7 +744,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   → verify (✔): every superseded file has an archive copy; `sha256sum sr.json` recorded for the
   post-run comparison.
 
-- [x] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
+- [ ] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
   track=<lewm|dino> calibration_method=entropy` (component latency is method-invariant → one pass per
   track; the method is recorded as provenance).
   → **done (2026-08-07):** both tracks, all four precisions. `latencies.{lewm,dino}.json` carry
@@ -774,6 +786,51 @@ byte-unchanged by the analysis.
 
 ---
 
+## Phase 10 — Full-pipeline driver  🟢 wiring · 🖥️ ⏱️
+
+One command carries both tracks from engines to rendered artifacts: the Phase-5→9 drivers run in
+order, each in its **own subprocess** (process isolation for the CUDA contexts, TensorRT engine
+arenas and Hydra global state the stages allocate). Every step is that stage's own documented
+command — this driver sequences the study, it does not reimplement any part of it. Diagnostics are
+opt-in. `out` resolves `study.default_out_dir()` = `$STABLEWM_HOME/reports/phase5/` **once** and is
+passed to every child; engines keep `export.engine_root()`. Trainings (Phase 2) and the Phase-3
+torch baseline are outside its scope — neither runs through an engine.
+
+- [ ] 🟢 `src/pipeline.py` + `tests/test_pipeline.py` — stage graph (`archive → export →
+  precision_match → sr_eval → isolation → benchmark → stats → report → clock_norm → figs`, with
+  `pytest`/`verify_encode`/`smoke`/`fidelity`/`sr_shim`/`probe_ranges`/`precision_match` behind
+  `diagnostics=true`), `dry_run=`/`stages=`/`tracks=`/`out=` CLI, fail-fast with a resume line, and
+  `<out>/pipeline_manifest.json` written after every step.
+  → verify (off-pod ✔): `uv run python -m src.pipeline dry_run=true` lists **33** steps — 12 export,
+  4 sr_eval, 8 isolation, 2 benchmark, 1 stats, 2 report, 2 clock_norm + archive + figs;
+  `pytest` 165 passed.
+
+- [ ] 🖥️ **Archive first (CLAUDE §8 — log before you delete).** `uv run python -m src.pipeline
+  stages=archive` → `$STABLEWM_HOME/reports/phase5/archive/<UTC date>/`.
+  → verify: every superseded file has a `cmp`-verified copy; `PRE_RUN_SHA256.txt` written.
+
+- [ ] 🖥️ **Run it, both tracks:** `uv run python -m src.pipeline`.
+  → verify: **24** engine plans under `$STABLEWM_HOME/engines/`; `sr.json` carries every
+  (track, precision, method) point plus the 8 composite `enc-<A>+pred-<B>` keys;
+  `results.{lewm,dino}.json` + `latencies.{lewm,dino}.json` refreshed (100 values per component per
+  precision); `stats.json` carries both interval families; the method-scoped tables,
+  `derived_clocks.json` + `*_normalized.derived.<method>.txt`, and `reports/figs/` all regenerated.
+
+- [ ] 🖥️🔴 **Owner sign-off on the drift table:** `uv run python -m src.pipeline
+  stages=precision_match diagnostics=true`. No coded pass/fail (SPEC §Requirements).
+  → verify: `enc_b` = 1 on every row, `pred_b` ∈ {1, 8, 300}; FP32 drift stays at the order the
+  gate has always judged it at (a materially different FP32 row means the build reached numerics —
+  STOP and ask).
+
+- [ ] 🟢 **`reports/figs/` refreshed** by re-copying from the render (display-only exception).
+  → verify: `cmp` clean against the volume copies.
+
+**Verify:** one `src.pipeline` invocation reproduces every Phase-5→9 artifact; `dry_run=true`
+prints the stage plan and touches nothing; a failed stage names itself and the `stages=` to resume
+from; `pipeline_manifest.json` records every step's command, exit code and duration.
+
+---
+
 ## Critical files
 
 - `src/interfaces.py` — typed contract; dim constants + CEM per-cycle call counts.
@@ -784,6 +841,10 @@ byte-unchanged by the analysis.
   `latencies.<track>.json`, beside (never inside) `results.<track>.json`.
 - `src/precision_match.py`, `src/fidelity.py`, `src/sr_shim.py`, `src/sr_eval.py`,
   `src/trt_runtime.py` — the gates + engine-backed SR path.
+- `src/pipeline.py` — Phase-10 end-to-end driver: sequences the Phase-5→9 drivers as isolated
+  subprocesses (archive → export → sr_eval → isolation → benchmark → stats → report → clock_norm →
+  figs; diagnostics opt-in), resolving `study.default_out_dir()` once for every child and recording
+  each step in `<out>/pipeline_manifest.json`.
 - `src/wandb_log.py` — owned W&B helper for the non-training phases (Phase 3+).
 - `src/gpu_clocks.py` — passive `nvidia-smi dmon` GPU-telemetry observer →
   `$STABLEWM_HOME/reports/phase5/gpu_logs/`.
@@ -848,3 +909,6 @@ byte-unchanged by the analysis.
    `src.stats` extends the intervals to the encode-/predictor-step p50s off those samples (own Holm
    family, no truncation, no report-time drop) and the speed table carries a component interval + `ac`
    flag on every benchmarked row, with `sr.json` / `results.*.json` byte-unchanged (Phase 9).
+10. `uv run python -m src.pipeline dry_run=true` prints the whole stage plan off-pod without
+    touching the volume, and `uv run python -m src.pipeline` reproduces every artifact of steps
+    5–9 on the L40S in one invocation, recording each step in `pipeline_manifest.json` (Phase 10).

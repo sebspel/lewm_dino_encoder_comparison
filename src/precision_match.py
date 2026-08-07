@@ -27,7 +27,11 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
-from src.export import export, precision_match as engine_drift
+from src.export import (
+    _MAX_CANDIDATE_BATCH,
+    export,
+    precision_match as engine_drift,
+)
 from src.interfaces import (
     ExportConfig,
     WMStepAdapter,
@@ -37,15 +41,19 @@ from src.interfaces import (
 )
 from src.trt_runtime import engine_vs_reference
 
-# Precision-match batches: exercise the engine at the optimization profile's min / opt / max
-# — TensorRT tunes at the `opt` point, which `build_engine` pins to the example-input batch
-# (docs/platform_api.md §3: CEM num_samples=300 is the max candidate fan-out). Validating a
-# batch != the trace batch is load-bearing: the predictor's batch axis is a torch.export-
-# specialized symbol some consumers fold to the trace batch, so a single opt-batch check
-# would pass even a batch-frozen engine (TRT keeps the axis dynamic; these off-opt batches
-# prove it end-to-end).
+# The batch every graph is TRACED at. Distinct from the batch each engine is BUILT for
+# (`export._BATCH_PROFILE`) — the trace fixes the non-batch axes and the shape modelopt feeds its
+# ORT sessions, the profile fixes what TensorRT tunes tactics at (docs/architecture.md §6).
 _MATCH_BATCH = 8
-_MATCH_BATCHES = (1, _MATCH_BATCH, 300)
+
+# Precision-match batches, as (encoder batch, predictor batch) pairs — each engine is exercised at
+# ITS OWN profile points (SPEC §Requirements — engine-fidelity gate). The encoder is built at a
+# single production batch, so it has one point and is held there on every row. The predictor is
+# swept at profile min, the TRACE batch, and opt/max: validating a batch != the trace batch is
+# load-bearing, because the predictor's batch axis is a torch.export-specialized symbol some
+# consumers fold to the trace batch, so a check at the trace batch alone would pass even a
+# batch-frozen engine (TRT keeps the axis dynamic; these off-trace batches prove it end-to-end).
+_MATCH_BATCHES = ((1, 1), (1, _MATCH_BATCH), (1, _MAX_CANDIDATE_BATCH))
 
 # Off-nominal HISTORY windows the platform rollout actually feeds the predictor (n_obs=1 ->
 # min(n_obs, HS) grows 1, 2, 3): the batch sweep above only exercises the traced HS, but the
@@ -116,9 +124,9 @@ def precision_match_track(
     engine_dir: Path,
     calibration_method: str = DEFAULT_CALIBRATION_METHOD,
 ) -> list[dict]:
-    """Export each precision (traced ONCE at the profile opt batch) and measure engine-vs-
-    PyTorch drift for both methods at each of `_MATCH_BATCHES` (profile min/opt/max), PLUS the
-    off-nominal history windows `_MATCH_HISTS` (`T < HS`) the rollout feeds the predictor. The
+    """Export each precision (traced ONCE at `_MATCH_BATCH`) and measure engine-vs-PyTorch drift
+    for both methods at each of `_MATCH_BATCHES` — each component at its own profile points — PLUS
+    the off-nominal history windows `_MATCH_HISTS` (`T < HS`) the rollout feeds the predictor. The
     reference runs on CUDA when available so the max-batch check is feasible for both tracks;
     engines are built on the CPU-traced graph first, then the adapter is moved to the
     reference device (the engine already carries the same weights).
@@ -127,8 +135,9 @@ def precision_match_track(
     through the SHIM's own hist-adapt wrappers (`build_engine_fns` / `build_lewm_engine_fns`) —
     so the gate tests the real production pad-to-`HS`/slice path against the native-`T` predict,
     not a reimplementation."""
-    # Trace + build every precision from the CPU opt-batch inputs (unchanged trace behavior).
-    opt_encode, opt_predict = example_inputs(adapter, cfg, batch=_MATCH_BATCH)
+    # Trace + build every precision from the CPU trace-batch inputs. These fix the graphs'
+    # non-batch axes; each engine's batch profile comes from `export._BATCH_PROFILE`.
+    trace_encode, trace_predict = example_inputs(adapter, cfg, batch=_MATCH_BATCH)
 
     # Quantized precisions (int8/fp8) need the owner-approved calibration set (drawn ONCE from the
     # real Push-T data and streamed through this adapter for the predictor). Built here — before
@@ -145,8 +154,8 @@ def precision_match_track(
         precision: export(
             adapter,
             precision=precision,
-            encode_inputs=opt_encode,
-            predict_inputs=opt_predict,
+            encode_inputs=trace_encode,
+            predict_inputs=trace_predict,
             engine_dir=engine_dir / precision,
             calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
             # PTQ method (`max` | `entropy`, a build option for both tracks — architecture.md §7), so the
@@ -167,14 +176,24 @@ def precision_match_track(
 
     build_fns = build_lewm_engine_fns if name == "lewm" else build_engine_fns
 
+    # The encoder and predictor are built at DIFFERENT batches, so their inputs are drawn from two
+    # `example_inputs` calls per row rather than one (the same pattern `study.run_track` benchmarks
+    # at). Only the halves each engine consumes are kept.
+    def _paired_inputs(enc_batch: int, pred_batch: int, hist: int | None = None):
+        encode_inputs, _ = example_inputs(
+            adapter, cfg, batch=enc_batch, device=device, hist=hist
+        )
+        _, predict_inputs = example_inputs(
+            adapter, cfg, batch=pred_batch, device=device, hist=hist
+        )
+        return encode_inputs, predict_inputs
+
     rows: list[dict] = []
     for precision in precisions:
         engines = engines_by_precision[precision]
-        # (1) Traced-HS batch sweep (profile min/opt/max): engines run directly.
-        for batch in _MATCH_BATCHES:
-            encode_inputs, predict_inputs = example_inputs(
-                adapter, cfg, batch=batch, device=device
-            )
+        # (1) Traced-HS batch sweep, each component at its own profile points: engines run directly.
+        for enc_batch, pred_batch in _MATCH_BATCHES:
+            encode_inputs, predict_inputs = _paired_inputs(enc_batch, pred_batch)
             ref = reference_outputs(adapter, encode_inputs, predict_inputs)
             enc = engine_vs_reference(engines["encoder"], ref["encoder"], encode_inputs)
             pred = engine_vs_reference(
@@ -184,7 +203,8 @@ def precision_match_track(
                 {
                     "model": name,
                     "precision": precision,
-                    "batch": batch,
+                    "enc_batch": enc_batch,
+                    "pred_batch": pred_batch,
                     "hist": cfg.hist,
                     "encode_max_abs": enc["max_abs"],
                     "encode_max_rel": enc["max_rel"],
@@ -194,11 +214,11 @@ def precision_match_track(
             )
         # (2) Off-nominal sub-HS history windows (T < HS): route through the shim's hist-adapt
         # wrappers and compare against the native-T PyTorch reference (the variable-window parity).
+        # Run at each engine's own profile opt batch.
+        enc_batch, pred_batch = _MATCH_BATCHES[-1]
         encode_fn, predict_fn = build_fns(engines)
         for hist in _MATCH_HISTS:
-            encode_inputs, predict_inputs = example_inputs(
-                adapter, cfg, batch=_MATCH_BATCH, device=device, hist=hist
-            )
+            encode_inputs, predict_inputs = _paired_inputs(enc_batch, pred_batch, hist)
             ref = reference_outputs(adapter, encode_inputs, predict_inputs)
             enc = engine_drift(ref["encoder"], encode_fn(*encode_inputs))
             pred = engine_drift(ref["predictor"], predict_fn(*predict_inputs))
@@ -206,7 +226,8 @@ def precision_match_track(
                 {
                     "model": name,
                     "precision": precision,
-                    "batch": _MATCH_BATCH,
+                    "enc_batch": enc_batch,
+                    "pred_batch": pred_batch,
                     "hist": hist,
                     "encode_max_abs": enc["max_abs"],
                     "encode_max_rel": enc["max_rel"],
@@ -219,13 +240,15 @@ def precision_match_track(
 
 def _print_table(rows: list[dict]) -> None:
     # `hist < cfg.hist` rows are the off-nominal (sub-HS) predictor windows the rollout feeds;
-    # `hist == cfg.hist` rows are the traced-HS batch sweep.
-    hdr = f"{'model':>6} {'prec':>5} {'batch':>6} {'hist':>5} {'enc_abs':>10} {'enc_rel':>10} {'pred_abs':>10} {'pred_rel':>10}"
+    # `hist == cfg.hist` rows are the traced-HS batch sweep. `enc_b`/`pred_b` are the two engines'
+    # batches — they differ because each engine is built at its own profile (architecture.md §6),
+    # so `enc_b` is constant at the encoder's single production batch across every row.
+    hdr = f"{'model':>6} {'prec':>5} {'enc_b':>6} {'pred_b':>6} {'hist':>5} {'enc_abs':>10} {'enc_rel':>10} {'pred_abs':>10} {'pred_rel':>10}"
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         print(
-            f"{r['model']:>6} {r['precision']:>5} {r['batch']:>6} {r['hist']:>5} "
+            f"{r['model']:>6} {r['precision']:>5} {r['enc_batch']:>6} {r['pred_batch']:>6} {r['hist']:>5} "
             f"{r['encode_max_abs']:>10.3e} {r['encode_max_rel']:>10.3e} "
             f"{r['predict_max_abs']:>10.3e} {r['predict_max_rel']:>10.3e}"
         )
