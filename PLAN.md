@@ -671,7 +671,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   → verify: recorded in SPEC §Interface Contracts + `docs/architecture.md` §12 **before** any component
   interval is written (`src.stats` docstring lands with the compute step below). (Signed off 2026-08-06.)
 
-- [ ] 🟢 **Capture the raw component samples.** `src/benchmark.py::benchmark` returns
+- [x] 🟢 **Capture the raw component samples.** `src/benchmark.py::benchmark` returns
   `(BenchResult, ComponentSamples)` — `_time_loop` already builds the lists; stop discarding them.
   `ComponentSamples` + the `Benchmark` Protocol arity in `src/interfaces.py`; `BenchResult` unchanged.
   `_percentiles_ms` computes on `float64` to match `report._percentile_ms` exactly. `src/smoke.py`
@@ -682,7 +682,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   → verify (✔): each component vector is `n_iters` long with the warm-up iters excluded; the
   returned p50 equals `report._percentile_ms(sample, 0.5)` (the anti-drift guard).
 
-- [ ] 🟢 **Persist them.** `src/study.py::dump_track_latencies` writes
+- [x] 🟢 **Persist them.** `src/study.py::dump_track_latencies` writes
   `latencies.<track>.json` beside `results.<track>.json` — `{meta: {track, n_latency_iters, warmup,
   calibration_method, seed, written}, latencies: {precision: {encode_ms: [...], predict_ms: [...]}}}` —
   merged **per precision** with `dump_track_results`' no-clobber discipline, called BEFORE rendering.
@@ -693,7 +693,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   → verify (✔): round-trips through `stats.load_component_latencies`; a later single-precision run
   preserves the other precisions; `results.<track>.json` schema unchanged.
 
-- [ ] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, component): `order_statistic_ci`
+- [x] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, component): `order_statistic_ci`
   + `dwass_permutation_test` over the stored vector — existing helpers, no new estimator. Own Holm
   family, separate from the per-cycle one. New top-level `points_components` section
   (`[track][precision][encode|predict]`, method-free); `points` untouched. CLI auto-discovers
@@ -710,7 +710,7 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   section (pins the per-surface ruling); every component point records its n, both p-values, the
   ranks/coverage and the seed.
 
-- [ ] 🟢 **Render on the speed table.** `render_speed_table` gains `enc_p50_CI95`, `enc_ac`,
+- [x] 🟢 **Render on the speed table.** `render_speed_table` gains `enc_p50_CI95`, `enc_ac`,
   `pred_p50_CI95`, `pred_ac` beside the existing component columns (reuse `_ci` / `_ac_flag`; every
   cell stays ONE whitespace-delimited token). `_component_stats_lookup` walks `points_components` with
   **no** method fallback. `src.report from=` loads `latencies.*.json` from the source dir.
@@ -732,11 +732,19 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   → verify (✔): every superseded file has an archive copy; `sha256sum sr.json` recorded for the
   post-run comparison.
 
-- [ ] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
+- [x] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
   track=<lewm|dino> calibration_method=entropy` (component latency is method-invariant → one pass per
   track; the method is recorded as provenance).
-  → verify: `latencies.<track>.json` on the volume with **100 values per component per built
-  precision**; `sr.json` sha256 unchanged; a fresh `*.benchmark.dmon.log` per precision.
+  → **done (2026-08-07):** both tracks, all four precisions. `latencies.{lewm,dino}.json` carry
+  **100 values per component per precision** (1600 raw values); `meta` records
+  `n_latency_iters=100, warmup=10, calibration_method=entropy, seed=0`.
+  → **`sr.json` re-baselined, not violated:** two LeWM FP8 isolation evals (`enc-fp8+pred-fp16`,
+  `enc-fp16+pred-fp8` @ `entropy`) ran BEFORE the study, so `sr.json` moved
+  `eb78dc8e…` → `b5ad422e…` by that additive merge. `src.study` itself left it byte-unchanged.
+  → **telemetry is method-TAGGED** (`run_tag` = `<track>.<precision>.<method>.benchmark`), so this
+  run wrote NEW `…entropy.benchmark.dmon.log` files; the untagged pre-Phase-9 logs survive beside them.
+  → verify (✔): 100 values per component per built precision; a fresh `*.benchmark.dmon.log` per
+  precision.
 
 - [ ] 🟢 **Regenerate downstream, in order (off-pod).** Component **means** moved, so everything derived
   from them must be rebuilt: (1) `src.stats` → `stats.json` with both interval sections; (2) `src.report
@@ -745,8 +753,19 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   `*_normalized.derived.*` re-harvested from the **new** benchmark telemetry (Phase-7 surfaces (b)/(c)
   read component clocks — stale pairing would normalize new latencies with old clocks); (4) refresh
   `reports/figs/` by re-copying from the render.
-  → verify: `stats.json` carries two family sizes and per-cycle values matching the archived copy;
-  derived tables cite the new telemetry; `reports/figs/` matches the volume copies byte-for-byte.
+  → **done (2026-08-07):** (1) `stats.json` — **20** per-cycle/SR points + **16** component points,
+  Holm families 20 / 16 kept separate (`holm_scope` per surface). (2) speed table widened to
+  `enc_p50_CI95`/`enc_ac`/`pred_p50_CI95`/`pred_ac`, **19 tokens on header and every row**
+  (`split()`-parseable). (3) `src.clock_norm` **re-run at `calibration_method=entropy`** — the first
+  pass defaulted to `max` and wrote `*.derived.max.txt`, leaving the entropy tables stale at the
+  pre-re-run telemetry; the corrected pass refreshed `derived_clocks.json` +
+  `*_normalized.derived.entropy.txt`. (4) `reports/figs/` re-copied, all five `cmp`-clean.
+  → **disclosed:** 13 of 16 component cells REJECT the lag-1 independence test at the unadjusted p
+  (`dino fp32 encode` ac=+0.76, p=2e-05) — flagged `*` in the table, intervals anti-conservative
+  (too narrow). Back-to-back timing loops correlate; what a rejection licenses is OWNER-authored
+  (SPEC §Implementation Boundaries).
+  → verify (✔): two family sizes present; derived tables cite the new telemetry; `reports/figs/`
+  matches the volume copies byte-for-byte.
 
 **Verify:** owner sign-off recorded before any component interval; `latencies.{lewm,dino}.json` on the
 volume with the loops' raw samples; every benchmarked speed-table row carries a component p50 interval
