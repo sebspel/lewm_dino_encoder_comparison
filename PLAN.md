@@ -722,12 +722,15 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   dilution tables **and** all three plots are byte-identical with and without the component payload;
   a track with no stored samples renders `—`, never a borrowed interval. `pytest` 145 passed.
 
-- [ ] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
+- [x] 🖥️ **Archive before the re-run (CLAUDE §8 — log before you delete).** `src.study` merges into
   `results.<track>.json` and `gpu_clocks.log_gpu` opens each `*.benchmark.dmon.log` with `"w"`, so the
   run supersedes both. Copy `results.*.json`, `gpu_logs/*.benchmark.dmon.log`, `derived_clocks.json`,
-  `stats.json` and the rendered `.txt`/`.png` → `$STABLEWM_HOME/reports/phase5/archive/2026-08-06/`.
-  → verify: every superseded file has an archive copy; `sha256sum sr.json` recorded for the post-run
-  comparison.
+  `stats.json` and the rendered `.txt`/`.png` → `$STABLEWM_HOME/reports/phase5/archive/2026-08-07/`.
+  → **done (2026-08-07):** 43 files, 6.4M, each verified byte-identical to its source (`cmp`).
+  Pre-run `sha256sum` of `sr.json` + both `results.*.json` recorded in the archive's
+  `PRE_RUN_SHA256.txt` (`sr.json` = `eb78dc8e…`).
+  → verify (✔): every superseded file has an archive copy; `sha256sum sr.json` recorded for the
+  post-run comparison.
 
 - [ ] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
   track=<lewm|dino> calibration_method=entropy` (component latency is method-invariant → one pass per
