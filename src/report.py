@@ -581,7 +581,12 @@ def render_isolation_table(
 
     These rows come from composite `enc-<A>+pred-<B>` sr.json keys that are NOT in `_PRECISIONS`,
     so they reach no headline table, plot, or ratio — the mixed pairing is a diagnostic, never a
-    fifth precision (architecture.md §9). Returns "" when no isolation runs exist."""
+    fifth precision (architecture.md §9). Returns "" when no isolation runs exist.
+
+    ONE table per calibration method (`isolation_table.<method>.txt`). The diagnostic is run at
+    BOTH `max` and `entropy` (SPEC §Requirements) and a row only explains a headline row rendered
+    at the SAME method, so a method with no isolation runs of its own renders no table at all
+    rather than borrowing the other method's rows."""
     order = {p: i for i, p in enumerate(_PRECISIONS)}
     rows = []
     for track in _TRACKS:

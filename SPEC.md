@@ -507,12 +507,18 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
 - **FP8 delta:** FP8 (E4M3) built and benchmarked like INT8 on the L40S's native FP8 Tensor
   Cores, its speed/SR degradation quoted vs FP32, and its rows/points folded into the same
   headline recordings, tables, and plots as the other precisions.
-- **Component-precision isolation (diagnostic, both tracks, `entropy`).** Where a quantized precision
+- **Component-precision isolation (diagnostic, both tracks, both calibration methods).** Where a
+  quantized precision
   shows a material SR drop, the study must attribute it to the **encoder or the predictor**, not
   merely report it: the SR eval is re-run with ONE component quantized and the other held at FP16,
-  two runs per affected (track, precision) cell. It is run at a **single calibration method
-  (`entropy`)**, method-matched to the headline row it explains, and covers **both tracks** — a
-  one-track isolation would argue the other track's innocence from absence of evidence.
+  two runs per affected (track, precision, **method**) cell. It is run at **both calibration methods
+  (`max` and `entropy`)** and covers **both tracks**. Each run is method-matched to the headline row
+  it explains and the isolation table is method-scoped like every other single-method table, so a row
+  only explains a headline row rendered at the **same** method: isolation points are quantized
+  results, never method-invariant, and never fall back across methods. Since the headline is
+  renderable at either method, a single-method isolation would leave the other method's drops
+  unattributed — the same argument that forbids a one-track isolation, which would argue the other
+  track's innocence from absence of evidence.
   **It is a diagnostic, not a fifth precision:** mixed pairings are never benchmarked for latency,
   never entered in the headline ratio or the FP32→FP16→INT8→FP8 sweep, and never quoted as a
   recommended configuration. Results are recorded under composite `enc-<A>+pred-<B>` keys that cannot

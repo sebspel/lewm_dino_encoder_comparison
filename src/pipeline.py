@@ -54,13 +54,10 @@ from src.interfaces import (
 
 _TRACKS = ("lewm", "dino")
 
-# The method the per-component benchmark and the isolation diagnostic are run under. Component
-# latency is calibration-method-INVARIANT (SPEC §Parity), so for `src.study` this is provenance —
-# which built engines were timed — not a second measurement. For the isolation runs it is the
-# method SPEC pins the diagnostic to (`docs/architecture.md` §9), method-matched to the headline
-# row each one explains.
+# The method the per-component benchmark is run under. Component latency is
+# calibration-method-INVARIANT (SPEC §Parity), so this is provenance — which built engines were
+# timed — not a second measurement.
 _BENCHMARK_METHOD = "entropy"
-_ISOLATION_METHOD = "entropy"
 
 # The committed display copies (SPEC §Headline-artifact durability — the one exception to the
 # never-in-git rule for artifacts). Source path relative to `out_dir`; they are re-copied from a
@@ -334,25 +331,30 @@ def build_steps(
 
         elif stage == "isolation":
             # Component-precision isolation: ONE component quantized, the other held at FP16, two
-            # runs per (track, quantized precision). Recorded under composite `enc-<A>+pred-<B>`
-            # keys that cannot collide with a pure precision, so the headline is unchanged by
-            # construction (docs/architecture.md §9).
+            # runs per (track, quantized precision, calibration method). Recorded under composite
+            # `enc-<A>+pred-<B>` keys that cannot collide with a pure precision, so the headline is
+            # unchanged by construction (docs/architecture.md §9).
+            # BOTH methods, unlike the benchmark above: the composite keys carry their method and
+            # never fall back across methods (`report._select_method`), so a row only explains a
+            # headline row rendered at the SAME method — and the headline renders at either. One
+            # method per pass keeps each 2x2 inside a single labelled comparison.
             for track in tracks:
-                for precision in QUANTIZED_PRECISIONS:
-                    for enc, pred in ((precision, "fp16"), ("fp16", precision)):
-                        add(
-                            stage,
-                            _module(
-                                "src.sr_eval",
-                                "--config-dir",
-                                "conf",
-                                f"+experiment=eval_{track}",
-                                f"encoder_precision={enc}",
-                                f"predictor_precision={pred}",
-                                f"calibration_method={_ISOLATION_METHOD}",
-                                f"out={out}",
-                            ),
-                        )
+                for method in CALIBRATION_METHODS:
+                    for precision in QUANTIZED_PRECISIONS:
+                        for enc, pred in ((precision, "fp16"), ("fp16", precision)):
+                            add(
+                                stage,
+                                _module(
+                                    "src.sr_eval",
+                                    "--config-dir",
+                                    "conf",
+                                    f"+experiment=eval_{track}",
+                                    f"encoder_precision={enc}",
+                                    f"predictor_precision={pred}",
+                                    f"calibration_method={method}",
+                                    f"out={out}",
+                                ),
+                            )
 
         elif stage == "benchmark":
             # One pass per track, in its own process: DINO's engine contexts alone reserve ~11 GB,

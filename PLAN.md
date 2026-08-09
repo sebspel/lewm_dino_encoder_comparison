@@ -418,28 +418,48 @@ statistic split → `docs/architecture.md` §8.
   - [x] 🖥️ **Extend the winning method(s) to FP8** and fold the labelled points into the headline;
     keep the existing `max`-labelled INT8/FP8 rows intact.
 
-- [x] 🖥️ **Component-precision isolation — both tracks, `entropy` only** (`docs/architecture.md` §9).
+- [ ] 🖥️ **Component-precision isolation — both tracks, both methods (`max` + `entropy`)**
+  (`docs/architecture.md` §9).
   Attributes each material 8-bit SR drop to the encoder or the predictor. Diagnostic: composite
-  `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected (track, precision) cell.
-  - [x] 🖥️ **Pure `entropy` corners** — the 2×2's both-quantized corner AND the headline row the
+  `enc-<A>+pred-<B>` keys, never in the headline sweep. Two runs per affected
+  (track, precision, **method**) cell — up to **16 evals** (2 sides × 2 precisions × 2 tracks ×
+  2 methods).
+  A row only explains a headline row rendered at the SAME method, so both methods' renders are
+  covered.
+  - [x] 🖥️ **Pure corners, both methods** — the 2×2's both-quantized corner AND the headline row the
     diagnostic explains: `uv run python -m src.sr_eval --config-dir conf
-    +experiment=eval_<lewm|dino> precision=int8,fp8 calibration_method=entropy`.
-    → verify: `sr.json` carries `{track}.{int8,fp8}.entropy`; a render at
-    `calibration_method=entropy` shows no PEND in the int8/fp8 SR column.
+    +experiment=eval_<lewm|dino> precision=int8,fp8 calibration_method=entropy`; the `max` corners
+    come from the default-method sweep (`precision=fp32,fp16,int8,fp8 calibration_method=max`,
+    Phases 5–6 and the pipeline's `sr_eval` stage).
+    → verify: `sr.json` carries `{track}.{int8,fp8}.{max,entropy}`; a render at **either**
+    `calibration_method` shows no PEND in the int8/fp8 SR column.
   - [x] 🖥️ **LeWM `entropy` engines** (DINO's already built): `uv run python -m src.export
     model=lewm precision=<int8|fp8> calibration_method=entropy`.
     → verify: `engines/lewm/{encoder,predictor}.<p>.entropy.plan` exist; quantized ONNX carries
     QuantizeLinear.
-  - [x] 🖥️ **DINO isolation runs** (2026-07-21, `entropy`): int8 + fp8, both sides.
+    → **both methods' engines already stand** — the isolation needs no new export: the 24 plans
+    confirmed in Phase 10 are 2 tracks × 2 components × {fp32, fp16, int8.max, int8.entropy,
+    fp8.max, fp8.entropy}.
+  - [x] 🖥️ **DINO isolation runs — `entropy`** (2026-07-21): int8 + fp8, both sides.
     → enc-fp16+pred-fp8 70.0 · enc-fp16+pred-int8 42.0 · enc-int8+pred-fp16 16.0 ·
     enc-fp8+pred-fp16 4.0 (FP16 baseline ~70). Encoder-dominant; predictor FP8-clean,
     INT8-sensitive. Recorded in `sr.json` under composite keys.
-  - [x] 🖥️ **LeWM isolation runs** — `uv run python -m src.sr_eval --config-dir conf
+  - [x] 🖥️ **LeWM isolation runs — `entropy`** — `uv run python -m src.sr_eval --config-dir conf
     +experiment=eval_lewm encoder_precision=int8 predictor_precision=fp16
     calibration_method=entropy` and the reverse. FP8 only if LeWM FP8 also drops.
     → verify: composite keys land beside the pure points; pure SRs unchanged. architecture.md §7 predicts
     **predictor**-dominant damage (Design A puts `action_encoder` inside the predict engine) — a
     contrary result reopens that mechanism.
+  - [ ] 🖥️ **DINO isolation runs — `max`** — the same four runs at `calibration_method=max`:
+    `uv run python -m src.sr_eval --config-dir conf +experiment=eval_dino
+    encoder_precision=<int8|fp8> predictor_precision=fp16 calibration_method=max` and the reverse.
+    → verify: `sr.json` carries `dino.enc-<A>+pred-<B>.max` beside the `entropy` points; the
+    `entropy` points are byte-unchanged (additive merge per (track, label, method)).
+    → the attribution may legitimately DIFFER from the `entropy` result — different scales,
+    different saturation (`docs/architecture.md` §7, §9). It is a second measurement, not a re-run.
+  - [ ] 🖥️ **LeWM isolation runs — `max`** — the same four runs at `calibration_method=max`.
+    → verify: composite `max` keys land beside the pure `max` points; the `entropy` composites and
+    all pure SRs unchanged.
   - [x] 🟢 **Isolation table** in `src/report.py`, rendered from the composite `sr.json` keys and
     placed after `fp32_relative_table`. Columns: track · precision · component quantized (other held
     fp16) · SR · ΔSR vs that track's FP16 · that component's per-cycle time share.
@@ -448,6 +468,11 @@ statistic split → `docs/architecture.md` §8.
     `tests/test_report.py::test_isolation_table_attributes_component`,
     `::test_isolation_keys_never_reach_the_headline` (headline `.txt` byte-identical with and
     without composite keys). `pytest` 93 passed.
+    → **already method-parametric — no code change for the second method:**
+    `render_isolation_table(bench, overrides, method, …)` selects per (track, composite label,
+    method) with **no** cross-method fallback (composite keys are not method-invariant), so a `max`
+    render emits `isolation_table.max.txt` as soon as the `max` runs exist. Until then a `max`
+    render emits no isolation table at all — the gap the runs above close.
 
 - [x] 🟢 **Report labelling + provenance** (`docs/architecture.md` §7, `docs/architecture.md` §8).
   - [x] **Method-scoped headline tables:** the four single-method tables written as
@@ -526,7 +551,8 @@ owner-signed-off; FP8 SR + latency + peak mem recorded and joined; every Phase-5
 the per-track results JSON carry the FP8 row/point (quoted vs FP32); all logged to W&B.
 Every rendered table names its calibration method and no render clobbers another method's artefacts;
 the speed table carries `n`; the isolation table attributes each material 8-bit SR drop to a
-component on **both** tracks.
+component on **both** tracks at **both** calibration methods (`isolation_table.max.txt` **and**
+`isolation_table.entropy.txt`, neither borrowing the other's rows).
 
 ---
 
@@ -767,6 +793,9 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   (SPEC §Implementation Boundaries).
   → verify (✔): two family sizes present; derived tables cite the new telemetry; `reports/figs/`
   matches the volume copies byte-for-byte.
+  → the per-cycle/SR family grows **20 → 28** once the `max` isolation points land (+4 composite
+  points per track); the component family stays **16** — isolation is an SR diagnostic and is never
+  benchmarked for latency.
 
 **Verify:** owner sign-off recorded before any component interval; `latencies.{lewm,dino}.json` on the
 volume with the loops' raw samples; every benchmarked speed-table row carries a component p50 interval
@@ -785,22 +814,31 @@ opt-in. `out` resolves `study.default_out_dir()` = `$STABLEWM_HOME/reports/phase
 passed to every child; engines keep `export.engine_root()`. Trainings (Phase 2) and the Phase-3
 torch baseline are outside its scope — neither runs through an engine.
 
-- [x] 🟢 `src/pipeline.py` + `tests/test_pipeline.py` — stage graph (`archive → export →
+- [ ] 🟢 `src/pipeline.py` + `tests/test_pipeline.py` — stage graph (`archive → export →
   precision_match → sr_eval → isolation → benchmark → stats → report → clock_norm → figs`, with
   `pytest`/`verify_encode`/`smoke`/`fidelity`/`sr_shim`/`probe_ranges`/`precision_match` behind
   `diagnostics=true`), `dry_run=`/`stages=`/`tracks=`/`out=` CLI, fail-fast with a resume line, and
   `<out>/pipeline_manifest.json` written after every step.
-  → verify (off-pod ✔): `uv run python -m src.pipeline dry_run=true` lists **33** steps — 12 export,
-  4 sr_eval, 8 isolation, 2 benchmark, 1 stats, 2 report, 2 clock_norm + archive + figs;
-  `pytest` 167 passed (2026-08-08).
+  → **isolation at both methods landed (off-pod ✔):** the `isolation` stage loops
+  `CALIBRATION_METHODS` as `report`/`clock_norm` already do; the `_ISOLATION_METHOD` constant is
+  retired (`_BENCHMARK_METHOD` stays — component latency is method-invariant, so that one is
+  provenance). All engines already exist → `export` unchanged.
+  → verify (off-pod ✔): `uv run python -m src.pipeline dry_run=true` lists **41** steps — 12 export,
+  4 sr_eval, **16** isolation, 2 benchmark, 1 stats, 2 report, 2 clock_norm + archive + figs;
+  `tests/test_pipeline.py::test_isolation_holds_one_component_at_fp16_per_run` asserts 16 labels,
+  `per_method` under each of the two methods, exactly one side quantized per run. `pytest` 167 passed.
 
 - [x] 🖥️ **Archive first (CLAUDE §8 — log before you delete).** `uv run python -m src.pipeline
   stages=archive` → `$STABLEWM_HOME/reports/phase5/archive/<UTC date>/`.
   → verify: every superseded file has a `cmp`-verified copy; `PRE_RUN_SHA256.txt` written.
 
-- [x] 🖥️ **Run it, both tracks:** `uv run python -m src.pipeline`.
+- [ ] 🖥️ **Run it, both tracks:** `uv run python -m src.pipeline`.
+  → the 8 `max` isolation evals are the only new measurement — engines, pure corners and the
+  component benchmark are unchanged — so `stages=isolation,stats,report,clock_norm,figs` is the
+  cheap path where the rest still stands.
   → verify: **24** engine plans under `$STABLEWM_HOME/engines/`; `sr.json` carries every
-  (track, precision, method) point plus the 8 composite `enc-<A>+pred-<B>` keys;
+  (track, precision, method) point plus **16** composite points (8 `enc-<A>+pred-<B>` keys ×
+  2 methods);
   `results.{lewm,dino}.json` + `latencies.{lewm,dino}.json` refreshed (100 values per component per
   precision); `stats.json` carries both interval families; the method-scoped tables,
   `derived_clocks.json` + `*_normalized.derived.<method>.txt`, and `reports/figs/` all regenerated.

@@ -64,9 +64,13 @@ def test_sr_eval_reruns_only_the_quantized_precisions_for_a_second_method():
 
 def test_isolation_holds_one_component_at_fp16_per_run():
     labels = _labels("isolation")
-    assert len(labels) == 2 * len(QUANTIZED_PRECISIONS) * len(pipeline._TRACKS) == 8
+    per_method = 2 * len(QUANTIZED_PRECISIONS) * len(pipeline._TRACKS)
+    assert len(labels) == per_method * len(CALIBRATION_METHODS) == 16
+    # Both methods, in full: a composite key never falls back across methods, so an isolation row
+    # only explains a headline row rendered at the SAME method (docs/architecture.md §9).
+    for method in CALIBRATION_METHODS:
+        assert sum(f"calibration_method={method}" in x for x in labels) == per_method
     for label in labels:
-        assert f"calibration_method={pipeline._ISOLATION_METHOD}" in label
         # Exactly one side quantized, the other held at the known-good FP16 baseline.
         assert ("encoder_precision=fp16" in label) != ("predictor_precision=fp16" in label)
     assert "precision=" not in " ".join(

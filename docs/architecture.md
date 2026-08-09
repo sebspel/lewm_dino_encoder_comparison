@@ -431,11 +431,23 @@ reach no headline table, plot, or ratio.
 **Held at FP16, not FP32.** The isolation attributes damage relative to the FP16 baseline (FP16
 is lossless here), so its ΔSR is not directly the ΔSR the FP32-relative headline table quotes.
 
-**Single method (`entropy`), both tracks.** The diagnostic explains a specific headline row, so
-it must be method-matched to it; one method keeps the whole 2×2 inside one labelled comparison;
-and each cell is a full CEM eval, so a second method would double the cost to re-answer the same
-question. It covers both tracks — a one-track isolation would argue the other track's innocence
-from absence of evidence.
+**Both methods (`max` and `entropy`), both tracks.** The diagnostic explains a specific headline
+row, so it must be method-matched to it, and the whole 2×2 stays inside one labelled comparison —
+the encoder and predictor sides of a cell are always calibrated the same way as the pure corner
+they decompose. But the headline is renderable at **either** method (`src.report
+calibration_method=<max|entropy>`, and `calibration_table.txt` puts the two side by side), so a
+single-method diagnostic explains only half the rendered surface: the other method's drops are
+reported and left unattributed, and a `max` render emits no isolation table at all. That is the
+same absence-of-evidence objection that forces both tracks, so it is answered the same way —
+measure both. The cost is the honest one: each cell is a full CEM eval, so the diagnostic is up to
+2 sides × 2 quantized precisions × 2 tracks × 2 methods = **16 evals** (fewer where a cell shows no
+material drop to attribute).
+
+Because the scales differ per method, the two methods' isolation runs are **separate measurements,
+not a re-answer of the same question** — the attribution can legitimately differ between them (a
+per-tensor `max` amax saturates outliers the `entropy` tail-clip discards, which is precisely why
+the method is a labelled dimension at all — §7). Points are therefore keyed per
+(track, composite label, method) and never fall back across methods.
 
 ---
 
