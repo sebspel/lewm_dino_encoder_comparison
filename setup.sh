@@ -51,6 +51,17 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
+# 1b) Nimbus Roman (URW Times clone) -- the serif face `src.report`'s speed-vs-SR figure sets in.
+#     A SYSTEM font, so it cannot ride uv.lock. Absent, the render degrades to matplotlib's bundled
+#     STIXGeneral rather than failing, so this step is best-effort: a font is not worth aborting a
+#     pod bring-up over. The matplotlib font cache is dropped afterwards -- a cache written before
+#     the install keeps the new family invisible.
+if ! fc-list 2>/dev/null | grep -qi "nimbus roman"; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fonts-urw-base35 || \
+    echo "[setup] fonts-urw-base35 unavailable -- speed_vs_sr falls back to STIXGeneral"
+  rm -f "${HOME}/.cache/matplotlib/fontlist-"*.json
+fi
+
 # 2) owned deps (torch cu124 + the rest), pinned by uv.lock
 uv sync
 

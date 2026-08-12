@@ -52,6 +52,7 @@ import re
 import sys
 from pathlib import Path
 from statistics import fmean
+from typing import NamedTuple
 
 import matplotlib
 import torch
@@ -81,8 +82,8 @@ _METHOD_INVARIANT_PRECISIONS = tuple(p for p in _PRECISIONS if p not in QUANTIZE
 # `_PRECISIONS`, so these diagnostic points reach no headline table, plot, or ratio — they are read
 # ONLY by the isolation table (architecture.md §9).
 _ISOLATION_KEY = re.compile(r"^enc-([a-z0-9]+)\+pred-([a-z0-9]+)$")
-# The component held at FP16 while the other is quantized. FP16 is lossless on these checkpoints
-# (architecture.md §7), so it is the right "undamaged" reference for an isolation run.
+# The component held at FP16 while the other is quantized — the "undamaged" reference an isolation
+# run's ΔSR is quoted against (architecture.md §7).
 _ISOLATION_HELD = "fp16"
 
 
@@ -404,7 +405,7 @@ def render_speed_table(
 def render_fp32_relative_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD) -> str:
     """FP32-relative degradation per track × precision: per-cycle p50 speedup **and** SR delta,
     side by side — SPEC §Parity requires a precision that is faster but degrades task quality to
-    be visible, which means both numbers in one row (this is where the INT8 story reads)."""
+    be visible, which means both numbers in one row."""
     hdr = f"{'track':>6} {'prec':>5} {'cyc_p50_speedup':>16} {'ΔSR_vs_fp32':>12}"
     lines = [
         "  (vs that track's FP32; speedup = FP32 p50 ÷ this p50, >1 = faster; "
@@ -571,7 +572,7 @@ def render_isolation_table(
     provokes.
 
     Each row is one diagnostic run with ONE component quantized and the other held at FP16 (the
-    lossless reference on these checkpoints — architecture.md §7). ΔSR is quoted against that track's **FP16**
+    undamaged reference — architecture.md §7). ΔSR is quoted against that track's **FP16**
     row, not FP32, because FP16 is what the held component is running at; that makes it a different
     number from the FP32-relative table's ΔSR, deliberately.
 
@@ -660,12 +661,51 @@ _TRACK_COLOR = {"lewm": "#2a78d6", "dino": "#e34948"}  # blue / red (slots 1, 8)
 _TRACK_DISPLAY = {"lewm": "LeWM", "dino": "DINOv3-WM"}
 _PREC_DISPLAY = {"fp32": "FP32", "fp16": "FP16", "int8": "INT8", "fp8": "FP8"}
 _PRECISION_MARKER = {"fp32": "o", "fp16": "s", "int8": "^", "fp8": "D"}
+# The quantized precisions are plotted ONCE PER CALIBRATION METHOD in the same panel, so a shape per
+# precision is not enough — each (precision, method) pair needs its own. Kept in one family per
+# precision (triangles = INT8, diamond/plus = FP8) with the `entropy` shapes unchanged, so the
+# earlier single-method figures still read the same.
+_QUANTIZED_MARKER = {
+    ("int8", "max"): "v", ("int8", "entropy"): "^",
+    ("fp8", "max"): "P", ("fp8", "entropy"): "D",
+}
 _RATIO_HUE = "#81c784"  # light green — distinct from the component encoder green and the track hues
 # encoder green / predictor purple / overhead orange (validated slots 3, 7, 2)
 _COMPONENT_COLOR = {"encoder": "#1baf7a", "predictor": "#4a3aa7", "overhead": "#eb6834"}
 _GRID = "#e1e0d9"
 _MUTED = "#898781"
 _INK = "#0b0b0b"
+
+_SERIF_PREFERRED = "Nimbus Roman"  # URW Times clone; apt `fonts-urw-base35`, installed by setup.sh
+_SERIF_BUNDLED = "STIXGeneral"  # Times-metric, SHIPS WITH matplotlib — always resolvable
+
+
+def _serif_rc() -> dict:
+    """rcParams for the speed-vs-SR figure's serif typography (owner request) — the rest of the
+    figure set keeps the default sans, so this is scoped to that one render via `rc_context`.
+
+    Resolved at render time rather than fixed as a constant, because the two rc groups fall back
+    DIFFERENTLY: `font.serif` walks its list, but `mathtext.rm` takes a single font NAME with no
+    list and resolves a missing one to **DejaVu Sans**. A host without Nimbus Roman would therefore
+    set the label serif and the `$p_{50}$` in it sans — a silently inconsistent figure, logged by
+    `findfont` but raising nothing. Picking the family first and mapping mathtext to whatever won
+    keeps text and math in one face on any host: the real Nimbus where setup.sh has installed it,
+    matplotlib's bundled STIXGeneral (also Times-metric) where it has not."""
+    from matplotlib import font_manager
+
+    if _SERIF_PREFERRED in {f.name for f in font_manager.fontManager.ttflist}:
+        return {
+            "font.family": "serif",
+            "font.serif": [_SERIF_PREFERRED],
+            "mathtext.fontset": "custom",
+            "mathtext.rm": _SERIF_PREFERRED,
+            "mathtext.it": f"{_SERIF_PREFERRED}:italic",
+            "mathtext.bf": f"{_SERIF_PREFERRED}:bold",
+            # Unused by this figure, but the `custom` fontset resolves EVERY math family up front
+            # and the default `cursive` matches nothing here — a findfont log line per render.
+            "mathtext.cal": f"{_SERIF_PREFERRED}:italic",
+        }
+    return {"font.family": "serif", "font.serif": [_SERIF_BUNDLED], "mathtext.fontset": "stix"}
 
 
 def _prec_label(prec: str, method: str) -> str:
@@ -674,9 +714,17 @@ def _prec_label(prec: str, method: str) -> str:
     return f"{_PREC_DISPLAY[prec]} ({method})" if prec in QUANTIZED_PRECISIONS else _PREC_DISPLAY[prec]
 
 
+def _prec_marker(prec: str, method: str) -> str:
+    """Marker for one plotted point. Quantized precisions are shape-keyed by (precision, method) —
+    both methods share a panel — everything else by precision alone."""
+    if prec not in QUANTIZED_PRECISIONS:
+        return _PRECISION_MARKER[prec]
+    return _QUANTIZED_MARKER[(prec, method)]
+
+
 def _fmt_time_ms(ms) -> str:
-    """A duration in ms, rendered ms below 1 s and seconds above, so a 30 ms overhead and a 74 s
-    cycle both read cleanly."""
+    """A duration in ms, rendered ms below 1 s and seconds above, so a short component time and a
+    long cycle both read cleanly."""
     if _missing(ms):
         return "—"
     return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.3g} ms"
@@ -705,53 +753,96 @@ def _asym_err(value, bounds):
     return [[max(0.0, value - bounds[0])], [max(0.0, bounds[1] - value)]]
 
 
+class _Point(NamedTuple):
+    """One plotted speed-vs-SR marker."""
+
+    x_ms: float
+    sr: float
+    xerr: list | None
+    yerr: list | None
+    marker: str
+    label: str
+    zorder: float
+
+
+def _speed_vs_sr_points(bench: dict, track: str, method: str, stats_payload: dict | None):
+    """One panel's plotted points, in precision order: FP32/FP16 once (method-invariant), and each
+    quantized precision ONCE PER CALIBRATION METHOD so `max` and `entropy` coexist in the panel —
+    the same both-methods-on-the-page treatment `calibration_table.txt` gives the SR (architecture.md §7).
+    Being a within-track view, it does not place a `max` point beside an `entropy` one ACROSS tracks;
+    every method appears in both panels, so the cross-track reading stays like-for-like (SPEC §Parity).
+
+    The render's own `method` is read off the joined `bench` row; the other method's quantized points
+    come from `stats.json`, whose `per_cycle_p50_ms` is built from `report.per_cycle_samples` — the
+    same warm-up-dropped, equal-n-truncated sample `_finalize_per_cycle` reduces — so the two sources
+    cannot disagree, and no result is recomputed here. Without a stats payload only the joined
+    method's points are available.
+
+    Yields `_Point`s in LEGEND order. Draw order is carried separately as `zorder`, because the two
+    methods of a quantized precision differ only in their PTQ scales and so land nearly on top of
+    each other: whichever draws second hides the other. Yield order puts `max` first to match
+    `CALIBRATION_METHODS` and the calibration table's columns, while `zorder` puts it on top, where
+    the shape it covers is the one that still shows around the edges."""
+    for prec in _PRECISIONS:
+        methods = CALIBRATION_METHODS if prec in QUANTIZED_PRECISIONS else (method,)
+        for i, m in enumerate(methods):
+            point = _stats_lookup(stats_payload, track, prec, m)
+            if m == method:
+                r = bench.get(track, {}).get(prec) or {}
+                x, y = r.get("per_cycle_p50_ms"), r.get("success_rate")
+            else:  # the off-method quantized point exists only in the stats payload
+                x, y = point.get("per_cycle_p50_ms"), point.get("success_rate")
+            if _missing(x) or _missing(y):
+                continue
+            # 95% intervals on BOTH absolute axes: x = exact binomial order-statistic on the
+            # per-cycle p50, y = Clopper-Pearson on the SR (architecture.md §12). Absent intervals
+            # simply draw no bar.
+            yield _Point(x, y, _asym_err(x, point.get("p50_ci95_ms")),
+                         _asym_err(y, point.get("sr_ci95_pct")),
+                         _prec_marker(prec, m), _prec_label(prec, m), 4 - i)
+
+
 def _render_speed_vs_sr(
     bench: dict, path: Path, method: str, title: str | None, stats_payload: dict | None = None
 ) -> Path:
     """One speed-vs-SR figure. Two panels (LeWM | DINOv3-WM) with a SHARED y-axis but SEPARATE
-    linear x-axes — the ~350× latency gap that a single linear axis would collapse is handled by
-    faceting, so no log scale is needed. Marker = precision, with NO connecting line (the
-    precisions are discrete, not a continuum). Each panel carries its OWN legend, coloured in that
-    panel's track hue; quantized precisions carry the calibration method. `title` None omits the
-    figure title (RESULTS.md); a title is passed for the README headline copy."""
+    linear x-axes — the cross-track latency gap that a single linear axis would collapse is handled
+    by faceting, so no log scale is needed. Marker = precision (and, for the quantized ones, the
+    calibration method), with NO connecting line (the points are discrete, not a continuum). Each
+    panel carries its OWN legend, coloured in that panel's track hue. `title` None omits the figure
+    title (RESULTS.md); a title is passed for the README headline copy.
+
+    Set in a serif face (`_serif_rc`) via `rc_context`, so the typography is scoped to this figure
+    and the rest of the set is untouched. Every text artist — including `tight_layout`'s metrics —
+    must be created inside the context, hence the whole body sits in the `with`."""
     from matplotlib.lines import Line2D
 
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
-    legend_loc = {"lewm": "lower left", "dino": "upper left"}  # each keeps clear of its panel's points
-    for ax, track in zip(axes, _TRACKS):
-        present = []
-        for prec in _PRECISIONS:
-            r = bench.get(track, {}).get(prec)
-            if r is None or _missing(r["success_rate"]) or _missing(r["per_cycle_p50_ms"]):
-                continue
-            # 95% intervals on BOTH absolute axes, drawn UNDER the marker in a recessive grey so
-            # the precision points still read first: x = exact binomial order-statistic on the
-            # per-cycle p50, y = Clopper-Pearson on the SR (architecture.md §12). Absent intervals
-            # simply draw no bar.
-            point = _stats_lookup(stats_payload, track, prec, method)
-            xerr = _asym_err(r["per_cycle_p50_ms"], point.get("p50_ci95_ms"))
-            yerr = _asym_err(r["success_rate"], point.get("sr_ci95_pct"))
-            if xerr or yerr:
-                ax.errorbar(r["per_cycle_p50_ms"], r["success_rate"], xerr=xerr, yerr=yerr,
-                            fmt="none", ecolor=_MUTED, elinewidth=0.9, capsize=2.5,
-                            capthick=0.9, zorder=2)
-            ax.scatter(r["per_cycle_p50_ms"], r["success_rate"], marker=_PRECISION_MARKER[prec],
-                       s=90, color=_TRACK_COLOR[track], edgecolor="white", linewidth=0.8, zorder=3)
-            present.append(prec)
-        ax.set_title(_TRACK_DISPLAY[track])
-        ax.set_xlabel("Per-cycle latency p50 (ms, lower is faster)")
-        _style(ax, grid_axis="both")
-        if present:
-            handles = [Line2D([], [], marker=_PRECISION_MARKER[p], ls="", color=_TRACK_COLOR[track],
-                              label=_prec_label(p, method)) for p in present]
-            ax.legend(handles=handles, title="Precision", fontsize=7.5, loc=legend_loc[track],
-                      borderpad=0.6, labelspacing=0.35, handletextpad=0.4)
-    axes[0].set_ylabel("Success rate (%)")
-    if title:
-        fig.suptitle(title)
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+    with plt.rc_context(_serif_rc()):
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4), sharey=True)
+        legend_loc = {"lewm": "lower left", "dino": "upper left"}  # each clears its panel's points
+        for ax, track in zip(axes, _TRACKS):
+            handles = []
+            hue = _TRACK_COLOR[track]
+            for p in _speed_vs_sr_points(bench, track, method, stats_payload):
+                # Error bars UNDER the markers in a recessive grey, so the points still read first.
+                if p.xerr or p.yerr:
+                    ax.errorbar(p.x_ms, p.sr, xerr=p.xerr, yerr=p.yerr, fmt="none", ecolor=_MUTED,
+                                elinewidth=0.9, capsize=2.5, capthick=0.9, zorder=2)
+                ax.scatter(p.x_ms, p.sr, marker=p.marker, s=90, color=hue,
+                           edgecolor="white", linewidth=0.8, zorder=p.zorder)
+                handles.append(Line2D([], [], marker=p.marker, ls="", color=hue, label=p.label))
+            ax.set_title(_TRACK_DISPLAY[track])
+            ax.set_xlabel("Per-cycle latency $p_{50}$ (ms)")
+            _style(ax, grid_axis="both")
+            if handles:
+                ax.legend(handles=handles, title="Precision", fontsize=7.5, loc=legend_loc[track],
+                          borderpad=0.6, labelspacing=0.35, handletextpad=0.4)
+        axes[0].set_ylabel("Success rate (%)")
+        if title:
+            fig.suptitle(title)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
     return path
 
 
@@ -763,7 +854,12 @@ def plot_speed_vs_sr(
 ) -> Path:
     """Speed vs SR, rendered twice: untitled `speed_vs_sr.png` (for RESULTS.md, which titles it in
     prose) and titled `speed_vs_sr.titled.png` (the README headline copy). Returns the untitled
-    path (the canonical RESULTS artefact)."""
+    path (the canonical RESULTS artefact).
+
+    Unlike the four single-method tables these two filenames are NOT method-scoped, and do not need
+    to be: the panels carry BOTH calibration methods' quantized points (`_speed_vs_sr_points`) and
+    FP32/FP16 are method-invariant, so re-rendering at the other `method` reproduces the same figure
+    rather than clobbering a different one (SPEC §Parity, CLAUDE §8)."""
     _render_speed_vs_sr(bench, out_dir / "speed_vs_sr.titled.png", method,
                         title="Per-cycle planning latency vs success rate",
                         stats_payload=stats_payload)
@@ -774,7 +870,7 @@ def plot_speed_vs_sr(
 def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
     """DINOv3-WM ÷ LeWM per-cycle p50 latency ratio per precision. RESULTS.md only, so NO figure
     title; one series → orange bars, no legend; zero baseline KEPT (truncating a ratio axis
-    misleads); each bar value-labelled so the 310-410× spread is exact rather than muted.
+    misleads); each bar value-labelled so the spread is exact rather than muted.
 
     Measured values only, and no caveat text on the PNG (owner ruling, 2026-07-26): the bar-to-bar
     (cross-precision) spread partly reflects the differential throttle (architecture.md §11), but
@@ -802,12 +898,12 @@ def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
 
 def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32") -> Path:
     """Per-track encoder/predictor/overhead split at one precision, as TWO panels each NORMALISED
-    to 100% of that track's own cycle. The ~350× absolute gap otherwise collapses LeWM to a flat
-    line and hides DINO's encoder; normalising makes both compositions readable, and the absolute
-    cycle time is kept in each panel title so the gap is not erased. Runtime-WEIGHTED (step mean ×
-    CEM call counts) with overhead by subtraction. Each component is a LEADER-LINE callout (so the
-    ~0% encoder sliver is still labelled), the callouts fanning outward per panel to avoid
-    collisions; callout text is black, leader lines grey.
+    to 100% of that track's own cycle. The absolute cross-track gap otherwise collapses the faster
+    track to a flat line and hides the slower track's encoder; normalising makes both compositions
+    readable, and the absolute cycle time is kept in each panel title so the gap is not erased.
+    Runtime-WEIGHTED (step mean × CEM call counts) with overhead by subtraction. Each component is
+    a LEADER-LINE callout (so a component that renders as a sliver is still labelled), the callouts
+    fanning outward per panel to avoid collisions; callout text is black, leader lines grey.
 
     No caveat text on the PNG (owner ruling, 2026-07-26): the overhead slice's absolute ms is
     measured on unlocked clocks and an overhead share below the run-to-run clock mismatch is
@@ -918,7 +1014,7 @@ def per_cycle_samples(raw_by_track: dict, warmup_drop: int = PER_CYCLE_WARMUP_DR
     iterates.
 
     A vector too short to survive the warm-up drop is left OUT rather than reduced to nothing (only
-    reachable with synthetic/degenerate data — real n is 50-100)."""
+    reachable with synthetic/degenerate data — a recorded vector is far longer)."""
     lat_by_track = {t: v[warmup_drop:] for t, v in raw_by_track.items() if len(v) > warmup_drop}
     if not lat_by_track:
         return {}
@@ -957,8 +1053,8 @@ def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -
     The dropped values are STASHED (`_per_cycle_dropped_ms`) rather than discarded, so the speed
     table can disclose how anomalous the excluded decision actually was (`drop×`) — the exclusion is
     reported, not hidden. The truncated `n` is stashed too (`_per_cycle_n`): the whole statistic
-    ruling rests on n being 50-100 and SR-dependent, so a reader must be able to verify the equal-n
-    truncation off the artefact. Truncation takes the common MINIMUM, so the highest-SR track sets n
+    ruling rests on n being small and SR-dependent (SPEC §Interface Contracts), so a reader must be
+    able to verify the equal-n truncation off the artefact. Truncation takes the common MINIMUM, so the highest-SR track sets n
     for every row at that precision — one more reason p95 carries no claim."""
     for prec in _PRECISIONS:
         raw_by_track = {
