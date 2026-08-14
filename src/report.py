@@ -330,6 +330,81 @@ def _ac_flag(point: dict) -> str:
     return "*" if point.get("lag1_reject") else "-"
 
 
+def _mean_cell(value, bounds, flag: str | None = None, spec: str = ".4f") -> str:
+    """One mean quantity as ONE whitespace-delimited token: `18.3341[18.11,18.60]*` — the point, its
+    bootstrap interval, and (for the three quantities that ARE a sample) that sample's independence
+    marker, in the same cell.
+
+    `flag=None` is the deliberate case, not a missing one: `t_comp` and `overhead` are functions of
+    two and three samples, and a flag describes a sample (SPEC §Interface Contracts), so they carry
+    the constituent flags on the same row rather than a composite of their own."""
+    if _missing(value):
+        return "—"
+    return f"{format(value, spec)}{_ci(bounds, spec)}{'' if flag is None else flag}"
+
+
+def _mean_flag(entry: dict, prefix: str) -> str:
+    """`*`/`-`/`—` for one constituent sample of a mean row, off the flag `src.stats` carried over
+    from that sample's already-run lag-1 test (no test is re-run — architecture.md §12)."""
+    if entry.get(f"{prefix}_lag1_p_permutation") is None:
+        return "—"
+    return "*" if entry.get(f"{prefix}_lag1_reject") else "-"
+
+
+def render_latency_means_table(stats_payload: dict | None) -> str:
+    """The five MEAN per-cycle latency quantities per configuration, with bootstrap intervals and the
+    inherited independence markers (SPEC §Interface Contracts, architecture.md §12).
+
+    A pure walk of `stats.json`'s `points_means` — deliberately NOT a recomputation off `bench`, so
+    the rendered numbers and the persisted ones cannot drift; they are the same numbers
+    `decompose` reports, now with intervals.
+
+    **Method-unscoped**: the config column names the method (`INT8 (max)`), so one table spans both
+    and a render at either method writes the same file — like `calibration_table.txt`. Returns ""
+    when the payload has no mean section, and the table is then simply not written."""
+    points = (stats_payload or {}).get("points_means") or {}
+    if not points:
+        return ""
+    hdr = (
+        f"{'track':>6} {'config':>15} {'enc_cyc_ms':>30} {'pred_cyc_ms':>30} "
+        f"{'t_comp_ms':>30} {'cycle_ms':>30} {'ovh_ms':>30}"
+    )
+    lines = [
+        f"  (MEAN basis, per-cycle scale: enc_cyc = mean(encode) × {_ENCODER_CALLS} calls, "
+        f"pred_cyc = mean(predict) × {_PREDICTOR_CALLS}; t_comp = enc_cyc + pred_cyc; "
+        "ovh = cycle − t_comp — the POINTS add up, the intervals do not)",
+        "  (each cell = point[lo,hi]: a 95% non-parametric percentile BOOTSTRAP interval, "
+        "paired=False, over the same stored samples the p50 intervals use — construction + seed in "
+        "stats.json)",
+        "  (enc/pred sample = the fixed-iteration engine-step loop as recorded; cycle sample = the "
+        "warm-up-dropped, equal-n-truncated per-cycle vector — enc/pred are calibration-method-"
+        "invariant, so they repeat across a precision's two methods)",
+        "  (trailing * = that sample's Dwass lag-1 test REJECTS independence at the unadjusted p "
+        "(interval too NARROW), - = does not, — = untested; t_comp and ovh carry no marker — a flag "
+        "describes a sample, and they are functions of two and three)",
+        "  (config = <precision> (<calibration method>), the method shown only where it applies — "
+        "fp32/fp16 build data-free. It is the ONE column that may split into two tokens; the five "
+        "value cells are always the LAST five)",
+        hdr,
+        "-" * len(hdr),
+    ]
+    for track in _TRACKS:
+        by_label = points.get(track, {})
+        for prec in _PRECISIONS:
+            by_method = by_label.get(prec, {})
+            for method in sorted(by_method, key=lambda m: (m != DEFAULT_CALIBRATION_METHOD, m)):
+                e = by_method[method]
+                lines.append(
+                    f"{track:>6} {e['label']:>15} "
+                    f"{_mean_cell(e['enc_cyc_mean_ms'], e['enc_cyc_ci95_ms'], _mean_flag(e, 'enc')):>30} "
+                    f"{_mean_cell(e['pred_cyc_mean_ms'], e['pred_cyc_ci95_ms'], _mean_flag(e, 'pred')):>30} "
+                    f"{_mean_cell(e['t_comp_mean_ms'], e['t_comp_ci95_ms']):>30} "
+                    f"{_mean_cell(e['cycle_mean_ms'], e['cycle_ci95_ms'], _mean_flag(e, 'cycle')):>30} "
+                    f"{_mean_cell(e['overhead_mean_ms'], e['overhead_ci95_ms']):>30}"
+                )
+    return "\n".join(lines)
+
+
 def render_speed_table(
     bench: dict,
     method: str = DEFAULT_CALIBRATION_METHOD,
@@ -1117,9 +1192,11 @@ def report(
     `drop×`; `warmup_drop=0` re-renders the undropped view.
 
     The four single-method tables are written METHOD-SCOPED (`<name>.<method>.txt`) and name their
-    method in the body, so the two methods' artefacts coexist on disk. Two further tables render
-    only when their data exists: `calibration_table.txt` (both methods' SR side by side) and
-    `isolation_table.<method>.txt` (component-precision isolation, architecture.md §9).
+    method in the body, so the two methods' artefacts coexist on disk. Three further tables render
+    only when their data exists: `calibration_table.txt` (both methods' SR side by side),
+    `isolation_table.<method>.txt` (component-precision isolation, architecture.md §9), and
+    `latency_means_table.txt` (the five mean per-cycle quantities with their bootstrap intervals —
+    unscoped, since its config column names the method).
 
     When `sr_overrides` is present the render also computes the 95% confidence intervals on every
     absolute SR and absolute per-cycle p50 plus the lag-1 independence test (`src.stats`), surfaces
@@ -1130,7 +1207,9 @@ def report(
     `component_latencies` ({track: {precision: {encode_ms, predict_ms}}}, from
     `latencies.<track>.json`) adds the component p50 intervals + independence flags to the speed
     table's enc/pred columns. Independent of `sr_overrides`: the component samples are their own
-    surface, so they render with or without a joined SR.
+    surface, so they render with or without a joined SR. With BOTH present it also yields
+    `latency_means_table.txt` — the mean decomposition needs a component sample to weight and a
+    cycle sample to subtract it from.
 
     **Writes only `.txt`, `.png` and `stats.json` into `out_dir`.** The canonical inputs —
     `results.<track>.json` + `latencies.<track>.json` (`src.study`) and `sr.json` (`src.sr_eval`) —
@@ -1173,6 +1252,7 @@ def report(
     dilution_table = render_dilution_table(bench, method)
     calibration_table = render_calibration_table(sr_overrides, method, stats_payload)
     isolation_table = render_isolation_table(bench, sr_overrides, method, stats_payload)
+    latency_means_table = render_latency_means_table(stats_payload)
     print(speed_table)
     print()
     print("FP32-relative degradation (speed AND task quality):")
@@ -1183,6 +1263,10 @@ def report(
         print(isolation_table)
     print()
     print(component_table)
+    if latency_means_table:
+        print()
+        print("Mean per-cycle latencies with bootstrap intervals (same decomposition, quantified):")
+        print(latency_means_table)
     print()
     print("Amdahl dilution (model-only vs realized per-cycle speedup):")
     print(dilution_table)
@@ -1210,6 +1294,10 @@ def report(
         tables["isolation_table"] = (out_dir / f"isolation_table.{method}.txt", isolation_table)
     if calibration_table:
         tables["calibration_table"] = (out_dir / "calibration_table.txt", calibration_table)
+    if latency_means_table:
+        # Unscoped like the calibration table: its config column names the method, so it spans both
+        # and either method's render writes the same bytes.
+        tables["latency_means_table"] = (out_dir / "latency_means_table.txt", latency_means_table)
     table_paths = {}
     for key, (path, text) in tables.items():
         path.write_text(text + "\n")
@@ -1265,6 +1353,15 @@ def report(
                 **(
                     {"headline/isolation_table": wandb.Html(f"<pre>{isolation_table}</pre>")}
                     if isolation_table
+                    else {}
+                ),
+                **(
+                    {
+                        "headline/latency_means_table": wandb.Html(
+                            f"<pre>{latency_means_table}</pre>"
+                        )
+                    }
+                    if latency_means_table
                     else {}
                 ),
                 "headline/sr_pending": len(missing_sr),

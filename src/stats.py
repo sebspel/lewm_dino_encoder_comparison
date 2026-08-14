@@ -18,9 +18,21 @@ the latency interval rests on:
     test** on the sample's **lag-1 autocorrelation** (50,000 permutations, statistic used raw with
     NO Student-t transform). Serial correlation would make the interval too NARROW — a stronger
     result than the sample supports — so it is measured, flagged, and never silently corrected.
+  - **the five MEAN per-cycle latency quantities** → a non-parametric **percentile bootstrap**
+    (`scipy.stats.bootstrap`, 3,000 resamples, `paired=False`, fixed seed). All five sit on the
+    per-cycle scale, call-count-weighted exactly as `report.decompose` weights them:
+    `enc_cyc = 2 × mean(encode-step)`, `pred_cyc = 150 × mean(predictor-step)`,
+    `t_comp = enc_cyc + pred_cyc`, the measured `cycle` mean, and `overhead = cycle − t_comp`. The
+    samples are the ones the p50 intervals already use, so the point estimates ARE the rendered
+    decomposition — this adds intervals to that surface, not a second set of numbers. No new
+    independence test and no third Holm family: `enc_cyc`/`pred_cyc`/`cycle` carry the flag of their
+    constituent sample's lag-1 test, and the two composites carry none (a flag describes a sample).
 
 **No interval on any difference or ratio** — not ΔSR, not the FP32-relative p50 speedup, not the
-DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max). Owner ruling; rationale in architecture.md §12.
+DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max), and not the dilution shares (`p`, the Amdahl
+ceiling, the model-only/realized speedups). `overhead` is the single named exception, and only
+because it is one configuration's absolute floor obtained by subtraction — never a contrast between
+two of them. Owner ruling; rationale in architecture.md §12.
 
 **Holm is scoped per measurement surface**: the per-cycle tests form one family, the component tests
 another, never pooled. Pooling would make every published adjusted p-value a function of which other
@@ -66,18 +78,24 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import fmean
 
 import numpy as np
-from scipy.stats import binom, binomtest, norm
+from scipy.stats import binom, binomtest, bootstrap, norm
 
 from src import report
 from src.interfaces import (
+    BOOTSTRAP_RESAMPLES,
+    BOOTSTRAP_SEED,
     CI_ALPHA,
     DEFAULT_CALIBRATION_METHOD,
+    ENCODER_CALLS_PER_CYCLE,
     EVAL_NUM_EPISODES,
     PER_CYCLE_WARMUP_DROP,
     PERMUTATION_RESAMPLES,
     PERMUTATION_SEED,
+    PREDICTOR_CALLS_PER_CYCLE,
+    QUANTIZED_PRECISIONS,
 )
 
 _MEDIAN_Q = 0.50
@@ -280,6 +298,8 @@ def compute(
     n_resamples: int = PERMUTATION_RESAMPLES,
     seed: int = PERMUTATION_SEED,
     component_latencies: dict | None = None,
+    bootstrap_resamples: int = BOOTSTRAP_RESAMPLES,
+    bootstrap_seed: int = BOOTSTRAP_SEED,
 ) -> dict:
     """Every (track, precision-label, method) point in `sr.json` -> its intervals + independence
     test. Method-unscoped and label-complete: the composite `enc-<A>+pred-<B>` isolation points are
@@ -291,8 +311,10 @@ def compute(
 
     `component_latencies` (the merged `latencies.<track>.json` blocks) adds the **component**
     surface — encode-/predict-step p50 intervals under `points_components` — with its OWN Holm
-    family. Absent, that section is simply omitted: a `stats.json` without it is still valid, and the
-    per-cycle values are byte-identical either way (docs/architecture.md §12)."""
+    family, and the **mean** surface under `points_means` (the five call-count-weighted per-cycle
+    quantities, bootstrap intervals, flags inherited from the two sections above). Absent, both
+    sections are simply omitted: a `stats.json` without them is still valid, and the per-cycle
+    values are byte-identical either way (docs/architecture.md §12)."""
     # Invert to (label, method) -> {track: raw vector}: the equal-n truncation is defined ACROSS
     # tracks at one label, so the grouping has to happen before any sample is cut.
     vectors: dict = {}
@@ -353,6 +375,23 @@ def compute(
         if component_latencies
         else None
     )
+    # The mean surface needs BOTH samples — a component vector to weight and a cycle to subtract it
+    # from — so it exists only where the two meet, and is omitted rather than half-filled.
+    means = (
+        compute_means(
+            samples,
+            component_latencies,
+            points,
+            components["points"],
+            alpha,
+            bootstrap_resamples,
+            bootstrap_seed,
+        )
+        if components
+        else None
+    )
+    if means is not None and not means["n_points"]:
+        means = None
 
     return {
         "meta": {
@@ -379,7 +418,9 @@ def compute(
             "per_cycle_warmup_drop": warmup_drop,
             "no_interval_on": (
                 "differences and ratios (dSR, fp32-relative speedup, cross-model ratio); "
-                "any p95; the means and everything derived from them"
+                "any p95; the dilution shares and speedups (p, Amdahl ceiling, model-only, "
+                "realized). The mean per-cycle decomposition carries bootstrap intervals, and its "
+                "`overhead` is the ONE permitted difference — an absolute floor, never a contrast"
             ),
             **(
                 {}
@@ -393,10 +434,37 @@ def compute(
                     "holm_family_size_components": components["holm_family_size"],
                 }
             ),
+            **(
+                {}
+                if means is None
+                else {
+                    "mean_quantities": (
+                        "enc_cyc = ENCODER_CALLS x mean(encode); pred_cyc = PREDICTOR_CALLS x "
+                        "mean(predict); t_comp = enc_cyc + pred_cyc; cycle = mean(per-cycle "
+                        "sample); overhead = cycle - t_comp  (all on the per-cycle scale)"
+                    ),
+                    "mean_estimator": "nonparametric-bootstrap-percentile",
+                    "mean_resamples": bootstrap_resamples,
+                    "mean_paired": False,
+                    "mean_seed": bootstrap_seed,
+                    "mean_sample_rule": (
+                        "the SAME samples the p50 intervals use — the engine-step loop vectors as "
+                        "recorded, and the warm-up-dropped, equal-n-truncated per-cycle sample"
+                    ),
+                    "mean_independence": (
+                        "inherited from the constituent sample's lag-1 test (same vector, same "
+                        "seed) — no new test and no separate Holm family; t_comp and overhead "
+                        "carry no flag of their own"
+                    ),
+                    "encoder_calls_per_cycle": ENCODER_CALLS_PER_CYCLE,
+                    "predictor_calls_per_cycle": PREDICTOR_CALLS_PER_CYCLE,
+                }
+            ),
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         "points": points,
         **({} if components is None else {"points_components": components["points"]}),
+        **({} if means is None else {"points_means": means["points"]}),
     }
 
 
@@ -454,6 +522,177 @@ def compute_components(
         entry["lag1_p_holm"] = adj
         entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
     return {"points": points, "holm_family_size": len(raw_p)}
+
+
+# --- the five MEAN per-cycle quantities: percentile bootstrap over the same samples ----
+def bootstrap_mean_ci(
+    samples,
+    weights,
+    alpha: float = CI_ALPHA,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> list | None:
+    """Percentile-bootstrap interval for `sum_i weights[i] * mean(samples[i])` — the ONE estimator
+    behind all five mean quantities, with the call-count weighting (and, for `overhead`, the sign of
+    the subtraction) carried in `weights`.
+
+    **`paired=False`** is a statement about the data, not a default: the component vectors are
+    fixed-iteration engine loops and the per-cycle vector is per-decision timings off a different
+    run, of different length, with no i-th observation in common. scipy enforces equal lengths only
+    under `paired=True`, so getting this wrong would either raise or silently pair unrelated
+    observations. **Percentile, not BCa**: BCa's bias/acceleration terms are estimated from the same
+    small sample; the percentile interval is what the resamples say (architecture.md §12).
+
+    Returns None — never an invented interval — for a sample too small to resample or a degenerate
+    (constant) one, the same discipline `order_statistic_ci` applies at small n."""
+    data = tuple(np.asarray(s, dtype=np.float64) for s in samples)
+    if not data or any(a.size < 2 for a in data):
+        return None
+    w = tuple(float(x) for x in weights)
+
+    def statistic(*arrays, axis=-1):
+        return sum(wi * a.mean(axis=axis) for wi, a in zip(w, arrays))
+
+    res = bootstrap(
+        data,
+        statistic,
+        n_resamples=n_resamples,
+        confidence_level=1.0 - alpha,
+        method="percentile",
+        paired=False,
+        vectorized=True,
+        rng=seed,
+    )
+    lo, hi = float(res.confidence_interval.low), float(res.confidence_interval.high)
+    if lo != lo or hi != hi:  # NaN: a degenerate resample distribution
+        return None
+    return [lo, hi]
+
+
+def config_label(precision: str, method: str) -> str:
+    """The report label for one configuration: `FP32` / `FP16` (method-invariant — they build
+    data-free) and `INT8 (max)` / `FP8 (entropy)` for the quantized ones, whose scales, hence SR and
+    per-cycle sample, are method-sourced (SPEC §Parity)."""
+    return (
+        f"{precision.upper()} ({method})"
+        if precision in QUANTIZED_PRECISIONS
+        else precision.upper()
+    )
+
+
+def _flags(point: dict) -> dict:
+    """The lag-1 verdict of one already-tested sample, carried onto the mean it also supports. NOT a
+    re-run: same vector, same seed, same result — so re-testing would only open a third Holm family
+    whose existence would make the two published ones look like competing versions."""
+    return {
+        "lag1_reject": point.get("lag1_reject"),
+        "lag1_p_permutation": point.get("lag1_p_permutation"),
+    }
+
+
+def compute_means(
+    per_cycle_samples: dict,
+    latencies_by_track: dict,
+    points: dict,
+    component_points: dict,
+    alpha: float = CI_ALPHA,
+    n_resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> dict:
+    """Every configuration (track, precision, method) -> the five MEAN per-cycle latency quantities
+    with their bootstrap intervals and the inherited independence flags.
+
+    `per_cycle_samples` is `compute`'s `{(label, method): {track: sample}}` — the SAME reduced
+    samples the p50 intervals are built on, passed in rather than recomputed so the mean and the p50
+    can never describe different decisions. `latencies_by_track` is the method-free component block;
+    `points` / `component_points` are the two interval sections, read only for their lag-1 verdicts.
+
+    Everything is weighted onto the per-cycle scale by the CEM call counts, so the point estimates
+    are `report.decompose`'s and the columns add up: `t_comp = enc_cyc + pred_cyc`,
+    `overhead = cycle − t_comp`.
+
+    Composite `enc-<A>+pred-<B>` isolation labels never appear — they are an SR diagnostic and are
+    never benchmarked for latency, so no component sample exists for them (architecture.md §9); a
+    row for them would be a mean weighted by components that were never timed. Method-invariant
+    precisions collapse to ONE row (the `max`-first pick `report._stats_lookup` uses), since their
+    method label is only the stamp of whichever run recorded them."""
+    by_track_label: dict = {}
+    for (label, method), by_track in per_cycle_samples.items():
+        for track, sample in by_track.items():
+            by_track_label.setdefault((track, label), {})[method] = sample
+
+    out: dict = {}
+    n_points = 0
+    for (track, label), by_method in sorted(by_track_label.items()):
+        vectors = latencies_by_track.get(track, {}).get(label)
+        if not vectors:
+            continue  # no engine-step samples at this label — composites, or a track never benchmarked
+        enc = list(vectors.get("encode_ms") or [])
+        pred = list(vectors.get("predict_ms") or [])
+        if not enc or not pred:
+            continue
+        methods = sorted(by_method)
+        if label not in QUANTIZED_PRECISIONS:
+            methods = [
+                DEFAULT_CALIBRATION_METHOD if DEFAULT_CALIBRATION_METHOD in by_method else methods[0]
+            ]
+        for method in methods:
+            cycle = by_method[method]
+            # `statistics.fmean`, not `np.mean`: `benchmark._mean_ms` and
+            # `report._finalize_per_cycle` both use it, so the point estimates here are byte-equal
+            # to the ones the decomposition tables already print rather than merely close.
+            enc_cyc = ENCODER_CALLS_PER_CYCLE * fmean(enc)
+            pred_cyc = PREDICTOR_CALLS_PER_CYCLE * fmean(pred)
+            cycle_mean = fmean(cycle)
+            # Grouped exactly as `report.decompose` groups them (`cycle - (enc + pred)`), so the two
+            # renderings of the same decomposition agree to the last bit, not just to a tolerance.
+            t_comp = enc_cyc + pred_cyc
+            comp_pt = component_points.get(track, {}).get(label, {})
+            entry = {
+                "label": config_label(label, method),
+                "source_method": method,  # the sr.json label the CYCLE sample came from
+                "encoder_calls_per_cycle": ENCODER_CALLS_PER_CYCLE,
+                "predictor_calls_per_cycle": PREDICTOR_CALLS_PER_CYCLE,
+                "enc_cyc_mean_ms": enc_cyc,
+                "enc_cyc_ci95_ms": bootstrap_mean_ci(
+                    (enc,), (ENCODER_CALLS_PER_CYCLE,), alpha, n_resamples, seed
+                ),
+                "enc_n": len(enc),
+                **{f"enc_{k}": v for k, v in _flags(comp_pt.get("encode", {})).items()},
+                "pred_cyc_mean_ms": pred_cyc,
+                "pred_cyc_ci95_ms": bootstrap_mean_ci(
+                    (pred,), (PREDICTOR_CALLS_PER_CYCLE,), alpha, n_resamples, seed
+                ),
+                "pred_n": len(pred),
+                **{f"pred_{k}": v for k, v in _flags(comp_pt.get("predict", {})).items()},
+                # composite of two independent samples -> no flag of its own; the two above are it
+                "t_comp_mean_ms": t_comp,
+                "t_comp_ci95_ms": bootstrap_mean_ci(
+                    (enc, pred),
+                    (ENCODER_CALLS_PER_CYCLE, PREDICTOR_CALLS_PER_CYCLE),
+                    alpha,
+                    n_resamples,
+                    seed,
+                ),
+                "cycle_mean_ms": cycle_mean,
+                "cycle_ci95_ms": bootstrap_mean_ci((cycle,), (1.0,), alpha, n_resamples, seed),
+                "cycle_n": len(cycle),
+                **{
+                    f"cycle_{k}": v
+                    for k, v in _flags(points.get(track, {}).get(label, {}).get(method, {})).items()
+                },
+                "overhead_mean_ms": cycle_mean - t_comp,
+                "overhead_ci95_ms": bootstrap_mean_ci(
+                    (cycle, enc, pred),
+                    (1.0, -ENCODER_CALLS_PER_CYCLE, -PREDICTOR_CALLS_PER_CYCLE),
+                    alpha,
+                    n_resamples,
+                    seed,
+                ),
+            }
+            out.setdefault(track, {}).setdefault(label, {})[method] = entry
+            n_points += 1
+    return {"points": out, "n_points": n_points}
 
 
 def load_component_latencies(paths) -> dict:
@@ -522,6 +761,8 @@ def main() -> None:
                 for e in p.values() if e.get("p50_ci95_ms"))
     n_comp = sum(1 for t in payload.get("points_components", {}).values() for p in t.values()
                  for e in p.values() if e.get("p50_ci95_ms"))
+    n_mean = sum(1 for t in payload.get("points_means", {}).values() for p in t.values()
+                 for _ in p.values())
     print(
         f"[stats] {n_sr} SR intervals ({meta['sr_estimator']}, n={meta['n_episodes']}) + "
         f"{n_p50} per-cycle p50 intervals ({meta['p50_estimator']})\n"
@@ -529,6 +770,9 @@ def main() -> None:
         f"{len(latency_paths)} latencies.*.json"
         + ("" if latency_paths else " — none found, component section omitted")
         + "\n"
+        f"[stats] {n_mean} configurations x 5 mean latency quantities "
+        f"(enc_cyc/pred_cyc/t_comp/cycle/overhead), "
+        f"{meta.get('mean_estimator', 'n/a')}, B={meta.get('mean_resamples', 0)}\n"
         f"[stats] independence: {meta['independence_test']} on {meta['test_statistic']}, "
         f"B={meta['n_resamples']}, seed={meta['seed']}, decision on the UNADJUSTED p-value; "
         f"Holm {meta['holm_scope']}\n"

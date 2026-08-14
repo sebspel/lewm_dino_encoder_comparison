@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 
+from statistics import fmean
+
 import numpy as np
 import pytest
 from scipy.stats import binom, false_discovery_control
@@ -378,6 +380,142 @@ def test_component_section_omitted_without_stored_samples():
     payload = stats.compute(_sr_json(lewm__fp32=(90.0, [1.0] * 40)), n_resamples=200)
     assert "points_components" not in payload
     assert "component_sample_rule" not in payload["meta"]
+
+
+# --- the five MEAN quantities: percentile bootstrap ---------------------------------------
+def _mean_payload(seed: int = 21, n_cycles: int = 40, **kwargs):
+    """A payload carrying both surfaces — per-cycle vectors and engine-step samples — at one
+    method-invariant precision (fp32) and one quantized one (int8, both methods)."""
+    rng = np.random.default_rng(seed)
+    vec = lambda: list(rng.normal(120.0, 4.0, size=n_cycles))  # noqa: E731
+    sr = {
+        "lewm": {
+            "fp32": {"max": {"success_rate": 90.0, "per_cycle_latencies_ms": vec()}},
+            "int8": {
+                "max": {"success_rate": 76.0, "per_cycle_latencies_ms": vec()},
+                "entropy": {"success_rate": 80.0, "per_cycle_latencies_ms": vec()},
+            },
+        }
+    }
+    latencies = {"lewm": {p: _components(seed + 1)["fp32"] for p in ("fp32", "int8")}}
+    return sr, latencies, stats.compute(
+        sr, n_resamples=200, component_latencies=latencies, bootstrap_resamples=300, **kwargs
+    )
+
+
+def test_mean_points_are_additive_and_bracketed():
+    """The five quantities are the decomposition, quantified: the POINTS add up
+    (`t_comp = enc_cyc + pred_cyc`, `overhead = cycle − t_comp`) and every bootstrap interval
+    brackets its own point — including the two composites, which is what `paired=False` resampling
+    of independent samples is there to support (SPEC §Interface Contracts)."""
+    _, latencies, payload = _mean_payload()
+    e = payload["points_means"]["lewm"]["fp32"]["max"]
+
+    assert e["enc_cyc_mean_ms"] == 2 * fmean(latencies["lewm"]["fp32"]["encode_ms"])
+    assert e["pred_cyc_mean_ms"] == 150 * fmean(latencies["lewm"]["fp32"]["predict_ms"])
+    assert e["t_comp_mean_ms"] == e["enc_cyc_mean_ms"] + e["pred_cyc_mean_ms"]
+    assert e["overhead_mean_ms"] == e["cycle_mean_ms"] - e["t_comp_mean_ms"]
+    for key in ("enc_cyc", "pred_cyc", "t_comp", "cycle", "overhead"):
+        lo, hi = e[f"{key}_ci95_ms"]
+        assert lo <= e[f"{key}_mean_ms"] <= hi, key
+
+
+def test_mean_cycle_uses_the_same_sample_as_the_p50_interval():
+    """The mean and the p50 must describe the SAME decisions — warm-up-dropped and equal-n-truncated
+    — so the sample is passed through from `compute`, never re-derived (architecture.md §12)."""
+    sr, _, payload = _mean_payload()
+    sample = report.per_cycle_samples(
+        {"lewm": sr["lewm"]["fp32"]["max"]["per_cycle_latencies_ms"]}, PER_CYCLE_WARMUP_DROP
+    )["lewm"]
+    e = payload["points_means"]["lewm"]["fp32"]["max"]
+    assert e["cycle_n"] == len(sample) == payload["points"]["lewm"]["fp32"]["max"]["per_cycle_n"]
+    assert e["cycle_mean_ms"] == fmean(sample)  # the mean the decomposition tables already print
+
+
+def test_mean_flags_are_inherited_never_re_tested():
+    """No new independence test and no third Holm family: the three sampled quantities carry the
+    verdict already recorded for their own sample, and the two composites carry none — a flag
+    describes a sample (SPEC §Interface Contracts)."""
+    _, _, payload = _mean_payload()
+    e = payload["points_means"]["lewm"]["int8"]["entropy"]
+    comp = payload["points_components"]["lewm"]["int8"]
+    cyc = payload["points"]["lewm"]["int8"]["entropy"]
+
+    assert e["enc_lag1_p_permutation"] == comp["encode"]["lag1_p_permutation"]
+    assert e["pred_lag1_reject"] == comp["predict"]["lag1_reject"]
+    assert e["cycle_lag1_p_permutation"] == cyc["lag1_p_permutation"]
+    assert not [k for k in e if k.startswith(("t_comp_lag1", "overhead_lag1"))]
+    assert "holm_family_size_means" not in payload["meta"]
+    assert payload["meta"]["holm_family_size"] == 3 and payload["meta"][
+        "holm_family_size_components"
+    ] == 4
+
+
+def test_mean_labels_name_the_method_only_where_it_applies():
+    """`FP32` vs `INT8 (max)`: fp32/fp16 build data-free, so their method label is only the stamp of
+    whichever run recorded them and they collapse to ONE row; a quantized precision keeps both."""
+    _, _, payload = _mean_payload()
+    rows = {
+        (label, method): e["label"]
+        for label, by_method in payload["points_means"]["lewm"].items()
+        for method, e in by_method.items()
+    }
+    assert rows == {
+        ("fp32", "max"): "FP32",
+        ("int8", "max"): "INT8 (max)",
+        ("int8", "entropy"): "INT8 (entropy)",
+    }
+
+
+def test_mean_section_leaves_the_other_surfaces_byte_identical():
+    """Adding the mean surface must not move a published interval or a Holm value: it is
+    re-analysis of the SAME samples, and the two existing families are scoped per surface."""
+    sr, latencies, payload = _mean_payload()
+    without = stats.compute(sr, n_resamples=200, component_latencies=latencies)
+    assert payload["points"] == without["points"]
+    assert payload["points_components"] == without["points_components"]
+
+
+def test_mean_intervals_are_reproducible_at_the_fixed_seed():
+    """A resampled interval that moves between renders cannot be audited — the same reason the
+    permutation seed is fixed and recorded."""
+    _, _, first = _mean_payload()
+    _, _, second = _mean_payload()
+    assert first["points_means"] == second["points_means"]
+
+
+def test_mean_section_omitted_without_component_samples():
+    """Both samples are required — one to weight, one to subtract it from — so a payload with only
+    per-cycle vectors carries no mean section and no meta claiming a bootstrap that never ran."""
+    payload = stats.compute(_sr_json(lewm__fp32=(90.0, [1.0 + i for i in range(40)])),
+                            n_resamples=200)
+    assert "points_means" not in payload and "mean_estimator" not in payload["meta"]
+
+
+def test_isolation_composites_get_no_mean_row():
+    """Isolation is an SR diagnostic and is never benchmarked for latency (architecture.md §9), so a
+    composite row would weight component means that were never timed for that configuration."""
+    vec = list(np.random.default_rng(7).normal(120.0, 4.0, size=40))
+    point = {"max": {"success_rate": 50.0, "per_cycle_latencies_ms": vec}}
+    sr = {"lewm": {"fp32": point, "enc-int8+pred-fp16": point}}
+    payload = stats.compute(
+        sr, n_resamples=200, component_latencies={"lewm": _components(3)}, bootstrap_resamples=300
+    )
+    assert set(payload["points_means"]["lewm"]) == {"fp32"}
+    assert "enc-int8+pred-fp16" in payload["points"]["lewm"]  # still gets its SR/p50 intervals
+
+
+def test_mean_construction_is_recorded_in_meta():
+    """SPEC §Interface Contracts: the interval artefact is self-describing — estimator, resamples,
+    pairing, seed, the sample rule and the call counts the weighting used."""
+    _, _, payload = _mean_payload()
+    meta = payload["meta"]
+    assert meta["mean_estimator"] == "nonparametric-bootstrap-percentile"
+    assert meta["mean_paired"] is False and meta["mean_seed"] == 0
+    assert meta["mean_resamples"] == 300  # the value this call used, not a constant
+    assert meta["encoder_calls_per_cycle"] == 2 and meta["predictor_calls_per_cycle"] == 150
+    assert "no new test" in meta["mean_independence"]
+    assert "overhead" in meta["no_interval_on"] and "ratios" in meta["no_interval_on"]
 
 
 def test_component_latency_paths_finds_the_track_files(tmp_path):

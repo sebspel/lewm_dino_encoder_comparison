@@ -159,7 +159,8 @@ requirements those signatures must satisfy; it does not restate the signatures.
   **p95** is the reported tail and carries no claim; **mean** is the decomposition basis **only**
   and is never a reported headline.
 - **Every reported ABSOLUTE SR, ABSOLUTE per-cycle p50, and ABSOLUTE component p50 (encode-step,
-  predictor-step) carries a 95% confidence interval; no difference or ratio carries one.** SR uses
+  predictor-step) carries a 95% confidence interval; no difference or ratio carries one — the mean
+  decomposition's `overhead` is the single named exception (next bullet).** SR uses
   the **Clopper–Pearson** exact binomial interval over the 50 eval episodes (exact at the 0/50 and
   50/50 boundaries the study actually hits); per-cycle p50 uses the **exact binomial
   order-statistic** interval, computed from the *same* warm-up-dropped, equal-n-truncated sample the
@@ -169,9 +170,10 @@ requirements those signatures must satisfy; it does not restate the signatures.
   equal across tracks by construction (§Interface Contracts, fixed-iteration bullet).
   Clopper–Pearson does not reach the component surface — there is no proportion there. ΔSR, the
   FP32-relative p50 speedup, the cross-model per-cycle ratio, and Δ(entropy−max) get **no** interval,
-  the p95 of any distribution gets none (it carries no claim), and the mean-based
-  decomposition/dilution tables — including the call-count-weighted `enc_cyc_ms`/`pred_cyc_ms` — get
-  none either. The order-statistic interval's **i.i.d. premise is tested, not assumed**: every sample
+  and the p95 of any distribution gets none (it carries no claim). The **mean-based per-cycle
+  decomposition** carries its own, separately-constructed intervals (next bullet); the **dilution
+  table stays interval-free** — `p`, the Amdahl ceiling, and the model-only/predicted/realized
+  speedups are shares and ratios. The order-statistic interval's **i.i.d. premise is tested, not assumed**: every sample
   it is computed over — per-cycle and component alike — gets a two-sided **Dwass Monte-Carlo
   permutation test on its lag-1 autocorrelation** (α = 0.05, 50,000 permutations, no
   Student-t transform). **The test decision is the UNADJUSTED p-value** — intervals are reported
@@ -189,6 +191,35 @@ requirements those signatures must satisfy; it does not restate the signatures.
   p-value, the permutation null's own lag-1 summary, and the **fixed, recorded permutation seed** —
   so an interval can be re-derived and audited off the artefact rather than taken on trust.
   (`docs/architecture.md` §12.)
+- **The five MEAN per-cycle latency quantities carry a 95% non-parametric BOOTSTRAP interval, per
+  configuration (track × precision × calibration method).** All five live on the **per-cycle scale**,
+  the components weighted by the CEM call counts exactly as the decomposition weights them
+  (§per-component profile slices): `enc_cyc = ENCODER_CALLS × mean(encode-step)`,
+  `pred_cyc = PREDICTOR_CALLS × mean(predictor-step)`, the **component sum**
+  `t_comp = enc_cyc + pred_cyc`, the **measured cycle mean**, and
+  `overhead = cycle − t_comp`. The point estimates are therefore **additive by construction and
+  identical to the rendered decomposition** — this adds intervals to that surface, it does not
+  introduce a second set of numbers. The estimator is **scipy's `bootstrap`, percentile method,
+  3,000 resamples, `paired=False`, α = 0.05, fixed recorded seed**, over the **same stored samples
+  the p50 intervals use**: the fixed-iteration loop vectors as recorded for the components, and the
+  warm-up-dropped, equal-n-truncated sample for the cycle. `paired=False` is load-bearing and
+  correct — the three samples come from different runs of different length and carry no pairing, so
+  each is resampled independently.
+  **`overhead` is the ONE interval on a difference this spec permits**, and only because it is the
+  decomposition of measured absolute times into an absolute floor, not a comparison claim; it is
+  never used to argue a difference *between* configurations, and the exception generalizes to
+  nothing else — ΔSR, every speedup, and every ratio stay interval-free.
+  **No new independence test and no third Holm family.** `enc_cyc`, `pred_cyc` and `cycle` carry the
+  flag of their constituent sample's already-run lag-1 test (same vector, same seed, same result),
+  reported **beside the interval in the same cell**; `t_comp` and `overhead` carry no marker of their
+  own, because a flag belongs to a sample and these are functions of two and three of them. The
+  bootstrap rests on the *same* i.i.d. premise, so a flagged interval here is anti-conservative for
+  the same reason and is likewise disclosed, never corrected. Composite `enc-<A>+pred-<B>` isolation
+  labels get no row — they are an SR diagnostic and are never benchmarked for latency.
+  Persisted as a `points_means` section in `stats.json` (self-describing: the n of each sample, the
+  call counts, the bootstrap method/B/seed) and rendered as `latency_means_table.txt` — **method-
+  unscoped**, because its config column names the method (`FP32`, `INT8 (max)`, `FP8 (entropy)`) and
+  it spans both, like `calibration_table.txt`. (`docs/architecture.md` §12.)
 - **A "cycle" is ONE episode's decision, not the span of one `CEMSolver.solve` call.** A solve
   plans every still-alive episode sequentially, so its wall clock is the sum of N decisions. The
   latency callback therefore brackets **per env** (consecutive `start_batch` hooks, the last
@@ -202,7 +233,8 @@ requirements those signatures must satisfy; it does not restate the signatures.
   **The n each percentile was computed from is reported in the artefact**, not merely asserted: the
   equal-n truncation must be verifiable off the table rather than taken on trust (`docs/architecture.md` §8).
 - **Three latency distributions, each REPORTED as p50/p95**, mapping to the three profile slices.
-  A mean is never *reported* for any of them.
+  A mean is never *compared* and never a headline; it is reported only on the decomposition surface
+  it is the basis for — the per-component/dilution tables and the mean-latency interval table above.
   1. **per-cycle** — the **headline**, compared at p50: full per-decision planning latency
      (encode + predict + overhead), measured on the real solve.
   2. **encode-step** — a component exposing the LeWM-vs-DINOv3 encoder token-count asymmetry
@@ -330,7 +362,9 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
 - **Confidence intervals are RE-ANALYSIS of the stored samples, never a new measurement.** They are
   computed off the stored sample artefacts alone — `sr.json` (SR + per-cycle vectors) and the
   per-track component-latency artefact — with no eval, benchmark, or export run, and are
-  **additive**: they land in their own `stats.json` plus columns/error bars on the regenerable views,
+  **additive**: they land in their own `stats.json` (intervals on the absolute SR/p50s **and** on the
+  five mean per-cycle latency quantities) plus columns/error bars on the regenerable views and the
+  method-unscoped `latency_means_table.txt`,
   and `results.*.json`, `sr.json` and the component-latency artefact stay **byte-unchanged**, the
   same read-only discipline the derived clock render obeys.
 - Training batch size is held equal across tracks (128, LeWM's paper value); training **hardware**
@@ -389,9 +423,15 @@ touching:
   time is treated as clock-bound. A wrong choice is a plausible wrong corrected number (silent);
   CLAUDE Code wires the harvest/apply/render only once the owner has fixed the formula.
 - The **confidence-interval construction** — **which quantities carry an interval at all** (the
-  absolute SR, the per-cycle p50, and the two component p50s; never a p95, a mean, a derived share,
-  a difference or a ratio), which estimator carries each (Clopper–Pearson for SR, the exact binomial
-  order-statistic interval for every p50), **which sample each interval is computed over**
+  absolute SR, the per-cycle p50, the two component p50s, and the five mean per-cycle latency
+  quantities — `enc_cyc`, `pred_cyc`, `t_comp`, `cycle`, `overhead`; never a p95, a derived share,
+  and no difference or ratio other than the named `overhead` decomposition), which estimator carries
+  each (Clopper–Pearson for SR, the exact binomial
+  order-statistic interval for every p50, the non-parametric **percentile bootstrap** — B = 3,000,
+  `paired=False`, α = 0.05, fixed seed — for every mean, on the **call-count-weighted** per-cycle
+  scale), the ruling that the mean intervals **inherit** their constituent sample's lag-1 flag rather
+  than opening a third test family and that the two composites (`t_comp`, `overhead`) carry no flag
+  of their own, **which sample each interval is computed over**
   (per-cycle: warm-up-dropped and equal-n-truncated; component: the fixed-iteration loop sample as
   recorded), the rank convention, α, the permutation count, the choice of lag-1 autocorrelation as
   the independence statistic, the ruling that the test decision is the **unadjusted** p-value with
@@ -420,8 +460,10 @@ touching:
   logging, the passive `nvidia-smi dmon` GPU-telemetry logging, table/plot runners).
 - The tracer-bullet smoke script.
 - The confidence-interval *computation and render plumbing* — evaluating the owner-set estimators
-  and permutation test over the stored samples, the Holm secondary values, the `stats.json` write,
-  the interval columns on the tables where SR and the p50s appear, and the error bars on the
+  and permutation test over the stored samples, the bootstrap over the mean quantities, the Holm
+  secondary values, the `stats.json` write,
+  the interval columns on the tables where SR and the p50s appear, the `latency_means_table.txt`
+  render, and the error bars on the
   speed-vs-SR plot. Off-pod over the existing canonical artifacts, read-only, like the derived
   clock render.
 - **Retaining and persisting the timing loops' raw per-call latencies** (the component-latency
@@ -532,11 +574,18 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   run**. Every p50 interval's i.i.d. premise is tested on its own sample by a two-sided Dwass
   Monte-Carlo permutation test on lag-1 autocorrelation (α = 0.05, 50,000 permutations, fixed seed),
   the decision taken on the unadjusted p-value with Holm values persisted as secondary reporting
-  **per measurement surface** (per-cycle and component families kept separate). No interval is placed
-  on any difference or ratio, on any p95, or on the mean-based decomposition. The numbers land in a
+  **per measurement surface** (per-cycle and component families kept separate).
+  **The mean-based per-cycle decomposition carries intervals too** — the five call-count-weighted
+  quantities `enc_cyc`, `pred_cyc`, `t_comp = enc_cyc + pred_cyc`, `cycle`, and
+  `overhead = cycle − t_comp`, per (track, precision, method), by non-parametric **percentile
+  bootstrap** (3,000 resamples, `paired=False`, fixed seed) over those same stored samples, with the
+  constituent sample's lag-1 flag carried into the cell and no new test family opened. Apart from
+  that named `overhead` decomposition, no interval is placed on any difference or ratio, on any p95,
+  or on the dilution table's shares and speedups. The numbers land in a
   **`stats.json` on the
   persistent network volume** (same durability contract as the other headline artifacts) and are
-  surfaced as interval columns in the tables where SR and the p50s appear and as error bars on the
+  surfaced as interval columns in the tables where SR and the p50s appear, as the method-unscoped
+  **`latency_means_table.txt`**, and as error bars on the
   speed-vs-SR plot. `results.*.json`, `sr.json` and the component-latency artefact are **read-only**
   to this analysis and stay byte-unchanged. (`docs/architecture.md` §12.)
 - **Clock-state confound disclosure.** Because GPU clocks cannot be locked (§Execution Environment)

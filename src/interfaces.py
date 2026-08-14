@@ -121,6 +121,13 @@ PERMUTATION_RESAMPLES = 50_000
 # `calibrate.predictor_batches`) rather than a fresh value: a Monte-Carlo p-value that moves between
 # renders is not an artefact anyone can audit.
 PERMUTATION_SEED = 0
+# Non-parametric percentile bootstrap on the five MEAN per-cycle latency quantities (enc_cyc,
+# pred_cyc, t_comp, cycle, overhead — SPEC §Interface Contracts). A percentile interval only needs
+# its 2.5/97.5 resample points to settle, where the lag-1 test above needs 50,000 to resolve a TAIL
+# p-value — different jobs, different budgets. Seeded like `PERMUTATION_SEED` and for the same
+# reason: a resampled interval that moves between renders cannot be audited.
+BOOTSTRAP_RESAMPLES = 3_000
+BOOTSTRAP_SEED = 0
 
 # --- Clock normalization (owner-gated; SPEC §Implementation Boundaries "clock-normalization
 # construction", signed off 2026-07-25). GPU clocks are unlockable on this platform, and the

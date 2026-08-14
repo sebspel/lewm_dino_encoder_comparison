@@ -557,7 +557,10 @@ clear of any sampling noise on either leg, so an interval on it would decorate a
 sampling error was never in a position to threaten — while inviting exactly the "overlapping
 intervals ⇒ no difference" misreading that a ratio of two medians does not license. The confound
 that *does* move the ratio is the differential clock throttle, and that already has its own bound
-(§11). Component and dilution tables are mean-based (§8) and get nothing either.
+(§11). The dilution table is mean-based (§8) and gets nothing either — `p`, the ceiling and the
+model-only/realized speedups are shares and ratios. The **mean per-cycle decomposition** is the one
+mean surface that does carry intervals, by a different construction ("Mean latencies and the overhead
+decomposition carry bootstrap intervals", below).
 
 ### Success rate → Clopper–Pearson
 
@@ -653,12 +656,11 @@ about — the property §12 has to engineer on the per-cycle side is free here.
 
 **Only the p50 carries an interval.** p95 does not, for the reason §8 already gives — it carries no
 claim, and putting a 95% interval on a statistic the study declines to compare would invite exactly the
-comparison the ruling forbids. The means carry none either: they exist to make
-`cycle = enc·calls + pred·calls + overhead` exact by linearity of expectation, and that identity is an
-algebraic decomposition of measured quantities, not an inference about a population. For the same reason
-the call-count-weighted `enc_cyc_ms` / `pred_cyc_ms` and everything derived from them (`overhead_ms`,
-`p`, the Amdahl ceiling) carry none — an interval there would be a rescaled interval on a mean, dressed
-as a statement about a measured quantity. Clopper–Pearson does not appear on this surface at all: there
+comparison the ruling forbids. The means carry **no order-statistic interval** — that estimator is for a
+quantile. The five decomposition quantities (`enc_cyc_ms`, `pred_cyc_ms`, `t_comp`, `cycle`,
+`overhead_ms`) carry a percentile **bootstrap** interval instead — see "Mean latencies and the overhead
+decomposition carry bootstrap intervals" below. The derived shares (`p`, the
+Amdahl ceiling) carry none. Clopper–Pearson does not appear on this surface at all: there
 is no proportion to bound, only a latency quantile.
 
 **The independence test matters more here, not less.** It is tempting to treat a tight
@@ -694,6 +696,66 @@ percentile helper is therefore one shared definition across the benchmark, the r
 path. The interpolation residual documented above for per-cycle — `torch.quantile` interpolates while
 the endpoints are order statistics, so the point is not centred in its own interval — applies here
 identically, and is likewise documented rather than "fixed" by moving the point estimate.
+
+### Mean latencies and the overhead decomposition carry bootstrap intervals
+
+`cycle = enc·calls + pred·calls + overhead` is exact by linearity of expectation, so the numbers in
+`component_table` are a *rearrangement* of measured quantities rather than an inference. That is true
+of the identity, but not of the question the table is used to answer: **how much of a planning cycle
+is model time, and how much is the un-optimizable floor** — a claim about this hardware and this
+planner, made from ~100 timed iterations per component and ~60 decisions per cycle. A claim from a
+finite sample deserves a sampling interval, and the samples that supply one have been on the volume
+since Phase 9. Hence intervals on the five decomposition quantities, and only those.
+
+**Everything stays on the per-cycle scale, so the point estimates do not move.** `enc_cyc = 2 ×
+mean(encode-step)`, `pred_cyc = 150 × mean(predictor-step)`, `t_comp = enc_cyc + pred_cyc`, `cycle`
+the measured mean, `overhead = cycle − t_comp` — the same five numbers `report.decompose` renders.
+Reporting the *unweighted* per-call means beside a weighted `overhead` is not an option: the table
+would print three columns that visibly fail to add up, and an `overhead` computed against unweighted
+components would absorb 149 uncounted predictor calls and stop being the planner floor. The interval
+is the only thing that is new.
+
+**Why a bootstrap, when every other interval here is exact.** There is no distribution-free exact
+interval for a mean — the order-statistic construction is available for a *quantile* precisely
+because coverage reduces to a binomial tail sum, and no such reduction exists for an average.
+The non-parametric percentile bootstrap is the plain choice that assumes no parametric family, which
+matters on right-skewed latency samples where a t-interval's symmetry is a fiction. **Percentile
+rather than BCa**: BCa's bias and acceleration terms are themselves estimated from the same small
+sample, a modelling step the percentile interval does not need — it is what the resamples literally
+say.
+**B = 3,000** because a percentile interval only needs the 2.5/97.5 points of the resample
+distribution to settle, where the lag-1 test needs 50,000 to resolve a *tail* p-value against
+α = 0.05 — different jobs, different budgets.
+
+**`paired=False` is a statement about the data, not a default.** The three samples come from
+different runs of different length: the two component vectors are fixed-iteration engine loops
+(n = 100 each), the cycle vector is per-decision timings off the eval-shim solve (n ≈ 55–97). There
+is no i-th observation shared between them to pair, so each is resampled independently and the
+composite statistic is evaluated on the triple. scipy enforces equal lengths only when
+`paired=True`, which is the other reason the flag has to be right rather than incidental.
+
+**Why `overhead` gets an interval when ΔSR and the speedups do not.** The no-difference rule exists
+to stop an interval being read as "these two configurations differ / do not differ" — the
+overlapping-intervals misreading. `overhead` is not that shape of quantity. It is one configuration's
+absolute floor, obtained by subtraction because it cannot be instrumented directly (§8: the
+decomposition subtracts rather than mirrors the solver), and it is reported per configuration, never
+as a contrast between two. The rule it lives under is unchanged: no interval is placed on a
+comparison, and the exception generalizes to nothing else.
+
+**The bootstrap inherits the i.i.d. premise, so it inherits the flag.** Resampling with replacement
+assumes exchangeable observations exactly as the order-statistic interval does; under the positive
+lag-1 autocorrelation §12 already measures on these very vectors, a percentile bootstrap interval is
+**too narrow** in the same direction. The tests were already run on the same samples with the same
+seed, so re-running them would produce identical numbers under a third Holm family whose only effect
+would be to make the existing published adjusted p-values look like one of several competing
+versions. Instead the flag is *carried*: `enc_cyc`, `pred_cyc` and `cycle` show their sample's `*`/`-`
+beside the interval in the same cell. `t_comp` and `overhead` show none, because a flag describes a
+sample and those are functions of two and three samples — the constituent flags on the same row are
+the honest disclosure, and inventing a composite flag would be a modelling choice, not a measurement.
+
+`scipy.stats.bootstrap` is used wholesale, the second construction after Clopper–Pearson where the
+library matches the owner-set specification exactly; the deviations below are unchanged by this
+addition.
 
 ### Deviations from stock library implementations, flagged
 

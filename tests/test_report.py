@@ -14,6 +14,8 @@ pin which one `decompose` actually reads.
 import math
 from pathlib import Path
 
+import pytest
+
 from src import report
 
 
@@ -476,6 +478,135 @@ def test_component_intervals_do_not_touch_the_derived_tables(tmp_path):
         assert (
             Path(without["plots"][key]).read_bytes() == Path(with_["plots"][key]).read_bytes()
         ), f"{key}.png changed when component intervals were added"
+
+
+# --- mean latencies + overhead, with bootstrap intervals ---------------------------------
+def _mean_fixture(seed=31):
+    """Both surfaces the mean decomposition needs, wired as the pod writes them: the engine-step
+    samples (`latencies.*.json`) and a bench whose `*_mean_ms` are the means OF THOSE SAMPLES — the
+    same loop produces both on a real run — plus per-cycle vectors under two method labels."""
+    import numpy as np
+    from statistics import fmean
+
+    rng = np.random.default_rng(seed)
+    samples = {t: _component_samples(seed + i) for i, t in enumerate(("lewm", "dino"))}
+    bench = _synthetic()
+    for track, by_prec in samples.items():
+        for prec, vectors in by_prec.items():
+            bench[track][prec]["encode_mean_ms"] = fmean(vectors["encode_ms"])
+            bench[track][prec]["predict_mean_ms"] = fmean(vectors["predict_ms"])
+        # int8 exercises the QUANTIZED case: one component sample (latency is method-invariant),
+        # two per-cycle samples, hence two rows — `INT8 (max)` and `INT8 (entropy)`.
+        by_prec["int8"] = _component_samples(seed + 7)["fp32"]
+    overrides = {
+        track: {
+            prec: {
+                m: {
+                    "success_rate": 90.0,
+                    "per_cycle_latencies_ms": list(rng.normal(120.0, 4.0, size=40)),
+                }
+                for m in (("max", "entropy") if prec == "int8" else ("max",))
+            }
+            for prec in ("fp32", "fp16", "int8")
+        }
+        for track in ("lewm", "dino")
+    }
+    return bench, overrides, samples
+
+
+def _mean_render(out_dir, method="max", seed=31):
+    bench, overrides, samples = _mean_fixture(seed)
+    out = report.report(
+        bench, out_dir, sr_overrides=overrides, method=method, component_latencies=samples
+    )
+    return out, bench
+
+
+def test_latency_means_table_matches_decompose(tmp_path):
+    """The anti-drift guard: the mean table quantifies the decomposition the study already reports,
+    it does not introduce a second set of numbers. Its five points must equal `decompose`'s
+    `enc_cyc_ms`/`pred_cyc_ms`/`model_cyc_ms`/`cycle_ms`/`overhead_ms` for the same configuration
+    (SPEC §Interface Contracts — "additive by construction and identical to the rendered
+    decomposition")."""
+    import json
+
+    out, bench = _mean_render(tmp_path)  # `report` finalizes `bench` in place
+    payload = json.loads(Path(out["stats"]).read_text())
+
+    for track in ("lewm", "dino"):
+        for prec in ("fp32", "fp16"):
+            e = payload["points_means"][track][prec]["max"]
+            d = report.decompose(bench[track][prec])
+            assert e["enc_cyc_mean_ms"] == d["enc_cyc_ms"]
+            assert e["pred_cyc_mean_ms"] == d["pred_cyc_ms"]
+            assert e["t_comp_mean_ms"] == d["model_cyc_ms"]
+            assert e["cycle_mean_ms"] == d["cycle_ms"]
+            assert e["overhead_mean_ms"] == d["overhead_ms"]
+
+
+def test_latency_means_table_is_parseable_and_carries_its_markers(tmp_path):
+    """Each of the five VALUE cells is ONE whitespace-delimited token — point, interval and (for the
+    three quantities that ARE a sample) its independence marker together — so the artefact stays
+    `split()`-parseable off the last five fields. `t_comp`/`ovh` end in a bracket: a flag describes a
+    sample, and they are functions of two and three (architecture.md §12). The config column is the
+    one that may split (`INT8 (max)`), which is why the values are read from the END."""
+    import json
+
+    out, _ = _mean_render(tmp_path)
+    text = Path(out["tables"]["latency_means_table"]).read_text()
+    payload = json.loads(Path(out["stats"]).read_text())
+
+    header = [ln for ln in text.splitlines() if ln.split()[:1] == ["track"]][0].split()
+    assert header == ["track", "config", "enc_cyc_ms", "pred_cyc_ms", "t_comp_ms", "cycle_ms",
+                      "ovh_ms"]
+    rows = [ln.split() for ln in text.splitlines() if ln.split()[:1] in (["lewm"], ["dino"])]
+    assert len(rows) == sum(len(m) for t in payload["points_means"].values() for m in t.values())
+    configs = [" ".join(r[1:-5]) for r in rows]
+    assert set(configs) == {"FP32", "FP16", "INT8 (max)", "INT8 (entropy)"}  # method only where it applies
+    for row in rows:
+        enc, pred, t_comp, cycle, ovh = row[-5:]
+        for cell in (enc, pred, cycle):
+            assert cell.endswith("*") or cell.endswith("-")
+        assert t_comp.endswith("]") and ovh.endswith("]")  # no marker of their own
+        assert all("[" in c and "," in c for c in row[-5:])
+
+
+def test_latency_means_table_is_unscoped_and_identical_across_methods(tmp_path):
+    """The config column names the method, so ONE file spans both and either render writes the same
+    bytes — like `calibration_table.txt`, and unlike the four method-scoped tables (SPEC §Parity)."""
+    at_max, _ = _mean_render(tmp_path / "max", method="max")
+    at_entropy, _ = _mean_render(tmp_path / "entropy", method="entropy")
+
+    assert Path(at_max["tables"]["latency_means_table"]).name == "latency_means_table.txt"
+    assert (
+        Path(at_max["tables"]["latency_means_table"]).read_bytes()
+        == Path(at_entropy["tables"]["latency_means_table"]).read_bytes()
+    )
+
+
+def test_mean_table_does_not_touch_the_other_artifacts(tmp_path):
+    """The mean surface is additive: it adds a file and changes none. The four method-scoped tables
+    and every plot must be byte-identical with and without the component samples that unlock it."""
+    import numpy as np
+
+    rng = np.random.default_rng(41)
+    overrides = {
+        t: {"fp32": {"max": {"success_rate": 90.0,
+                             "per_cycle_latencies_ms": list(rng.normal(120.0, 4.0, size=40))}}}
+        for t in ("lewm", "dino")
+    }
+    without = report.report(_synthetic(), tmp_path / "a", sr_overrides=overrides, method="max")
+    with_ = report.report(
+        _synthetic(), tmp_path / "b", sr_overrides=overrides, method="max",
+        component_latencies={t: _component_samples(42) for t in ("lewm", "dino")},
+    )
+
+    assert "latency_means_table" not in without["tables"]
+    assert "latency_means_table" in with_["tables"]
+    for key in ("fp32_relative_table", "component_table", "dilution_table"):
+        assert Path(without["tables"][key]).read_bytes() == Path(with_["tables"][key]).read_bytes()
+    for key in ("speed_vs_sr", "per_cycle_ratio", "component_breakdown"):
+        assert Path(without["plots"][key]).read_bytes() == Path(with_["plots"][key]).read_bytes()
 
 
 def test_nan_sr_is_skipped_not_crashed(tmp_path):
