@@ -456,6 +456,7 @@ def _derived_preamble() -> list[str]:
 
 
 _fmt = report._fmt  # shared "—" rendering for a missing/unmeasured cell
+_sig = report._sig  # shared significant-figure rendering (5 for a latency), "—" when unmeasured
 
 
 def render_ratio_table(norm: dict) -> str:
@@ -506,7 +507,7 @@ def render_precision_delta_table(norm: dict) -> str:
         for row in norm["precision_delta"].get(track, []):
             lines.append(
                 f"{row['track']:>6} {row['precision']:>5} {_fmt(row['f_mhz'], '.0f'):>8} "
-                f"{_fmt(row['cyc_p50_ms'], '.3f'):>10} {_fmt(row['cyc_p50_ms_norm'], '.3f'):>10} "
+                f"{_sig(row['cyc_p50_ms'], 5):>10} {_sig(row['cyc_p50_ms_norm'], 5):>10} "
                 f"{_fmt(row['speedup'], '.3f'):>9} {_fmt(row['speedup_norm'], '.3f'):>9}"
             )
     return "\n".join(lines)
@@ -544,7 +545,7 @@ def render_overhead_table(norm: dict) -> str:
             lines.append(
                 f"{row['track']:>6} {row['precision']:>5} "
                 f"{_fmt(row['f_cycle_mhz'], '.0f'):>7} {_fmt(row['f_component_mhz'], '.0f'):>7} "
-                f"{_fmt(row['ovh_ms'], '.4f'):>11} {_fmt(row['ovh_ms_norm'], '.4f'):>11} "
+                f"{_sig(row['ovh_ms'], 5):>11} {_sig(row['ovh_ms_norm'], 5):>11} "
                 f"{_fmt(row['p'], '.3f'):>7} {_fmt(row['p_norm'], '.3f'):>7} "
                 f"{_fmt(row['ovh_share'], '.3f'):>7} {_fmt(row['clock_mismatch'], '+.3f'):>9}"
             )

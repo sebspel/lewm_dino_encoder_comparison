@@ -95,6 +95,21 @@ def _fmt(x, spec: str = ".3g") -> str:
     return "—" if _missing(x) else format(x, spec)
 
 
+def _sig(x, n: int) -> str:
+    """`x` at exactly `n` significant figures, TRAILING ZEROS KEPT — `76.0` at n=3, not `76`: the
+    trailing zero is a significant digit and reports the precision the number is quoted to, which
+    plain `g` would strip. `#` forces them; the bare trailing `.` it leaves on a value with no
+    fractional digits left to show (`100.`) comes back off.
+
+    Every latency in every table is rendered at n=5 and every success rate at n=3 — significant
+    figures, never a fixed decimal count, so one column serves a sub-ms component step and a
+    multi-second cycle alike."""
+    if _missing(x):
+        return "—"
+    s = format(x, f"#.{n}g")
+    return s[:-1] if s.endswith(".") else s
+
+
 def _percentile_ms(values, q: float) -> float:
     return torch.quantile(torch.tensor(values, dtype=torch.float64), q).item()
 
@@ -306,15 +321,18 @@ def _component_stats_lookup(payload: dict | None, track: str, precision: str, co
     return payload.get("points_components", {}).get(track, {}).get(precision, {}).get(component, {})
 
 
-def _ci(bounds, spec: str = ".1f") -> str:
+def _ci(bounds, n: int = 3) -> str:
     """A `[lo,hi]` interval rendered for a fixed-width table, or "—" when the sample could not
     support one (`src.stats` returns None rather than inventing an interval).
+
+    Both bounds carry the same significant figures as the point they bracket — `n` defaults to the
+    SR's 3; latency bounds pass 5.
 
     NO space after the comma, deliberately: every cell in these tables is one whitespace-delimited
     token, which is what lets the artefacts be parsed with `split()`."""
     if not bounds:
         return "—"
-    return f"[{format(bounds[0], spec)},{format(bounds[1], spec)}]"
+    return f"[{_sig(bounds[0], n)},{_sig(bounds[1], n)}]"
 
 
 def _ac_flag(point: dict) -> str:
@@ -330,8 +348,8 @@ def _ac_flag(point: dict) -> str:
     return "*" if point.get("lag1_reject") else "-"
 
 
-def _mean_cell(value, bounds, flag: str | None = None, spec: str = ".4f") -> str:
-    """One mean quantity as ONE whitespace-delimited token: `18.3341[18.11,18.60]*` — the point, its
+def _mean_cell(value, bounds, flag: str | None = None, n: int = 5) -> str:
+    """One mean quantity as ONE whitespace-delimited token: `18.334[18.112,18.601]*` — the point, its
     bootstrap interval, and (for the three quantities that ARE a sample) that sample's independence
     marker, in the same cell.
 
@@ -340,7 +358,7 @@ def _mean_cell(value, bounds, flag: str | None = None, spec: str = ".4f") -> str
     the constituent flags on the same row rather than a composite of their own."""
     if _missing(value):
         return "—"
-    return f"{format(value, spec)}{_ci(bounds, spec)}{'' if flag is None else flag}"
+    return f"{_sig(value, n)}{_ci(bounds, n)}{'' if flag is None else flag}"
 
 
 def _mean_flag(entry: dict, prefix: str) -> str:
@@ -419,8 +437,8 @@ def render_speed_table(
     hdr = (
         f"{'track':>6} {'prec':>5} {'cyc_p50':>8} {'cyc_p50_CI95':>22} {'ac':>3} "
         f"{'cyc_p95':>8} {'cyc_n':>6} {'drop×':>7} "
-        f"{'enc_p50':>8} {'enc_p50_CI95':>16} {'enc_ac':>6} {'enc_p95':>8} "
-        f"{'pred_p50':>9} {'pred_p50_CI95':>16} {'pred_ac':>7} {'pred_p95':>9} "
+        f"{'enc_p50':>9} {'enc_p50_CI95':>21} {'enc_ac':>6} {'enc_p95':>9} "
+        f"{'pred_p50':>9} {'pred_p50_CI95':>21} {'pred_ac':>7} {'pred_p95':>9} "
         f"{'mem_MB':>9} {'SR':>7} {'SR_CI95':>16}"
     )
     lines = [
@@ -449,7 +467,7 @@ def render_speed_table(
             r = bench.get(track, {}).get(prec)
             if r is None:
                 continue
-            sr = "PEND" if _missing(r["success_rate"]) else format(r["success_rate"], ".1f")
+            sr = "PEND" if _missing(r["success_rate"]) else _sig(r["success_rate"], 3)
             n = r.get("_per_cycle_n")
             # Worst dropped decision relative to the retained p50 — with the default k=1 that IS
             # the cold decision; for k>1 the max is the conservative disclosure.
@@ -458,20 +476,19 @@ def render_speed_table(
             drop_x = max(dropped) / p50 if dropped and not _missing(p50) and p50 else None
             point = _stats_lookup(stats_payload, track, prec, method)
             # Component intervals are keyed by (track, precision) alone — no method axis, because
-            # component latency is method-invariant (SPEC §Parity). `.3f` not `.1f`: these are
-            # sub-ms to tens of ms, where one decimal would collapse the interval to a point.
+            # component latency is method-invariant (SPEC §Parity).
             enc_pt = _component_stats_lookup(stats_payload, track, prec, "encode")
             pred_pt = _component_stats_lookup(stats_payload, track, prec, "predict")
             lines.append(
                 f"{track:>6} {prec:>5} "
-                f"{_fmt(r['per_cycle_p50_ms'], '.3f'):>8} "
-                f"{_ci(point.get('p50_ci95_ms'), '.1f'):>22} {_ac_flag(point):>3} "
-                f"{_fmt(r['per_cycle_p95_ms'], '.3f'):>8} "
+                f"{_sig(r['per_cycle_p50_ms'], 5):>8} "
+                f"{_ci(point.get('p50_ci95_ms'), 5):>22} {_ac_flag(point):>3} "
+                f"{_sig(r['per_cycle_p95_ms'], 5):>8} "
                 f"{('—' if n is None else str(n)):>6} {_fmt(drop_x, '.2f'):>7} "
-                f"{r['encode_p50_ms']:>8.3f} {_ci(enc_pt.get('p50_ci95_ms'), '.3f'):>16} "
-                f"{_ac_flag(enc_pt):>6} {r['encode_p95_ms']:>8.3f} "
-                f"{r['predict_p50_ms']:>9.3f} {_ci(pred_pt.get('p50_ci95_ms'), '.3f'):>16} "
-                f"{_ac_flag(pred_pt):>7} {r['predict_p95_ms']:>9.3f} "
+                f"{_sig(r['encode_p50_ms'], 5):>9} {_ci(enc_pt.get('p50_ci95_ms'), 5):>21} "
+                f"{_ac_flag(enc_pt):>6} {_sig(r['encode_p95_ms'], 5):>9} "
+                f"{_sig(r['predict_p50_ms'], 5):>9} {_ci(pred_pt.get('p50_ci95_ms'), 5):>21} "
+                f"{_ac_flag(pred_pt):>7} {_sig(r['predict_p95_ms'], 5):>9} "
                 f"{r['peak_mem_mb']:>9.1f} {sr:>7} {_ci(point.get('sr_ci95_pct')):>16}"
             )
     return "\n".join(lines)
@@ -523,8 +540,8 @@ def render_component_table(bench: dict, method: str = DEFAULT_CALIBRATION_METHOD
             d = decompose(r)
             lines.append(
                 f"{track:>6} {prec:>5} "
-                f"{d['enc_cyc_ms']:>11.4f} {d['pred_cyc_ms']:>12.4f} "
-                f"{_fmt(d['overhead_ms'], '.4f'):>11} {_fmt(d['optimizable_fraction'], '.3f'):>7} "
+                f"{_sig(d['enc_cyc_ms'], 5):>11} {_sig(d['pred_cyc_ms'], 5):>12} "
+                f"{_sig(d['overhead_ms'], 5):>11} {_fmt(d['optimizable_fraction'], '.3f'):>7} "
                 f"{_fmt(d['amdahl_ceiling'], '.2f'):>7}"
             )
     return "\n".join(lines)
@@ -605,7 +622,7 @@ def render_calibration_table(
             rows.append(
                 f"{track:>6} {prec:>5} "
                 + " ".join(
-                    f"{('PEND' if srs[m] is None else format(srs[m], '.1f')):>11} "
+                    f"{('PEND' if srs[m] is None else _sig(srs[m], 3)):>11} "
                     f"{_ci(_stats_lookup(stats_payload, track, prec, m).get('sr_ci95_pct')):>16}"
                     for m in CALIBRATION_METHODS
                 )
@@ -697,7 +714,7 @@ def render_isolation_table(
             rows.append(
                 (
                     _TRACKS.index(track), order.get(prec, len(order)), component,
-                    f"{track:>6} {prec:>9} {component:>10} {sr:>7.1f} "
+                    f"{track:>6} {prec:>9} {component:>10} {_sig(sr, 3):>7} "
                     f"{_ci(point.get('sr_ci95_pct')):>16} "
                     f"{_fmt(delta, '+.1f'):>12} {_fmt(share, '.3f'):>10}",
                 )
