@@ -126,8 +126,7 @@ def test_check_calibration_method_validates():
 
 def test_dump_track_results_is_additive_per_precision(tmp_path):
     """Benchmarking a precision subset later must NOT discard the track's other precisions — the
-    canonical results file merges per precision (CLAUDE.md §8). Latency is calibration-method-
-    invariant, so one file per track serves every method; the method is recorded as provenance."""
+    canonical results file merges per (precision, method) (CLAUDE.md §8)."""
     cfg = ExportConfig()
 
     p = study.dump_track_results(
@@ -138,8 +137,54 @@ def test_dump_track_results_is_additive_per_precision(tmp_path):
 
     data = json.loads(p.read_text())
     assert set(data["bench"]) == {"fp32", "fp8"}  # additive, no silent loss
-    assert data["bench"]["fp32"]["success_rate"] == 90.0
+    assert data["bench"]["fp32"]["max"]["success_rate"] == 90.0
     assert data["meta"]["calibration_method"] == "entropy"  # latest run's provenance label
+    assert data["meta"]["methods"] == ["entropy", "max"]
+
+
+def test_a_second_methods_benchmark_lands_beside_the_first(tmp_path):
+    """The quantized engines are per-method BUILDS, so their timings are separate measurements:
+    timing the `max` plans must record beside the `entropy` numbers, never over them (SPEC §Parity,
+    CLAUDE §8). Both files carry the method axis, and a render selects one method's cells."""
+    from src import report, stats
+
+    cfg = ExportConfig()
+    entropy_row = {"encode_p50_ms": 2.0, "predict_p50_ms": 9.0}
+    study.dump_track_results("dino", {"int8": entropy_row}, cfg, tmp_path, "entropy")
+    study.dump_track_latencies(
+        "dino", {"int8": {"encode_ms": [2.0], "predict_ms": [9.0]}}, cfg, tmp_path, "entropy"
+    )
+
+    max_row = {"encode_p50_ms": 2.5, "predict_p50_ms": 9.5}
+    results = study.dump_track_results("dino", {"int8": max_row}, cfg, tmp_path, "max")
+    latencies = study.dump_track_latencies(
+        "dino", {"int8": {"encode_ms": [2.5], "predict_ms": [9.5]}}, cfg, tmp_path, "max"
+    )
+
+    stored = json.loads(results.read_text())["bench"]["int8"]
+    assert stored == {"entropy": entropy_row, "max": max_row}
+    # …and each render reads its own method's measurement, never the other's.
+    assert report.load_results([results], "entropy")["dino"]["int8"] == entropy_row
+    assert report.load_results([results], "max")["dino"]["int8"] == max_row
+    loaded = stats.load_component_latencies([latencies])["dino"]["int8"]
+    assert loaded["entropy"]["encode_ms"] == [2.0] and loaded["max"]["encode_ms"] == [2.5]
+
+
+def test_a_quantized_precision_never_borrows_the_other_methods_numbers(tmp_path):
+    """A method whose engines were never benchmarked leaves the row ABSENT rather than showing the
+    other method's timings under its label — the same no-fallback rule the composite isolation keys
+    obey. fp32/fp16 do fall back: one data-free build, whichever run recorded it."""
+    from src import report
+
+    cfg = ExportConfig()
+    path = study.dump_track_results(
+        "lewm", {"fp32": {"peak_mem_mb": 1.0}, "int8": {"peak_mem_mb": 2.0}}, cfg,
+        tmp_path, "entropy",
+    )
+
+    at_max = report.load_results([path], "max")["lewm"]
+    assert "int8" not in at_max  # quantized: absent, never borrowed
+    assert at_max["fp32"] == {"peak_mem_mb": 1.0}  # method-invariant: read across the label
 
 
 def test_dump_track_latencies_roundtrips_and_records_the_loop_conditions(tmp_path):
@@ -159,8 +204,9 @@ def test_dump_track_latencies_roundtrips_and_records_the_loop_conditions(tmp_pat
     assert (meta["n_latency_iters"], meta["warmup"]) == (3, 1)
     assert meta["calibration_method"] == "entropy"
 
+    # …under the label of the engines that were timed, ready for the other method to land beside it
     loaded = stats.load_component_latencies([path])
-    assert loaded == {"lewm": samples}
+    assert loaded == {"lewm": {"fp32": {"entropy": samples["fp32"]}}}
 
 
 def test_dump_track_latencies_is_additive_per_precision(tmp_path):
@@ -177,4 +223,4 @@ def test_dump_track_latencies_is_additive_per_precision(tmp_path):
 
     stored = json.loads(p.read_text())["latencies"]
     assert set(stored) == {"fp32", "fp8"}
-    assert stored["fp32"]["encode_ms"] == [1.0]
+    assert stored["fp32"]["max"]["encode_ms"] == [1.0]

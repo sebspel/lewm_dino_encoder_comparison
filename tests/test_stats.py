@@ -315,14 +315,17 @@ def test_stats_never_rewrites_canonical_results(tmp_path):
 
 
 # --- component p50s (Phase 9) ------------------------------------------------------------
-def _components(seed: int, n: int = 100) -> dict:
+def _components(seed: int, n: int = 100, method: str = "max") -> dict:
     """One track's `latencies.<track>.json` `latencies` block: a fixed-iteration loop sample per
-    component, at one precision."""
+    component, at one precision and one calibration method (the axis the per-method engine builds
+    put on the component samples)."""
     rng = np.random.default_rng(seed)
     return {
         "fp32": {
-            "encode_ms": list(rng.normal(12.0, 0.4, size=n)),
-            "predict_ms": list(rng.normal(35.0, 1.1, size=n)),
+            method: {
+                "encode_ms": list(rng.normal(12.0, 0.4, size=n)),
+                "predict_ms": list(rng.normal(35.0, 1.1, size=n)),
+            }
         }
     }
 
@@ -336,8 +339,8 @@ def test_component_interval_uses_the_recorded_vector_as_the_sample():
     payload = stats.compute({}, n_resamples=200, component_latencies=latencies)
 
     for component, key in (("encode", "encode_ms"), ("predict", "predict_ms")):
-        e = payload["points_components"]["dino"]["fp32"][component]
-        sample = latencies["dino"]["fp32"][key]
+        e = payload["points_components"]["dino"]["fp32"]["max"][component]
+        sample = latencies["dino"]["fp32"]["max"][key]
         assert e["n"] == len(sample) == 40  # nothing dropped, nothing truncated
         assert e["p50_ms"] == report._percentile_ms(sample, 0.50)
         lo, hi = e["p50_ci95_ms"]
@@ -350,7 +353,7 @@ def test_component_points_carry_p50_only_never_p95_or_mean():
     and the means are the decomposition basis — an interval on either would assert something the
     owner ruling declines to."""
     payload = stats.compute({}, n_resamples=200, component_latencies={"lewm": _components(12, 30)})
-    e = payload["points_components"]["lewm"]["fp32"]["encode"]
+    e = payload["points_components"]["lewm"]["fp32"]["max"]["encode"]
     assert "p50_ci95_ms" in e
     assert not [k for k in e if "p95" in k or "mean_ms" in k]
 
@@ -382,6 +385,67 @@ def test_component_section_omitted_without_stored_samples():
     assert "component_sample_rule" not in payload["meta"]
 
 
+def test_component_points_are_keyed_per_calibration_method():
+    """The quantized engines are per-method BUILDS, so each method's loop is its own sample and its
+    own interval; a method whose engines were never timed gets NO point rather than the other's
+    (SPEC §Parity — the same no-fallback rule the quantized SR obeys)."""
+    latencies = {
+        "lewm": {
+            "int8": {
+                m: _components(60 + i, n=40, method=m)["fp32"][m]
+                for i, m in enumerate(("max", "entropy"))
+            },
+            "fp8": {"entropy": _components(62, n=40)["fp32"]["max"]},
+        }
+    }
+    payload = stats.compute({}, n_resamples=200, component_latencies=latencies)
+    points = payload["points_components"]["lewm"]
+
+    assert set(points["int8"]) == {"max", "entropy"}
+    assert (
+        points["int8"]["max"]["encode"]["p50_ms"] != points["int8"]["entropy"]["encode"]["p50_ms"]
+    )
+    assert set(points["fp8"]) == {"entropy"}  # the max build was never timed -> no point
+    assert payload["meta"]["holm_family_size_components"] == 6  # 3 (precision, method) x 2
+
+
+def test_a_quantized_mean_row_needs_its_own_methods_components():
+    """A mean row weights the components its cycle was measured on. Where only one method's engines
+    were timed, the other method's cycle gets no mean row — never a mean built out of the other
+    build's component samples (architecture.md §12)."""
+    vec = lambda s: list(np.random.default_rng(s).normal(120.0, 4.0, size=40))  # noqa: E731
+    sr = {
+        "lewm": {
+            "int8": {
+                "max": {"success_rate": 76.0, "per_cycle_latencies_ms": vec(1)},
+                "entropy": {"success_rate": 80.0, "per_cycle_latencies_ms": vec(2)},
+            }
+        }
+    }
+    latencies = {"lewm": {"int8": {"entropy": _components(63, n=40)["fp32"]["max"]}}}
+    payload = stats.compute(
+        sr, n_resamples=200, component_latencies=latencies, bootstrap_resamples=300
+    )
+
+    assert set(payload["points_means"]["lewm"]["int8"]) == {"entropy"}
+    # both cycles still carry their own SR + p50 intervals — only the MEAN row is withheld
+    assert set(payload["points"]["lewm"]["int8"]) == {"max", "entropy"}
+
+
+def test_a_method_invariant_mean_row_records_which_run_timed_it():
+    """FP32/FP16 are one data-free build, so a row reads the sample across labels — and stamps WHICH
+    label it read, so the fallback is auditable off the artefact rather than implied."""
+    vec = list(np.random.default_rng(64).normal(120.0, 4.0, size=40))
+    sr = {"lewm": {"fp32": {"max": {"success_rate": 90.0, "per_cycle_latencies_ms": vec}}}}
+    latencies = {"lewm": {"fp32": _components(65, n=40, method="entropy")["fp32"]}}
+    payload = stats.compute(
+        sr, n_resamples=200, component_latencies=latencies, bootstrap_resamples=300
+    )
+
+    e = payload["points_means"]["lewm"]["fp32"]["max"]
+    assert e["source_method"] == "max" and e["component_method"] == "entropy"
+
+
 # --- the five MEAN quantities: percentile bootstrap ---------------------------------------
 def _mean_payload(seed: int = 21, n_cycles: int = 40, **kwargs):
     """A payload carrying both surfaces — per-cycle vectors and engine-step samples — at one
@@ -397,7 +461,16 @@ def _mean_payload(seed: int = 21, n_cycles: int = 40, **kwargs):
             },
         }
     }
-    latencies = {"lewm": {p: _components(seed + 1)["fp32"] for p in ("fp32", "int8")}}
+    latencies = {
+        "lewm": {
+            "fp32": _components(seed + 1)["fp32"],
+            # the quantized precision carries a sample per METHOD — one engine build each
+            "int8": {
+                m: _components(seed + 2 + i, method=m)["fp32"][m]
+                for i, m in enumerate(("max", "entropy"))
+            },
+        }
+    }
     return sr, latencies, stats.compute(
         sr, n_resamples=200, component_latencies=latencies, bootstrap_resamples=300, **kwargs
     )
@@ -411,8 +484,8 @@ def test_mean_points_are_additive_and_bracketed():
     _, latencies, payload = _mean_payload()
     e = payload["points_means"]["lewm"]["fp32"]["max"]
 
-    assert e["enc_cyc_mean_ms"] == 2 * fmean(latencies["lewm"]["fp32"]["encode_ms"])
-    assert e["pred_cyc_mean_ms"] == 150 * fmean(latencies["lewm"]["fp32"]["predict_ms"])
+    assert e["enc_cyc_mean_ms"] == 2 * fmean(latencies["lewm"]["fp32"]["max"]["encode_ms"])
+    assert e["pred_cyc_mean_ms"] == 150 * fmean(latencies["lewm"]["fp32"]["max"]["predict_ms"])
     assert e["t_comp_mean_ms"] == e["enc_cyc_mean_ms"] + e["pred_cyc_mean_ms"]
     assert e["overhead_mean_ms"] == e["cycle_mean_ms"] - e["t_comp_mean_ms"]
     for key in ("enc_cyc", "pred_cyc", "t_comp", "cycle", "overhead"):
@@ -438,7 +511,7 @@ def test_mean_flags_are_inherited_never_re_tested():
     describes a sample (SPEC §Interface Contracts)."""
     _, _, payload = _mean_payload()
     e = payload["points_means"]["lewm"]["int8"]["entropy"]
-    comp = payload["points_components"]["lewm"]["int8"]
+    comp = payload["points_components"]["lewm"]["int8"]["entropy"]
     cyc = payload["points"]["lewm"]["int8"]["entropy"]
 
     assert e["enc_lag1_p_permutation"] == comp["encode"]["lag1_p_permutation"]
@@ -446,9 +519,10 @@ def test_mean_flags_are_inherited_never_re_tested():
     assert e["cycle_lag1_p_permutation"] == cyc["lag1_p_permutation"]
     assert not [k for k in e if k.startswith(("t_comp_lag1", "overhead_lag1"))]
     assert "holm_family_size_means" not in payload["meta"]
+    # 3 per-cycle tests (fp32@max, int8@max, int8@entropy); 3 component configs x 2 components
     assert payload["meta"]["holm_family_size"] == 3 and payload["meta"][
         "holm_family_size_components"
-    ] == 4
+    ] == 6
 
 
 def test_mean_labels_name_the_method_only_where_it_applies():

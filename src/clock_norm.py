@@ -337,7 +337,8 @@ def normalize(bench: dict, clocks: dict, method: str) -> dict:
     warm-up-dropped sample as the measured tables.
 
     `method` selects each run's telemetry, so an `entropy` render normalizes with the `entropy`
-    run's clock — the per-cycle sample being normalized came from that run. Legacy unscoped logs
+    run's clock — the per-cycle sample and the engine-step latencies being normalized both came from
+    that method's runs (`report.load_results` selects them by the same label). Legacy unscoped logs
     are the documented fallback (`_summary`)."""
     out: dict = {"ratio": [], "precision_delta": {}, "overhead": {}}
 
@@ -663,7 +664,10 @@ def run(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    bench = report.load_results(report._resolve_result_paths(src))
+    # `method` selects the measured numbers as well as the telemetry: the quantized rows are timed
+    # on that method's engines, so pairing them with the other method's clocks would normalize one
+    # measurement with another's conditions.
+    bench = report.load_results(report._resolve_result_paths(src), method)
     # The SAME join + reduction `src.report` performs, so the derived numbers describe exactly the
     # truncated, warm-up-dropped sample the measured tables were rendered from. Neither call
     # touches a file — `bench` is an in-memory copy of the canonical results.

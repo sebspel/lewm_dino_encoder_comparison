@@ -419,15 +419,18 @@ def test_report_never_rewrites_canonical_results(tmp_path):
 
 
 # --- component p50 intervals on the speed table (Phase 9) --------------------------------
-def _component_samples(seed: int, n: int = 40) -> dict:
-    """One track's stored engine-step samples, in `latencies.<track>.json`'s `latencies` shape."""
+def _component_samples(seed: int, n: int = 40, method: str = "max") -> dict:
+    """One track's stored engine-step samples, in `latencies.<track>.json`'s `latencies` shape —
+    keyed by (precision, calibration method), since the quantized engines are per-method builds."""
     import numpy as np
 
     rng = np.random.default_rng(seed)
     return {
         p: {
-            "encode_ms": list(rng.normal(1.0, 0.05, size=n)),
-            "predict_ms": list(rng.normal(0.25, 0.01, size=n)),
+            method: {
+                "encode_ms": list(rng.normal(1.0, 0.05, size=n)),
+                "predict_ms": list(rng.normal(0.25, 0.01, size=n)),
+            }
         }
         for p in ("fp32", "fp16")
     }
@@ -455,6 +458,34 @@ def test_speed_table_carries_component_intervals_and_stays_parseable(tmp_path):
     assert lewm_fp32[10] in {"*", "-"}  # independence flag, never empty
     # dino has no stored samples here -> blank cells, not a crash and not a borrowed interval
     assert [r for r in rows if r[:2] == ["dino", "fp32"]][0][9] == "—"
+
+
+def test_component_intervals_are_selected_by_calibration_method(tmp_path):
+    """A quantized engine is a per-method BUILD, so its step-loop interval is that method's: an
+    `entropy` render must show the entropy samples' interval, and a method whose engines were never
+    timed must render `—` rather than the other method's number (SPEC §Parity)."""
+    samples = {
+        "lewm": {
+            "fp32": {"max": _component_samples(51)["fp32"]["max"]},  # invariant -> read at either
+            "int8": {"entropy": _component_samples(52)["fp32"]["max"]},  # entropy-only build
+        }
+    }
+
+    def _cells(method):
+        bench = _synthetic()
+        bench["lewm"]["int8"] = _bench(50.0, 50.0, 0.5, 0.12, 76.0)
+        out = report.report(bench, tmp_path / method, method=method, component_latencies=samples)
+        text = Path(out["tables"]["speed_table"]).read_text()
+        return {
+            tuple(r.split()[:2]): r.split()[9]
+            for r in text.splitlines()
+            if r.split()[:1] == ["lewm"]
+        }
+
+    at_entropy, at_max = _cells("entropy"), _cells("max")
+    assert at_entropy[("lewm", "int8")].startswith("[")  # its own method's interval
+    assert at_max[("lewm", "int8")] == "—"  # never borrowed from entropy
+    assert at_max[("lewm", "fp32")] == at_entropy[("lewm", "fp32")]  # one build, one interval
 
 
 def test_component_intervals_do_not_touch_the_derived_tables(tmp_path):
@@ -492,12 +523,16 @@ def _mean_fixture(seed=31):
     samples = {t: _component_samples(seed + i) for i, t in enumerate(("lewm", "dino"))}
     bench = _synthetic()
     for track, by_prec in samples.items():
-        for prec, vectors in by_prec.items():
+        for prec, by_method in by_prec.items():
+            vectors = by_method["max"]
             bench[track][prec]["encode_mean_ms"] = fmean(vectors["encode_ms"])
             bench[track][prec]["predict_mean_ms"] = fmean(vectors["predict_ms"])
-        # int8 exercises the QUANTIZED case: one component sample (latency is method-invariant),
-        # two per-cycle samples, hence two rows — `INT8 (max)` and `INT8 (entropy)`.
-        by_prec["int8"] = _component_samples(seed + 7)["fp32"]
+        # int8 exercises the QUANTIZED case: a component sample PER METHOD (each method is its own
+        # engine build) beside two per-cycle samples, hence two rows — `INT8 (max)`/`INT8 (entropy)`.
+        by_prec["int8"] = {
+            m: _component_samples(seed + 7 + i, method=m)["fp32"][m]
+            for i, m in enumerate(("max", "entropy"))
+        }
     overrides = {
         track: {
             prec: {

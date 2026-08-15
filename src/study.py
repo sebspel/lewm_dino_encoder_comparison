@@ -9,8 +9,10 @@ hands the assembled bench dict to `src.report` for the headline tables + plots.
     uv run python -m src.study wandb=eval_lewm  # also log the headline artifacts to that
                                                 # overlay's (shared) W&B project
     uv run python -m src.study out=/some/dir    # override the output dir
-    uv run python -m src.study calibration_method=entropy  # label the run's int8/fp8 engines +
-                                                # render the entropy SR (latency is method-invariant)
+    uv run python -m src.study calibration_method=entropy  # time THAT method's int8/fp8 engines and
+                                                # record + render under its label
+    uv run python -m src.study precision=int8,fp8  # benchmark a subset (the method-invariant
+                                                # fp32/fp16 need timing once, not once per method)
 
 **Latency is the headline** (SPEC §Interface Contracts). This driver produces the two COMPONENT
 latency distributions (encode-step + predict-step p50/p95, engine step loops) + peak memory; the
@@ -25,6 +27,10 @@ by default — the persistent network volume, so a completed study survives pod 
 §Headline-artifact durability); off-pod (no `STABLEWM_HOME`) it falls back to repo-local
 `reports/phase5`. W&B logging stays additive.
 
+Both measured files are keyed by **(precision, calibration method)** and merged per cell, so timing
+the `max` engines never overwrites what the `entropy` pass measured (CLAUDE §8, SPEC §Parity); the
+render selects one method's points with `src.report calibration_method=`.
+
 Engines are NOT built here — run `uv run python -m src.export model=<t> precision=<p>` first
 (after the precision-match gate). A precision whose
 `$STABLEWM_HOME/engines/<track>/{encoder,predictor}.<p>.plan` (int8/fp8 method-tagged
@@ -35,6 +41,7 @@ failure). Runs on the L40S (benchmark needs CUDA / TensorRT).
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -55,7 +62,7 @@ from src.export import engine_root as default_engine_root, engine_filename
 from src.benchmark import benchmark
 from src.gpu_clocks import log_gpu, run_tag
 from src.precision_match import _build_adapter, example_inputs
-from src.report import report
+from src.report import as_method_map, report
 
 _TRACKS = ("lewm", "dino")
 
@@ -103,6 +110,26 @@ def engine_paths(
     return EnginePaths(encoder=_resolve("encoder"), predictor=_resolve("predictor"))
 
 
+def _merge_by_method(path: Path, section: str, new: dict, method: str) -> dict:
+    """Merge this run's `{precision: payload}` into whatever the file already holds, keyed
+    `{precision: {method: payload}}`.
+
+    The merge is per **(precision, method)**: a run replaces only the cells it just measured, so a
+    second calibration method's timings land BESIDE the first's and a precision-subset run leaves
+    the other precisions untouched (CLAUDE §8 — never silently discard a completed measurement).
+    Existing flat entries are folded under the label the file's own `meta.calibration_method`
+    records — the method that run actually built and timed, never an assumed default."""
+    existing, recorded = {}, DEFAULT_CALIBRATION_METHOD
+    if path.exists():
+        data = json.loads(path.read_text())
+        existing = data.get(section, {})
+        recorded = data.get("meta", {}).get("calibration_method", DEFAULT_CALIBRATION_METHOD)
+    merged = {p: dict(as_method_map(e, recorded)) for p, e in existing.items()}
+    for precision, payload in new.items():
+        merged.setdefault(precision, {})[method] = payload
+    return merged
+
+
 def dump_track_results(
     name: str,
     bench: dict,
@@ -117,33 +144,29 @@ def dump_track_results(
     (CLAUDE.md §8, SPEC §Headline-artifact durability). NaN latencies/SRs serialize as the
     `NaN` token (Python's json round-trips them; `src.report.load_results` reads them back).
 
-    The per-precision benchmark numbers here are LATENCY + peak-mem, which are calibration-method-
-    INVARIANT (SPEC §Parity), so ONE file per track serves every method; `calibration_method` is
-    recorded as provenance for which engines this run benchmarked. This run's precisions are MERGED
-    into any existing file per precision (not a whole-file replace), so benchmarking a precision
-    subset later (e.g. adding fp8) leaves the track's other precisions on disk intact (CLAUDE §8).
-    The method-DEPENDENT quantity — quantized SR — is labelled and kept coexisting in sr.json
-    (`src.sr_eval`), not here."""
+    Keyed by **(precision, calibration method)**: an int8/fp8 engine is a per-method BUILD, so the
+    latency + peak-mem measured off it belong to that method and coexist with the other's as
+    separately-labelled points (SPEC §Parity), which `src.report calibration_method=` then selects
+    like-for-like across tracks. FP32/FP16 carry one data-free build, so whichever run recorded them
+    the number describes the same engine and a render reads it across labels
+    (`report.select_by_method`). `_merge_by_method` keeps every cell this run did not measure."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"results.{name}.json"
-    existing_bench: dict = {}
-    if path.exists():
-        existing_bench = json.loads(path.read_text()).get("bench", {})
-    # New precisions overwrite their own key (fresh measurement); precisions absent from this run
-    # are preserved from disk — additive, no silent loss of a prior precision's numbers.
-    merged_bench = {**existing_bench, **bench}
+    merged_bench = _merge_by_method(path, "bench", bench, calibration_method)
     payload = {
         "meta": {
             "track": name,
             "precisions_built": sorted(merged_bench),
+            "methods": sorted({m for by in merged_bench.values() for m in by}),
             "n_latency_iters": cfg.n_latency_iters,
             "warmup": cfg.warmup,
             "num_samples": CEM_NUM_SAMPLES,
             "seed": cfg.seed,
             "obs_shape": list(cfg.obs_shape),
-            # The int8/fp8 PTQ method this run's engines were built with (a build option for both
-            # tracks — architecture.md §7). Latency is method-invariant, so this is provenance, not a
-            # cross-track parity condition; the method-dependent SR is labelled in sr.json.
+            # The int8/fp8 PTQ method THIS run's engines were built with (a build option for both
+            # tracks — architecture.md §7) and therefore the key its rows landed under. The per-cell
+            # labels in `bench` are the authority; this records the latest writer, and is what a
+            # legacy flat entry is folded under.
             "calibration_method": calibration_method,
             "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
@@ -170,21 +193,20 @@ def dump_track_latencies(
     later statistic over the component distributions is an off-pod re-analysis rather than an L40S
     booking (SPEC §Interface Contracts, docs/architecture.md §12).
 
-    Keyed by **precision only**: component latency is calibration-method-INVARIANT (SPEC §Parity), so
-    inventing a method axis here would assert a distinction the quantity does not have; the method is
-    recorded in `meta` as provenance for which engines were timed, exactly as `dump_track_results`
-    does. Merged **per precision** with the same no-clobber discipline, so benchmarking a subset later
-    leaves the track's other precisions on disk intact (CLAUDE §8)."""
+    Keyed by **(precision, calibration method)**, exactly as `dump_track_results` is: these are the
+    per-call latencies of a specific pair of engine plans, and the quantized plans are per-method
+    builds (SPEC §Parity), so a `max` timing run records beside the `entropy` one rather than over
+    it. Merged **per (precision, method)** with the same no-clobber discipline, so benchmarking a
+    subset later leaves the track's other cells on disk intact (CLAUDE §8) — this file is the only
+    copy of these samples, and re-measuring one costs an L40S booking."""
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"latencies.{name}.json"
-    existing: dict = {}
-    if path.exists():
-        existing = json.loads(path.read_text()).get("latencies", {})
-    merged = {**existing, **samples}
+    merged = _merge_by_method(path, "latencies", samples, calibration_method)
     payload = {
         "meta": {
             "track": name,
             "precisions": sorted(merged),
+            "methods": sorted({m for by in merged.values() for m in by}),
             # The loop conditions these samples were recorded under. n is equal across tracks by
             # construction (fixed-iteration), and `warmup` iters ran UNTIMED before the first
             # recorded call — so each vector is already the sample, needing no truncation and no
@@ -217,9 +239,11 @@ def run_track(
     decomposition is honest: **encode** once at batch 1 (single obs), **predict** at the candidate
     fan-out `CEM_NUM_SAMPLES` (the batch the CEM evaluates all candidates in per horizon step).
 
-    Latency is calibration-method-invariant, but int8/fp8 engine plans are method-TAGGED, so
-    `method` selects which quantized engines to locate (fp32/fp16 ignore it). The numbers are the
-    same either way — the label just records which built engines were timed.
+    `method` selects which engines to locate and therefore which are timed: int8/fp8 plans are
+    method-TAGGED (`export.engine_filename`), so a `max` pass times the `max` build and an `entropy`
+    pass the `entropy` one, and the two results are recorded under their own labels rather than one
+    standing in for the other. FP32/FP16 are untagged — one build, timed under whichever label the
+    run carries.
 
     Each precision's benchmark run is bracketed by an `nvidia-smi dmon` telemetry observer
     (`gpu_log_dir/<track>.<precision>.<method>.benchmark.dmon.log` — `gpu_clocks.run_tag`) so the
@@ -256,6 +280,7 @@ def main() -> None:
     out_dir = default_out_dir()  # $STABLEWM_HOME/reports/phase5 (repo-local fallback); out= overrides
     sr_overrides = None
     method = DEFAULT_CALIBRATION_METHOD
+    cfg = ExportConfig()
     for a in sys.argv[1:]:
         if a.startswith("track="):
             tracks = (a.split("=", 1)[1],)
@@ -263,9 +288,14 @@ def main() -> None:
             wandb_experiment = a.split("=", 1)[1]
         elif a.startswith("out="):
             out_dir = Path(a.split("=", 1)[1])
+        elif a.startswith("precision="):
+            # Benchmark a SUBSET (comma-separated, `src.sr_eval`'s spelling). The method-invariant
+            # fp32/fp16 need timing once, so a second method's pass runs `precision=int8,fp8` and
+            # touches nothing the first recorded.
+            cfg = dataclasses.replace(cfg, precisions=tuple(a.split("=", 1)[1].split(",")))
         elif a.startswith("calibration_method="):
-            # Provenance label for the int8/fp8 engines this study benchmarked, and which method's
-            # SR to render from sr.json (latency is method-invariant, so this drives no numbers).
+            # Which method's engines this pass times, and the label its rows are recorded under —
+            # int8/fp8 are per-method builds, so this selects a measurement, not just a stamp.
             method = check_calibration_method(a.split("=", 1)[1])
         elif a.startswith("sr="):
             # Optional: join SR + per-cycle latency from the gated eval-shim re-run — a JSON
@@ -273,7 +303,6 @@ def main() -> None:
             # -> every row stays SR-PENDING / per-cycle NaN.
             sr_overrides = json.loads(Path(a.split("=", 1)[1]).read_text())
 
-    cfg = ExportConfig()
     torch.manual_seed(cfg.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -201,7 +201,8 @@ requirements those signatures must satisfy; it does not restate the signatures.
   identical to the rendered decomposition** — this adds intervals to that surface, it does not
   introduce a second set of numbers. The estimator is **scipy's `bootstrap`, percentile method,
   3,000 resamples, `paired=False`, α = 0.05, fixed recorded seed**, over the **same stored samples
-  the p50 intervals use**: the fixed-iteration loop vectors as recorded for the components, and the
+  the p50 intervals use**: the fixed-iteration loop vectors as recorded for the components — **that
+  configuration's own method's**, since the quantized engines differ per method — and the
   warm-up-dropped, equal-n-truncated sample for the cycle. `paired=False` is load-bearing and
   correct — the three samples come from different runs of different length and carry no pairing, so
   each is resampled independently.
@@ -244,9 +245,10 @@ requirements those signatures must satisfy; it does not restate the signatures.
   Percentiles are harvested from **fixed-iteration** loops (100 timed iters per step, 10 warm-up
   iters dropped), so n is equal across tracks and the tail is not boundary-censored. **Those loops'
   raw per-call latencies are PERSISTED, not just their percentiles** — a durable per-track artefact
-  beside the canonical results, exactly as the per-cycle vectors are persisted in `sr.json` — so a
-  statistic over the component samples is re-derivable and auditable off the artefact rather than
-  taken on trust, and computing one needs no L40S. encode-/
+  beside the canonical results, keyed by **(precision, calibration method)** like every other
+  quantized result and merged per cell, exactly as the per-cycle vectors are persisted in `sr.json` —
+  so a statistic over the component samples is re-derivable and auditable off the artefact rather
+  than taken on trust, and computing one needs no L40S. encode-/
   predict-step ride isolated per-precision engine loops; per-cycle rides the observation-only
   per-decision latency callback over the SR eval-shim run, so **per-cycle latency and SR come
   from the same solves**. The per-cycle vector likewise **drops a warm-up head (k = 1 decision by
@@ -387,14 +389,18 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   **at a fixed calibration method** (held constant across INT8 and FP8 for any labelled comparison —
   `docs/architecture.md` §7).
 - **Calibration method (`max` | `entropy`) is a build option for both tracks, surfaced as a report
-  label — not a hidden per-track setting.** Every quantized result records its method in
-  `results.<track>.json`, so `max`- and `entropy`-calibrated points coexist and cross-track
-  comparisons are drawn **like-for-like** (same method on both tracks), held constant across INT8 and
-  FP8 within a labelled comparison so the format delta stays clean. **Existing artefacts are never
-  rewritten** — a new method's runs are additive, separately-labelled points (CLAUDE §8). The
-  cross-track **latency** headline is calibration-method-invariant regardless (scale values do not
-  change quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is a
-  quality-retention measure reported per (track, precision, method).
+  label — not a hidden per-track setting.** **Every quantized result is keyed by (track, precision,
+  method) — the SR in `sr.json` and, equally, the measured latencies in `results.<track>.json` and
+  the component-latency artefact** — so `max`- and `entropy`-calibrated points coexist and
+  cross-track comparisons are drawn **like-for-like** (same method on both tracks), held constant
+  across INT8 and FP8 within a labelled comparison so the format delta stays clean. **Existing
+  artefacts are never rewritten** — a new method's runs are additive, separately-labelled points
+  (CLAUDE §8). An INT8/FP8 engine is a **per-method build**, so the latencies timed off it are that
+  method's measurement and **never stand in for the other method's**: a render selects one method's
+  points, and a configuration that method never timed is reported absent rather than filled from the
+  other. FP32/FP16 build data-free — one engine, timed once — so their numbers are read across method
+  labels rather than duplicated per method. Per-model SR is a quality-retention measure reported per
+  (track, precision, method).
   **The label must survive into the persisted artefact, never stdout-only:** each single-method table
   is method-scoped by filename and states its method in the table body, and a dedicated
   `calibration_table.txt` carries both methods' SR side by side plus which method the headline was
@@ -526,8 +532,10 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
     component-latency artefact** carries the engine-step loops' raw per-call samples — written
     **beside** the results file, never replacing it or folded into it, so the schema every consumer
     parses stays summary-numeric while the samples stay re-analysable. It is written **per track** so
-    LeWM and DINOv3 can be benchmarked in separate pod sessions without clobbering each other, and
-    it decouples the expensive pod-only benchmark from the cheap render — the report re-renders
+    LeWM and DINOv3 can be benchmarked in separate pod sessions without clobbering each other, and —
+    like the results file — keyed **per (precision, calibration method)** and merged per cell, so
+    timing one method's quantized engines lands beside the other's rather than over it. It
+    decouples the expensive pod-only benchmark from the cheap render — the report re-renders
     **off-pod** from the saved results, which is how the separately-gated SR-per-precision is
     joined in without re-running the L40S benchmark. A single-track render omits the two
     cross-track ratio plots, which need both tracks.
@@ -570,8 +578,8 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   component p50 (encode-step, predictor-step) carries a 95% confidence interval — Clopper–Pearson
   for SR, the exact binomial order-statistic interval for every p50 — computed from the samples
   already stored on the volume (`sr.json` for SR + per-cycle, the per-track component-latency
-  artefact for the two engine-step distributions), with **no additional eval, benchmark, or export
-  run**. Every p50 interval's i.i.d. premise is tested on its own sample by a two-sided Dwass
+  artefact for the two engine-step distributions, each per (track, precision, method)), with **no
+  additional eval, benchmark, or export run**. Every p50 interval's i.i.d. premise is tested on its own sample by a two-sided Dwass
   Monte-Carlo permutation test on lag-1 autocorrelation (α = 0.05, 50,000 permutations, fixed seed),
   the decision taken on the unadjusted p-value with Holm values persisted as secondary reporting
   **per measurement surface** (per-cycle and component families kept separate).

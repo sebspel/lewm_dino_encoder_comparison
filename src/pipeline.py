@@ -54,11 +54,6 @@ from src.interfaces import (
 
 _TRACKS = ("lewm", "dino")
 
-# The method the per-component benchmark is run under. Component latency is
-# calibration-method-INVARIANT (SPEC §Parity), so this is provenance — which built engines were
-# timed — not a second measurement.
-_BENCHMARK_METHOD = "entropy"
-
 # The committed display copies (SPEC §Headline-artifact durability — the one exception to the
 # never-in-git rule for artifacts). Source path relative to `out_dir`; they are re-copied from a
 # render, never hand-edited.
@@ -357,19 +352,29 @@ def build_steps(
                             )
 
         elif stage == "benchmark":
-            # One pass per track, in its own process: DINO's engine contexts alone reserve ~11 GB,
-            # so the two tracks' benchmarks do not share an address space.
+            # One pass per (track, method), each in its own process: DINO's engine contexts alone
+            # reserve ~11 GB, so the two tracks' benchmarks do not share an address space.
+            # The quantized engines are per-method BUILDS, so each method's plans are timed on their
+            # own and recorded under their own label (`src.study` merges per (precision, method) —
+            # no pass overwrites another's numbers). Like `sr_eval` above, the second method covers
+            # only the quantized precisions: FP32/FP16 are one data-free build, and timing it twice
+            # would book the same engine as two measurements.
             for track in tracks:
-                add(
-                    stage,
-                    _module(
-                        "src.study",
-                        f"track={track}",
-                        f"calibration_method={_BENCHMARK_METHOD}",
-                        f"out={out}",
-                        f"sr={sr_json}",
-                    ),
-                )
+                for method in CALIBRATION_METHODS:
+                    covered = (
+                        precisions if method == DEFAULT_CALIBRATION_METHOD else QUANTIZED_PRECISIONS
+                    )
+                    add(
+                        stage,
+                        _module(
+                            "src.study",
+                            f"track={track}",
+                            f"precision={','.join(covered)}",
+                            f"calibration_method={method}",
+                            f"out={out}",
+                            f"sr={sr_json}",
+                        ),
+                    )
 
         elif stage == "stats":
             add(stage, _module("src.stats", f"from={out}", f"out={out}"))

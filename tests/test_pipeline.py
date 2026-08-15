@@ -79,10 +79,16 @@ def test_isolation_holds_one_component_at_fp16_per_run():
     ), "mixed mode cannot be combined with precision= (src.sr_eval rejects it)"
 
 
-def test_benchmark_runs_one_process_per_track():
+def test_benchmark_times_each_methods_engines_in_its_own_process():
     labels = _labels("benchmark")
-    assert len(labels) == len(pipeline._TRACKS)
-    assert all(f"calibration_method={pipeline._BENCHMARK_METHOD}" in x for x in labels)
+    # One pass per (track, method): the quantized plans are per-method builds, so each method's
+    # engines are timed and recorded under their own label (`src.study` merges per cell).
+    assert len(labels) == len(pipeline._TRACKS) * len(CALIBRATION_METHODS) == 4
+    # The method-invariant fp32/fp16 are timed ONCE — a second pass over them would book the same
+    # engine as two measurements, exactly what `sr_eval` avoids for the same reason.
+    assert any("precision=fp32,fp16,int8,fp8 calibration_method=max" in x for x in labels)
+    assert any("precision=int8,fp8 calibration_method=entropy" in x for x in labels)
+    assert all("track=" in x and "sr=" in x for x in labels)
 
 
 def test_report_and_clock_norm_render_once_per_method():

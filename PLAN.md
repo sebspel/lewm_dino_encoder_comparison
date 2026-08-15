@@ -714,19 +714,21 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
 
 - [x] 🟢 **Persist them.** `src/study.py::dump_track_latencies` writes
   `latencies.<track>.json` beside `results.<track>.json` — `{meta: {track, n_latency_iters, warmup,
-  calibration_method, seed, written}, latencies: {precision: {encode_ms: [...], predict_ms: [...]}}}` —
-  merged **per precision** with `dump_track_results`' no-clobber discipline, called BEFORE rendering.
-  Keyed by precision only (latency is method-invariant; method is provenance in `meta`).
+  calibration_method, methods, seed, written}, latencies: {precision: {method: {encode_ms: [...],
+  predict_ms: [...]}}}}` — merged **per (precision, method)** with `dump_track_results`' no-clobber
+  discipline, called BEFORE rendering. Keyed by method because the quantized plans are per-method
+  builds, so a second method's timing pass is additive (SPEC §Parity, CLAUDE §8).
   → **landed (off-pod ✔):** `run_track` returns `(name, bench, samples)`; `main` dumps results then
   latencies before the render. `tests/test_study.py::test_dump_track_latencies_roundtrips_and
   _records_the_loop_conditions`, `::test_dump_track_latencies_is_additive_per_precision`.
   → verify (✔): round-trips through `stats.load_component_latencies`; a later single-precision run
   preserves the other precisions; `results.<track>.json` schema unchanged.
 
-- [x] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, component): `order_statistic_ci`
+- [x] 🟢 **`src/stats.py::compute_components`.** Per (track, precision, method, component):
+  `order_statistic_ci`
   + `dwass_permutation_test` over the stored vector — existing helpers, no new estimator. Own Holm
   family, separate from the per-cycle one. New top-level `points_components` section
-  (`[track][precision][encode|predict]`, method-free); `points` untouched. CLI auto-discovers
+  (`[track][precision][method][encode|predict]`); `points` untouched. CLI auto-discovers
   `latencies.*.json` beside `sr.json`, plus explicit `latencies=<dir|file>`; absent → section omitted.
   `meta` records the component sample rule, both family sizes, and `holm_scope`.
   → **landed (off-pod ✔):** `compute(component_latencies=)` threads it through;
@@ -742,8 +744,9 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
 
 - [x] 🟢 **Render on the speed table.** `render_speed_table` gains `enc_p50_CI95`, `enc_ac`,
   `pred_p50_CI95`, `pred_ac` beside the existing component columns (reuse `_ci` / `_ac_flag`; every
-  cell stays ONE whitespace-delimited token). `_component_stats_lookup` walks `points_components` with
-  **no** method fallback. `src.report from=` loads `latencies.*.json` from the source dir.
+  cell stays ONE whitespace-delimited token). `_component_stats_lookup` walks `points_components` at
+  the rendered method (`report.method_key`: fp32/fp16 read across labels, quantized never do).
+  `src.report from=` loads `latencies.*.json` from the source dir.
   → **landed (off-pod ✔):** `report(component_latencies=)`, picked up automatically by the
   `from=` re-render. `tests/test_report.py::test_speed_table_carries_component_intervals_and_stays
   _parseable`, `::test_component_intervals_do_not_touch_the_derived_tables`,
@@ -763,10 +766,10 @@ unchanged**: `n_latency_iters=100` timed, `warmup=10` dropped, same batches and 
   post-run comparison.
 
 - [x] 🖥️ **Re-run the per-component benchmark, both tracks:** `uv run python -m src.study
-  track=<lewm|dino> calibration_method=entropy` (component latency is method-invariant → one pass per
-  track; the method is recorded as provenance).
+  track=<lewm|dino> calibration_method=entropy` — one pass per track, recording that method's cells
+  (the `max` cells are the separate pass below).
   → **done (2026-08-07):** both tracks, all four precisions. `latencies.{lewm,dino}.json` carry
-  **100 values per component per precision** (1600 raw values); `meta` records
+  **100 values per component per precision at `entropy`** (1600 raw values); `meta` records
   `n_latency_iters=100, warmup=10, calibration_method=entropy, seed=0`.
   → **`sr.json` re-baselined, not violated:** two LeWM FP8 isolation evals (`enc-fp8+pred-fp16`,
   `enc-fp16+pred-fp8` @ `entropy`) ran BEFORE the study, so `sr.json` moved
@@ -859,9 +862,52 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   FP8 (max), FP8 (entropy)}); `sha256sum` of `sr.json`, `results.*.json` and `latencies.*.json`
   unchanged. Phase 10 needs no new stage — `stages=stats,report` already covers it.
 
+### Component latencies per calibration method — the `max` int8/fp8 timing pass
+
+The quantized engines are per-method BUILDS, so their measured latencies are keyed
+`(track, precision, method)` like their SR, and each method's plans are timed on their own
+(SPEC §Parity). The `entropy` cells stand; this closes the `max` ones. **No `sr_eval` run** — SR and
+the per-cycle sample are already recorded at both methods; only the component timing is outstanding.
+
+- [ ] 🟢 **Method axis on the measured artefacts.** `results.<track>.json` `bench` and
+  `latencies.<track>.json` `latencies` keyed `{precision: {method: …}}`, merged per cell
+  (`study._merge_by_method`); `report.method_key`/`select_by_method` is the ONE selection rule
+  (fp32/fp16 read across labels, quantized never fall back) and `report.load_results(paths, method)`
+  collapses to the render's method; `stats.compute_components` gains the method axis and
+  `compute_means` weights each row with its own method's vectors, stamping `component_method`;
+  `src.study precision=<list>` benchmarks a subset. A legacy flat entry folds under its file's
+  `meta.calibration_method`, so the recorded `entropy` cells keep their own label.
+  → **landed (off-pod ✔):** `tests/test_study.py::test_a_second_methods_benchmark_lands_beside
+  _the_first`, `::test_a_quantized_precision_never_borrows_the_other_methods_numbers`;
+  `tests/test_stats.py::test_component_points_are_keyed_per_calibration_method`,
+  `::test_a_quantized_mean_row_needs_its_own_methods_components`,
+  `::test_a_method_invariant_mean_row_records_which_run_timed_it`;
+  `tests/test_report.py::test_component_intervals_are_selected_by_calibration_method`.
+  `pytest` 186 passed.
+
+- [ ] 🖥️ **Archive first (CLAUDE §8):** `uv run python -m src.pipeline stages=archive`.
+  → verify: every superseded file has a `cmp`-verified copy; `PRE_RUN_SHA256.txt` written.
+
+- [ ] 🖥️ **Time the `max` int8/fp8 engines, both tracks:** `uv run python -m src.study
+  track=<lewm|dino> precision=int8,fp8 calibration_method=max out=$STABLEWM_HOME/reports/phase5
+  sr=$STABLEWM_HOME/reports/phase5/sr.json` (the plans already stand — `{encoder,predictor}
+  .<int8|fp8>.max.plan`; fp32/fp16 are one data-free build and are NOT re-timed).
+  → verify: `results.{lewm,dino}.json` + `latencies.{lewm,dino}.json` carry `int8`/`fp8` under
+  **both** `max` and `entropy`, 100 values per component per cell; every pre-existing `entropy` cell
+  byte-unchanged against the archive; a fresh `<track>.<precision>.max.benchmark.dmon.log` per run.
+
+- [ ] 🟢 **Regenerate downstream, in order (off-pod):** (1) `src.stats` → `stats.json` with the
+  `max` component + mean points beside the `entropy` ones; (2) `src.report from=… sr=…
+  calibration_method=<max|entropy>` — both renders; (3) `src.clock_norm` at both methods (the `max`
+  quantized rows now normalize with the `max` benchmark telemetry); (4) refresh `reports/figs/`.
+  → verify: the `max` speed table's int8/fp8 rows carry component intervals instead of `—`, the
+  `entropy` tables are byte-unchanged, and `sr.json` stays byte-unchanged throughout.
+
 **Verify:** owner sign-off recorded before any component interval; `latencies.{lewm,dino}.json` on the
-volume with the loops' raw samples; every benchmarked speed-table row carries a component p50 interval
-and an `ac` flag; the five mean per-cycle quantities carry bootstrap intervals + inherited flags in
+volume with the loops' raw samples, keyed per (precision, method) and covering both methods' quantized
+engines; every benchmarked speed-table row carries a component p50 interval — its OWN method's, never
+the other's — and an `ac` flag; the five mean per-cycle quantities carry bootstrap intervals +
+inherited flags in
 `latency_means_table.txt`; no interval on any p95, on the dilution shares/speedups, or on any
 difference or ratio other than the named `overhead` decomposition; `sr.json`, `results.*.json` and
 `latencies.*.json` byte-unchanged by the analysis.
@@ -883,14 +929,17 @@ torch baseline are outside its scope — neither runs through an engine.
   `pytest`/`verify_encode`/`smoke`/`fidelity`/`sr_shim`/`probe_ranges`/`precision_match` behind
   `diagnostics=true`), `dry_run=`/`stages=`/`tracks=`/`out=` CLI, fail-fast with a resume line, and
   `<out>/pipeline_manifest.json` written after every step.
-  → **isolation at both methods landed (off-pod ✔):** the `isolation` stage loops
-  `CALIBRATION_METHODS` as `report`/`clock_norm` already do; the `_ISOLATION_METHOD` constant is
-  retired (`_BENCHMARK_METHOD` stays — component latency is method-invariant, so that one is
-  provenance). All engines already exist → `export` unchanged.
-  → verify (off-pod ✔): `uv run python -m src.pipeline dry_run=true` lists **41** steps — 12 export,
-  4 sr_eval, **16** isolation, 2 benchmark, 1 stats, 2 report, 2 clock_norm + archive + figs;
+  → **isolation and benchmark at both methods landed (off-pod ✔):** both stages loop
+  `CALIBRATION_METHODS` as `report`/`clock_norm` already do; the `_ISOLATION_METHOD` and
+  `_BENCHMARK_METHOD` constants are retired. `benchmark` follows `sr_eval`'s shape — the default
+  method's pass covers every precision, a further method only the quantized ones (fp32/fp16 are one
+  data-free build, timed once). All engines already exist → `export` unchanged.
+  → verify (off-pod ✔): `uv run python -m src.pipeline dry_run=true` lists **43** steps — 12 export,
+  4 sr_eval, **16** isolation, **4** benchmark, 1 stats, 2 report, 2 clock_norm + archive + figs;
   `tests/test_pipeline.py::test_isolation_holds_one_component_at_fp16_per_run` asserts 16 labels,
-  `per_method` under each of the two methods, exactly one side quantized per run. `pytest` 167 passed.
+  `per_method` under each of the two methods, exactly one side quantized per run;
+  `::test_benchmark_times_each_methods_engines_in_its_own_process` asserts the 4 passes and the
+  quantized-only second method. `pytest` 186 passed.
 
 - [x] 🖥️ **Archive first (CLAUDE §8 — log before you delete).** `uv run python -m src.pipeline
   stages=archive` → `$STABLEWM_HOME/reports/phase5/archive/<UTC date>/`.
@@ -941,7 +990,9 @@ from; `pipeline_manifest.json` records every step's command, exit code and durat
   `src/calibrate.py`, `src/probe_ranges.py`, `src/benchmark.py`, `src/report.py`, `src/study.py`,
   `src/smoke.py` — the owned layer (Phases 4–6). From Phase 9 `src/benchmark.py` also returns the
   engine-step loops' raw per-call samples and `src/study.py` persists them to
-  `latencies.<track>.json`, beside (never inside) `results.<track>.json`.
+  `latencies.<track>.json`, beside (never inside) `results.<track>.json`. Both files are keyed
+  `{precision: {calibration method: …}}` and merged per cell, so each method's engines are timed and
+  recorded on their own (`report.method_key` is the single selection rule the renders use).
 - `src/precision_match.py`, `src/fidelity.py`, `src/sr_shim.py`, `src/sr_eval.py`,
   `src/trt_runtime.py` — the gates + engine-backed SR path.
 - `src/pipeline.py` — Phase-10 end-to-end driver: sequences the Phase-5→9 drivers as isolated
@@ -957,7 +1008,8 @@ from; `pipeline_manifest.json` records every step's command, exit code and durat
   Writes **no** disclosure prose (SPEC §Implementation Boundaries).
 - `src/stats.py` — Phase-8/9 confidence intervals (off-pod): Clopper–Pearson SR + exact binomial
   order-statistic p50 intervals over the stored `sr.json` samples **and the component p50 intervals
-  over `latencies.<track>.json`** (Holm scoped per measurement surface), the Dwass lag-1 permutation
+  over `latencies.<track>.json`, per (track, precision, method)** (Holm scoped per measurement
+  surface), the Dwass lag-1 permutation
   test, Holm secondary values, **and the percentile-bootstrap intervals on the five mean per-cycle
   quantities** (`points_means`, rendered as `latency_means_table.txt` by `src/report.py`) →
   `stats.json`. Shares the per-cycle sample rule with `src/report.py`.
@@ -1010,10 +1062,11 @@ from; `pipeline_manifest.json` records every step's command, exit code and durat
    absolute per-cycle p50 carries its 95% interval in the tables and as error bars on the
    speed-vs-SR plot, the lag-1 independence test is reported per run, and no interval sits on a
    difference or ratio (Phase 8).
-9. The engine-step loops persist their raw per-call samples to `latencies.<track>.json` on the volume;
+9. The engine-step loops persist their raw per-call samples to `latencies.<track>.json` on the volume,
+   per (precision, calibration method) so both methods' quantized engines are timed and kept;
    `src.stats` extends the intervals to the encode-/predictor-step p50s off those samples (own Holm
-   family, no truncation, no report-time drop) and the speed table carries a component interval + `ac`
-   flag on every benchmarked row; the same off-pod pass adds the five mean per-cycle quantities
+   family, no truncation, no report-time drop) and the speed table carries that method's component
+   interval + `ac` flag on every benchmarked row; the same off-pod pass adds the five mean per-cycle quantities
    (`enc_cyc`, `pred_cyc`, `t_comp`, `cycle`, `overhead`) with percentile-bootstrap intervals and
    inherited independence markers to `stats.json` + `latency_means_table.txt`, with `sr.json` /
    `results.*.json` / `latencies.*.json` byte-unchanged (Phase 9).

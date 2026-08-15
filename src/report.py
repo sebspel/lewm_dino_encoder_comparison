@@ -114,6 +114,51 @@ def _percentile_ms(values, q: float) -> float:
     return torch.quantile(torch.tensor(values, dtype=torch.float64), q).item()
 
 
+# --- calibration-method selection (shared by src.study / src.stats / this module) ------
+def as_method_map(entry: dict, recorded_method: str = DEFAULT_CALIBRATION_METHOD) -> dict:
+    """One stored per-precision entry -> `{method: payload}`.
+
+    Every measured artefact keyed by precision — the benchmark numbers in `results.<track>.json`
+    and the engine-step samples in `latencies.<track>.json` — is keyed by (precision, METHOD), so a
+    quantized precision's two builds are two coexisting points rather than one overwriting the other
+    (SPEC §Parity). A method map's values are themselves dicts; a flat entry's are floats or lists,
+    which is how the two are told apart without a schema flag.
+
+    `recorded_method` is the label a flat entry belongs to — the writing run's own
+    `meta.calibration_method`, never a guess: folding an `entropy`-recorded measurement under `max`
+    would mislabel a real measurement, the failure this keying exists to prevent."""
+    if entry and all(isinstance(v, dict) for v in entry.values()):
+        return entry
+    return {recorded_method: entry}
+
+
+def method_key(by_method: dict, precision: str, method: str) -> str | None:
+    """WHICH label a `method` render reads out of a `{method: payload}` map, or None if none.
+
+    **FP32/FP16 fall back across labels; quantized precisions never do.** The unquantized engines
+    build data-free off the base graph — one build, no scales — so whichever run recorded them, the
+    number describes the same engine and a label is only the stamp of the run that recorded it.
+    An INT8/FP8 engine is a per-method BUILD, so falling back there would report one method's engine
+    under the other's name — silently, and in the exact column a reader compares the methods in.
+
+    Returned rather than only the payload so a consumer can RECORD which measurement it read
+    (`src.stats` stamps it on the mean rows), instead of leaving the fallback implicit."""
+    if by_method.get(method) is not None:
+        return method
+    if precision not in _METHOD_INVARIANT_PRECISIONS:
+        return None
+    for m in (DEFAULT_CALIBRATION_METHOD, *sorted(by_method)):
+        if by_method.get(m) is not None:
+            return m
+    return None
+
+
+def select_by_method(by_method: dict, precision: str, method: str):
+    """The payload `method_key` selects, or None."""
+    key = method_key(by_method, precision, method)
+    return None if key is None else by_method[key]
+
+
 # --- per-component decomposition (overhead by subtraction from the measured cycle) ----
 def decompose(r: dict) -> dict:
     """One BenchResult → the per-cycle time decomposition (SPEC §Interface Contracts).
@@ -281,8 +326,9 @@ def _method_line(method: str) -> str:
     Both the SR and (via the joined eval-shim run) the per-cycle percentiles are method-sourced,
     so this line qualifies the whole table, not just the SR column."""
     return (
-        f"  calibration_method = {method}  (int8/fp8 SR + the per-cycle sample they were measured "
-        "on; fp32/fp16 method-invariant)"
+        f"  calibration_method = {method}  (every int8/fp8 number in this table — SR, the per-cycle "
+        "sample it was measured on, and the engine-step latencies — comes from that method's own "
+        "runs; fp32/fp16 build data-free and are read across labels)"
     )
 
 
@@ -298,27 +344,28 @@ def _stats_lookup(payload: dict | None, track: str, precision: str, method: str)
     shows those rows an SR but no interval, purely from a label."""
     if not payload:
         return {}
-    by_method = payload.get("points", {}).get(track, {}).get(precision, {})
-    hit = by_method.get(method)
-    if hit is not None or precision not in _METHOD_INVARIANT_PRECISIONS:
-        return hit or {}
-    for m in (DEFAULT_CALIBRATION_METHOD, *sorted(by_method)):
-        if by_method.get(m):
-            return by_method[m]
-    return {}
+    # Empty points are dropped before selection: `src.stats` files an entry for every (label, method)
+    # it sees, including ones with neither an SR nor a sample, and a fallback that stopped at one of
+    # those would report "no interval" while a usable point sat under the next label.
+    by_method = {
+        m: e for m, e in payload.get("points", {}).get(track, {}).get(precision, {}).items() if e
+    }
+    return select_by_method(by_method, precision, method) or {}
 
 
-def _component_stats_lookup(payload: dict | None, track: str, precision: str, component: str) -> dict:
+def _component_stats_lookup(
+    payload: dict | None, track: str, precision: str, method: str, component: str
+) -> dict:
     """One component point out of a `src.stats` payload's `points_components` section, or `{}` so a
     missing point renders as a blank cell.
 
-    **No method fallback, because there is no method axis**: component latency is
-    calibration-method-invariant (SPEC §Parity), so `src.study` keys the stored samples by precision
-    alone. `_stats_lookup`'s fallback exists to undo a label `src.sr_eval` stamps on method-invariant
-    SR points; there is no such label to undo here."""
+    Selected by calibration method with `select_by_method`'s rule — an int8/fp8 engine is a
+    per-method build, so its timing is that method's and never stands in for the other's, while
+    fp32/fp16 fall back across labels because there is only one such engine to have timed."""
     if not payload:
         return {}
-    return payload.get("points_components", {}).get(track, {}).get(precision, {}).get(component, {})
+    by_method = payload.get("points_components", {}).get(track, {}).get(precision, {})
+    return (select_by_method(by_method, precision, method) or {}).get(component, {})
 
 
 def _ci(bounds, n: int = 3) -> str:
@@ -394,9 +441,9 @@ def render_latency_means_table(stats_payload: dict | None) -> str:
         "  (each cell = point[lo,hi]: a 95% non-parametric percentile BOOTSTRAP interval, "
         "paired=False, over the same stored samples the p50 intervals use — construction + seed in "
         "stats.json)",
-        "  (enc/pred sample = the fixed-iteration engine-step loop as recorded; cycle sample = the "
-        "warm-up-dropped, equal-n-truncated per-cycle vector — enc/pred are calibration-method-"
-        "invariant, so they repeat across a precision's two methods)",
+        "  (enc/pred sample = the fixed-iteration engine-step loop as recorded, timed on THAT "
+        "method's engines; cycle sample = the warm-up-dropped, equal-n-truncated per-cycle vector "
+        "from the same method's eval run)",
         "  (trailing * = that sample's Dwass lag-1 test REJECTS independence at the unadjusted p "
         "(interval too NARROW), - = does not, — = untested; t_comp and ovh carry no marker — a flag "
         "describes a sample, and they are functions of two and three)",
@@ -475,10 +522,10 @@ def render_speed_table(
             p50 = r["per_cycle_p50_ms"]
             drop_x = max(dropped) / p50 if dropped and not _missing(p50) and p50 else None
             point = _stats_lookup(stats_payload, track, prec, method)
-            # Component intervals are keyed by (track, precision) alone — no method axis, because
-            # component latency is method-invariant (SPEC §Parity).
-            enc_pt = _component_stats_lookup(stats_payload, track, prec, "encode")
-            pred_pt = _component_stats_lookup(stats_payload, track, prec, "predict")
+            # Component intervals are keyed by (track, precision, method): a quantized engine is a
+            # per-method build, so its step loop is that method's measurement (SPEC §Parity).
+            enc_pt = _component_stats_lookup(stats_payload, track, prec, method, "encode")
+            pred_pt = _component_stats_lookup(stats_payload, track, prec, method, "predict")
             lines.append(
                 f"{track:>6} {prec:>5} "
                 f"{_sig(r['per_cycle_p50_ms'], 5):>8} "
@@ -634,8 +681,8 @@ def render_calibration_table(
         [
             "  (int8/fp8 only — fp32/fp16 are method-invariant. PEND = that method's engines were "
             "not built/evaluated for this cell)",
-            "  (`headline` = the method the single-method tables were rendered at; latency is "
-            "method-invariant, so only SR differs here)",
+            "  (`headline` = the method the single-method tables were rendered at; this table "
+            "compares SR alone — each method's latencies are in its own method-scoped speed table)",
             f"  (CI95 = Clopper-Pearson 95% on each ABSOLUTE SR over {EVAL_NUM_EPISODES} episodes; "
             f"{delta_label} carries none — no interval on a difference. Overlapping intervals do "
             "NOT by themselves settle whether the methods differ.)",
@@ -879,10 +926,12 @@ def _speed_vs_sr_points(bench: dict, track: str, method: str, stats_payload: dic
         methods = CALIBRATION_METHODS if prec in QUANTIZED_PRECISIONS else (method,)
         for i, m in enumerate(methods):
             point = _stats_lookup(stats_payload, track, prec, m)
-            if m == method:
-                r = bench.get(track, {}).get(prec) or {}
-                x, y = r.get("per_cycle_p50_ms"), r.get("success_rate")
-            else:  # the off-method quantized point exists only in the stats payload
+            r = bench.get(track, {}).get(prec) or {} if m == method else {}
+            x, y = r.get("per_cycle_p50_ms"), r.get("success_rate")
+            if _missing(x) or _missing(y):
+                # The off-method quantized point, and any config whose engines this render has no
+                # benchmark row for: both axes are eval-shim quantities, so the stats payload
+                # carries them whether or not the component benchmark has been run at this method.
                 x, y = point.get("per_cycle_p50_ms"), point.get("success_rate")
             if _missing(x) or _missing(y):
                 continue
@@ -1062,13 +1111,7 @@ def _select_method(raw, method: str, precision: str | None = None):
         return raw  # plain number: method-agnostic manual SR override
     if "success_rate" in raw:  # legacy flat entry == max-calibrated (pre-labelling)
         return raw if method == DEFAULT_CALIBRATION_METHOD else None
-    hit = raw.get(method)  # labelled {method: SR} map
-    if hit is not None or precision not in _METHOD_INVARIANT_PRECISIONS:
-        return hit
-    for m in (DEFAULT_CALIBRATION_METHOD, *sorted(raw)):
-        if raw.get(m) is not None:
-            return raw[m]
-    return None
+    return select_by_method(raw, precision, method)  # labelled {method: SR} map
 
 
 def _join_eval(bench: dict, overrides: dict | None, method: str) -> None:
@@ -1163,16 +1206,31 @@ def _finalize_per_cycle(bench: dict, warmup_drop: int = PER_CYCLE_WARMUP_DROP) -
 
 
 # --- durable results I/O (canonical per-track JSON <-> render) ------------------------
-def load_results(paths) -> dict:
+def load_results(paths, method: str = DEFAULT_CALIBRATION_METHOD) -> dict:
     """Load + merge the per-track `results.<track>.json` files (written by `src.study`) back
     into the nested `bench[track][precision]` shape `report` consumes — so the headline
     re-renders OFF-POD from the canonical numbers, no L40S benchmark re-run (to join the gated
     per-cycle latency + SR, or tweak a plot). Whichever track files exist are merged; NaN
-    latencies/SRs round-trip via the `NaN` json token."""
+    latencies/SRs round-trip via the `NaN` json token.
+
+    On disk each precision holds a `{method: BenchResult}` map — the quantized engines are per-method
+    builds, so their timings coexist (SPEC §Parity) — and `method` selects which one this render
+    reads, by `select_by_method`'s rule: fp32/fp16 fall back across labels, int8/fp8 never do. A
+    quantized precision this method never benchmarked is simply ABSENT from `bench`, which is what
+    keeps its row out of every table rather than borrowing the other method's number.
+
+    A legacy flat entry (written before the method keying) belongs to the label its file's
+    `meta.calibration_method` records — that run's own method, not an assumed default."""
     bench: dict = {}
     for p in paths:
         data = json.loads(Path(p).read_text())
-        bench[data["meta"]["track"]] = data["bench"]
+        recorded = data["meta"].get("calibration_method", DEFAULT_CALIBRATION_METHOD)
+        rows = {}
+        for precision, entry in data["bench"].items():
+            r = select_by_method(as_method_map(entry, recorded), precision, method)
+            if r is not None:
+                rows[precision] = r
+        bench[data["meta"]["track"]] = rows
     return bench
 
 
@@ -1198,10 +1256,11 @@ def report(
     latency; any still-unpaired row is flagged loudly (a speed number without its SR is NOT a
     validated win — SPEC "no speed number without its task-quality counterpart").
 
-    `method` (`max` | `entropy`) selects which calibration method's quantized SR to join for
-    int8/fp8, so a render is like-for-like across tracks (SPEC §Parity). sr.json holds both, so
-    switching `method` re-renders the other without rebuilding. FP32/FP16 SR is method-invariant.
-    The cross-track LATENCY headline does not depend on `method`.
+    `method` (`max` | `entropy`) selects which calibration method's quantized points to render —
+    the SR and per-cycle sample joined from sr.json AND the engine-step latencies the caller loaded
+    for `bench`/`component_latencies` — so a render is like-for-like across tracks (SPEC §Parity).
+    Both methods' points sit on the volume, so switching `method` re-renders the other without
+    rebuilding or re-measuring. FP32/FP16 carry one data-free build and are read across labels.
 
     `warmup_drop` (default 1) drops that many cold decisions from the head of each per-cycle vector
     before the equal-n truncation, matching the engine loops' warm-up drop so the decomposition
@@ -1221,7 +1280,7 @@ def report(
     re-analysis of the same stored samples — no run, no GPU — so it rides this cheap render rather
     than requiring a `src.study` pass.
 
-    `component_latencies` ({track: {precision: {encode_ms, predict_ms}}}, from
+    `component_latencies` ({track: {precision: {method: {encode_ms, predict_ms}}}}, from
     `latencies.<track>.json`) adds the component p50 intervals + independence flags to the speed
     table's enc/pred columns. Independent of `sr_overrides`: the component samples are their own
     surface, so they render with or without a joined SR. With BOTH present it also yields
@@ -1260,8 +1319,9 @@ def report(
         )
 
     print(
-        f"Calibration method for int8/fp8 SR: {method} "
-        "(fp32/fp16 method-invariant; latency headline method-invariant — SPEC §Parity)\n"
+        f"Calibration method for the int8/fp8 rows: {method} "
+        "(SR + latency, both taken from that method's own runs; fp32/fp16 build data-free and are "
+        "read across labels — SPEC §Parity)\n"
     )
     speed_table = render_speed_table(bench, method, warmup_drop, stats_payload)
     fp32_table = render_fp32_relative_table(bench, method)
@@ -1289,7 +1349,7 @@ def report(
     print(dilution_table)
     if calibration_table:
         print()
-        print("Calibration method comparison (SR only — latency is method-invariant):")
+        print("Calibration method comparison (SR side by side, both methods):")
         print(calibration_table)
 
     # Durability: serialize each table to a .txt on disk (not stdout/W&B-HTML only), so a
@@ -1418,13 +1478,14 @@ def main() -> None:
         uv run python -m src.report from=<dir> sr=<sr.json> calibration_method=entropy
         uv run python -m src.report from=<dir> sr=<sr.json> per_cycle_warmup=0
 
-    `calibration_method` (default `max`) selects which method's int8/fp8 SR to render from sr.json
-    (which holds both); re-run with `=entropy` for the entropy view — same sr.json, no rebuild.
+    `calibration_method` (default `max`) selects which method's int8/fp8 points to render — the SR
+    from sr.json and the benchmark numbers from `results.<track>.json`, both of which hold every
+    method; re-run with `=entropy` for the entropy view — same files, no rebuild and no re-measure.
     `per_cycle_warmup` (default 1) is the cold decisions dropped before the equal-n truncation;
     `=0` reproduces the undropped view. Neither rewrites any canonical results file.
 
     `latencies.<track>.json` is picked up automatically from the source dir when present, adding the
-    component p50 intervals to the speed table's enc/pred columns.
+    component p50 intervals for the rendered method to the speed table's enc/pred columns.
     """
     src = None
     out_dir = None
@@ -1452,7 +1513,7 @@ def main() -> None:
     paths = _resolve_result_paths(src)
     if not paths:
         raise SystemExit(f"[report] no results.*.json under {src} — run `src.study` first")
-    bench = load_results(paths)
+    bench = load_results(paths, method)
     src_dir = Path(src) if Path(src).is_dir() else Path(src).parent
     if out_dir is None:
         out_dir = src_dir

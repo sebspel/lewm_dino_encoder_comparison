@@ -10,10 +10,11 @@ the latency interval rests on:
     SAME warm-up-dropped, equal-n-truncated sample the reported p50 is computed from
     (`report.per_cycle_samples` — shared, never reimplemented here).
   - **encode-step / predictor-step p50 latency** → that same order-statistic interval over the
-    engine-step loop sample stored in `latencies.<track>.json`. That sample needs neither truncation
-    nor a warm-up drop: the loop is fixed-iteration (n equal across tracks by construction) and drops
-    its warm-up before the first timed call, so the recorded vector IS the sample. p50 only — no
-    interval on a p95 or a mean.
+    engine-step loop sample stored in `latencies.<track>.json`, per (track, precision, **calibration
+    method**) — the quantized engines are per-method builds, so each has its own sample. That sample
+    needs neither truncation nor a warm-up drop: the loop is fixed-iteration (n equal across tracks
+    by construction) and drops its warm-up before the first timed call, so the recorded vector IS the
+    sample. p50 only — no interval on a p95 or a mean.
   - **the i.i.d. premise** that interval rests on → a two-sided **Dwass Monte-Carlo permutation
     test** on the sample's **lag-1 autocorrelation** (50,000 permutations, statistic used raw with
     NO Student-t transform). Serial correlation would make the interval too NARROW — a stronger
@@ -428,8 +429,9 @@ def compute(
                 else {
                     "component_estimator": "exact-binomial-order-statistic (p50 only)",
                     "component_sample_rule": (
-                        "the fixed-iteration engine-step loop sample as recorded — warm-up dropped "
-                        "at record time, no truncation, no report-time drop"
+                        "the fixed-iteration engine-step loop sample as recorded, per (track, "
+                        "precision, calibration method) — warm-up dropped at record time, no "
+                        "truncation, no report-time drop"
                     ),
                     "holm_family_size_components": components["holm_family_size"],
                 }
@@ -478,15 +480,17 @@ def compute_components(
     n_resamples: int = PERMUTATION_RESAMPLES,
     seed: int = PERMUTATION_SEED,
 ) -> dict:
-    """Every (track, precision, component) engine-step sample -> its p50 interval + independence
-    test. Same estimator and same test as the per-cycle p50 — only the SAMPLE differs, and it differs
-    by being simpler: the loop is fixed-iteration and drops its warm-up at RECORD time, so the stored
-    vector is already the sample (no equal-n truncation, no report-time drop —
+    """Every (track, precision, method, component) engine-step sample -> its p50 interval +
+    independence test. Same estimator and same test as the per-cycle p50 — only the SAMPLE differs,
+    and it differs by being simpler: the loop is fixed-iteration and drops its warm-up at RECORD
+    time, so the stored vector is already the sample (no equal-n truncation, no report-time drop —
     docs/architecture.md §12).
 
-    `latencies_by_track` is `{track: {precision: {encode_ms: [...], predict_ms: [...]}}}` — the
-    `latencies` block of `latencies.<track>.json`. Method-free by design: component latency is
-    calibration-method-invariant (SPEC §Parity).
+    `latencies_by_track` is `{track: {precision: {method: {encode_ms: [...], predict_ms: [...]}}}}` —
+    the `latencies` block of `latencies.<track>.json`. The method axis is the engine's: int8/fp8 are
+    per-method builds, so each method's loop is its own measurement and gets its own interval
+    (SPEC §Parity). FP32/FP16 are one build recorded under whichever run timed them, and a render
+    reads them across labels (`report.select_by_method`) rather than duplicating the point here.
 
     **p50 only.** No interval on the p95 (it carries no claim — SPEC §Interface Contracts), on the
     means (the decomposition basis, an algebraic identity rather than an inference), or on anything
@@ -499,26 +503,29 @@ def compute_components(
     points: dict = {}
     raw_p: dict = {}
     for track, by_precision in latencies_by_track.items():
-        for precision, vectors in by_precision.items():
-            for component, key in _COMPONENTS.items():
-                sample = list(vectors.get(key) or [])
-                if not sample:
-                    continue
-                ci = order_statistic_ci(sample, _MEDIAN_Q, alpha)
-                entry = {
-                    "p50_ms": report._percentile_ms(sample, _MEDIAN_Q),
-                    "n": len(sample),  # timed iterations the interval is computed over
-                    "p50_ci95_ms": None if ci is None else [ci["lo"], ci["hi"]],
-                    "p50_ci_ranks": None if ci is None else ci["ranks"],
-                    "p50_ci_coverage": None if ci is None else ci["coverage"],
-                }
-                entry.update(dwass_permutation_test(sample, n_resamples, seed, alpha))
-                points.setdefault(track, {}).setdefault(precision, {})[component] = entry
-                raw_p[(track, precision, component)] = entry["lag1_p_permutation"]
+        for precision, by_method in by_precision.items():
+            for method, vectors in by_method.items():
+                for component, key in _COMPONENTS.items():
+                    sample = list(vectors.get(key) or [])
+                    if not sample:
+                        continue
+                    ci = order_statistic_ci(sample, _MEDIAN_Q, alpha)
+                    entry = {
+                        "p50_ms": report._percentile_ms(sample, _MEDIAN_Q),
+                        "n": len(sample),  # timed iterations the interval is computed over
+                        "p50_ci95_ms": None if ci is None else [ci["lo"], ci["hi"]],
+                        "p50_ci_ranks": None if ci is None else ci["ranks"],
+                        "p50_ci_coverage": None if ci is None else ci["coverage"],
+                    }
+                    entry.update(dwass_permutation_test(sample, n_resamples, seed, alpha))
+                    points.setdefault(track, {}).setdefault(precision, {}).setdefault(
+                        method, {}
+                    )[component] = entry
+                    raw_p[(track, precision, method, component)] = entry["lag1_p_permutation"]
 
     for key, adj in holm(raw_p).items():
-        track, precision, component = key
-        entry = points[track][precision][component]
+        track, precision, method, component = key
+        entry = points[track][precision][method][component]
         entry["lag1_p_holm"] = adj
         entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
     return {"points": points, "holm_family_size": len(raw_p)}
@@ -604,8 +611,9 @@ def compute_means(
 
     `per_cycle_samples` is `compute`'s `{(label, method): {track: sample}}` — the SAME reduced
     samples the p50 intervals are built on, passed in rather than recomputed so the mean and the p50
-    can never describe different decisions. `latencies_by_track` is the method-free component block;
-    `points` / `component_points` are the two interval sections, read only for their lag-1 verdicts.
+    can never describe different decisions. `latencies_by_track` is the component block, keyed by
+    (precision, method); `points` / `component_points` are the two interval sections, read only for
+    their lag-1 verdicts.
 
     Everything is weighted onto the per-cycle scale by the CEM call counts, so the point estimates
     are `report.decompose`'s and the columns add up: `t_comp = enc_cyc + pred_cyc`,
@@ -615,7 +623,11 @@ def compute_means(
     never benchmarked for latency, so no component sample exists for them (architecture.md §9); a
     row for them would be a mean weighted by components that were never timed. Method-invariant
     precisions collapse to ONE row (the `max`-first pick `report._stats_lookup` uses), since their
-    method label is only the stamp of whichever run recorded them."""
+    method label is only the stamp of whichever run recorded them.
+
+    Each row's component vectors are that row's OWN method's (`report.select_by_method`): a quantized
+    row weights the engines its cycle was measured on, and a method whose engines were never timed
+    gets no row rather than a mean built out of the other method's components."""
     by_track_label: dict = {}
     for (label, method), by_track in per_cycle_samples.items():
         for track, sample in by_track.items():
@@ -624,19 +636,21 @@ def compute_means(
     out: dict = {}
     n_points = 0
     for (track, label), by_method in sorted(by_track_label.items()):
-        vectors = latencies_by_track.get(track, {}).get(label)
-        if not vectors:
-            continue  # no engine-step samples at this label — composites, or a track never benchmarked
-        enc = list(vectors.get("encode_ms") or [])
-        pred = list(vectors.get("predict_ms") or [])
-        if not enc or not pred:
-            continue
+        by_method_vectors = latencies_by_track.get(track, {}).get(label) or {}
         methods = sorted(by_method)
         if label not in QUANTIZED_PRECISIONS:
             methods = [
                 DEFAULT_CALIBRATION_METHOD if DEFAULT_CALIBRATION_METHOD in by_method else methods[0]
             ]
         for method in methods:
+            comp_method = report.method_key(by_method_vectors, label, method)
+            if comp_method is None:
+                continue  # never benchmarked at this method — composites, or a pending timing run
+            vectors = by_method_vectors[comp_method]
+            enc = list(vectors.get("encode_ms") or [])
+            pred = list(vectors.get("predict_ms") or [])
+            if not enc or not pred:
+                continue
             cycle = by_method[method]
             # `statistics.fmean`, not `np.mean`: `benchmark._mean_ms` and
             # `report._finalize_per_cycle` both use it, so the point estimates here are byte-equal
@@ -647,10 +661,15 @@ def compute_means(
             # Grouped exactly as `report.decompose` groups them (`cycle - (enc + pred)`), so the two
             # renderings of the same decomposition agree to the last bit, not just to a tolerance.
             t_comp = enc_cyc + pred_cyc
-            comp_pt = component_points.get(track, {}).get(label, {})
+            comp_pt = component_points.get(track, {}).get(label, {}).get(comp_method, {})
             entry = {
                 "label": config_label(label, method),
                 "source_method": method,  # the sr.json label the CYCLE sample came from
+                # The latencies.<track>.json label the COMPONENT vectors came from. Equal to
+                # `source_method` for a quantized row (per-method engines, no fallback); for
+                # fp32/fp16 it names whichever run timed the single build, so the fallback the
+                # row rests on is recorded rather than implied.
+                "component_method": comp_method,
                 "encoder_calls_per_cycle": ENCODER_CALLS_PER_CYCLE,
                 "predictor_calls_per_cycle": PREDICTOR_CALLS_PER_CYCLE,
                 "enc_cyc_mean_ms": enc_cyc,
@@ -697,12 +716,20 @@ def compute_means(
 
 def load_component_latencies(paths) -> dict:
     """Merge the per-track `latencies.<track>.json` files (written by `src.study`) into the
-    `{track: {precision: {encode_ms, predict_ms}}}` shape `compute_components` consumes. Read-only,
-    like every input to this module."""
+    `{track: {precision: {method: {encode_ms, predict_ms}}}}` shape `compute_components` consumes.
+    Read-only, like every input to this module.
+
+    A legacy flat entry is folded under the label its file's `meta.calibration_method` records —
+    the method that run timed, so a pre-keying sample keeps its true provenance rather than being
+    filed under whatever the default happens to be (`report.as_method_map`)."""
     out: dict = {}
     for p in paths:
         data = json.loads(Path(p).read_text())
-        out[data["meta"]["track"]] = data["latencies"]
+        recorded = data["meta"].get("calibration_method", DEFAULT_CALIBRATION_METHOD)
+        out[data["meta"]["track"]] = {
+            precision: report.as_method_map(entry, recorded)
+            for precision, entry in data["latencies"].items()
+        }
     return out
 
 
@@ -760,7 +787,7 @@ def main() -> None:
     n_p50 = sum(1 for t in payload["points"].values() for p in t.values()
                 for e in p.values() if e.get("p50_ci95_ms"))
     n_comp = sum(1 for t in payload.get("points_components", {}).values() for p in t.values()
-                 for e in p.values() if e.get("p50_ci95_ms"))
+                 for m in p.values() for e in m.values() if e.get("p50_ci95_ms"))
     n_mean = sum(1 for t in payload.get("points_means", {}).values() for p in t.values()
                  for _ in p.values())
     print(

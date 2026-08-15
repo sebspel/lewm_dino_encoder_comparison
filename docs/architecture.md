@@ -270,9 +270,14 @@ distribution fix widened (so `entropy` could re-clip it). Which method wins is m
   step isolates the format. FP8 rides INT8's calibration then converts scales
   (`fp8_scale = int8_scale × 448/127`).
 
-The cross-track **latency** headline is calibration-method-invariant (scale magnitudes do not
-change quantized-op coverage, granularity, or TensorRT tactic selection); per-model SR is
-reported per `(track, precision, method)`.
+Because each method is its own engine build, **everything measured off it is labelled with it**:
+SR, the per-cycle sample, and the engine-step latencies alike are recorded per
+`(track, precision, method)` and merged per cell, so one method's timing run adds points rather than
+replacing the other's, and a render reads only the method it names. Scale magnitudes are not expected
+to move the latency much (they change neither quantized-op coverage, granularity, nor TensorRT tactic
+selection) — but that is then a comparison the tables support, not an assumption that lets one
+method's numbers be printed under the other's label. FP32/FP16 have a single data-free build, so they
+are timed once and read across labels.
 
 ### Neutralizing the attention-mask sentinel
 
@@ -686,9 +691,16 @@ should be the one that keeps the artefact stable.
 interval taken on trust, and §12's self-describing-artefact rule already rejects that for SR and
 per-cycle. Persisting the samples also decouples the question from the hardware: any later statistic
 over the component distributions — a different quantile, a different test — is then an off-pod
-re-analysis rather than an L40S booking. The cost is ~800 floats per track, and they live **beside**
-`results.<track>.json` rather than inside it, so the summary schema every table, plot and derived clock
-render parses stays summary-shaped.
+re-analysis rather than an L40S booking. The cost is ~800 floats per track per calibration method, and
+they live **beside** `results.<track>.json` rather than inside it, so the summary schema every table,
+plot and derived clock render parses stays summary-shaped.
+
+**The samples are keyed by (precision, calibration method), like every other quantized result.** An
+INT8/FP8 engine is a per-method build (§7), so its loop times *that* build; a `max` timing pass
+therefore merges beside the `entropy` vectors rather than over them, and a `max` render that finds no
+`max` sample shows an empty interval instead of the `entropy` one. FP32/FP16 are the one exception in
+the other direction — a single data-free build, timed once and read across labels — and the mean rows
+record which label they read so the fallback is auditable rather than implicit.
 
 One implementation consequence worth naming: the point estimate and the interval must come from the
 same percentile definition, or the interval can bracket a number the table does not print. The
