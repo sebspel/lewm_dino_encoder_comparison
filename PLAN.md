@@ -810,11 +810,12 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
 `latencies.{lewm,dino}.json` — with **no** eval/benchmark/export run.
 
 - [ ] 🔴 **OWNER GATE — mean-interval construction** (2026-08-14). Five quantities per (track,
-  precision, method), all call-count-weighted onto the per-cycle scale: `enc_cyc = 2 × mean(encode)`,
-  `pred_cyc = 150 × mean(predict)`, `t_comp = enc_cyc + pred_cyc`, `cycle = mean(per-cycle sample)`,
-  `overhead = cycle − t_comp`. Estimator: `scipy.stats.bootstrap`, `method="percentile"`,
+  precision, method). Components **per engine call, unweighted**: `enc = mean(encode)`,
+  `pred = mean(predict)`. Composites **per cycle**: `t_comp = 2 × enc + 150 × pred`,
+  `cycle = mean(per-cycle sample)`, `overhead = cycle − t_comp`. Estimator:
+  `scipy.stats.bootstrap`, `method="percentile"`,
   `n_resamples=3000`, `paired=False`, `confidence_level=0.95`, fixed seed. Samples: the component loop
-  vectors as recorded; `report.per_cycle_samples` for the cycle. `enc_cyc`/`pred_cyc`/`cycle` inherit
+  vectors as recorded; `report.per_cycle_samples` for the cycle. `enc`/`pred`/`cycle` inherit
   their sample's existing lag-1 flag — **no new test, no third Holm family**; `t_comp`/`overhead` carry
   no flag. Composite `enc-<A>+pred-<B>` labels excluded.
   → verify: recorded in SPEC §Interface Contracts + `docs/architecture.md` §12 + the `src.stats`
@@ -828,10 +829,11 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   (`[track][precision][method]`) + `bootstrap_mean_ci` (one wrapper, all five quantities). `meta`
   records the estimator, B, `paired`, seed and the two call counts; `compute` threads it through;
   `main` reports the count.
-  → **landed (off-pod ✔):** means taken with `statistics.fmean` and grouped as `cycle − (enc + pred)`,
-  matching `benchmark._mean_ms` / `report.decompose` bit-for-bit; method-invariant precisions collapse
-  to one row (`max`-first), composites skipped. `tests/test_stats.py` — `::test_mean_points_are
-  _additive_and_bracketed`, `::test_mean_cycle_uses_the_same_sample_as_the_p50_interval`,
+  → **landed (off-pod ✔):** means taken with `statistics.fmean`, the composites weighted and grouped
+  as `report.decompose` does it (bit-for-bit, `benchmark._mean_ms` on the same samples);
+  method-invariant precisions collapse
+  to one row (`max`-first), composites skipped. `tests/test_stats.py` — `::test_mean_components_are
+  _per_call_and_the_composites_are_per_cycle`, `::test_mean_cycle_uses_the_same_sample_as_the_p50_interval`,
   `::test_mean_flags_are_inherited_never_re_tested`, `::test_mean_labels_name_the_method_only_where
   _it_applies`, `::test_mean_section_leaves_the_other_surfaces_byte_identical`,
   `::test_mean_intervals_are_reproducible_at_the_fixed_seed`,
@@ -839,11 +841,12 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   _row`, `::test_mean_construction_is_recorded_in_meta`.
   → verify (off-pod ✔): `points` + `points_components` byte-identical with and without the section;
   both Holm family sizes unchanged; each mean point records its per-sample `n`; two runs at the fixed
-  seed give identical bounds; `t_comp == enc_cyc + pred_cyc` and `overhead == cycle − t_comp`.
+  seed give identical bounds; `t_comp == 2 × enc + 150 × pred` and `overhead == cycle − t_comp`.
 
 - [ ] 🟢 **`src/report.py::render_latency_means_table`** → `latency_means_table.txt`, **unscoped**
   (the config column carries `FP32` / `INT8 (max)` / `FP8 (entropy)`, so it spans both methods like
-  `calibration_table.txt`). One token per VALUE cell — `value[lo,hi]` + the inherited `*`/`-` marker;
+  `calibration_table.txt`). Components per engine call (`enc_call_ms`, `pred_call_ms`), composites
+  per cycle. One token per VALUE cell — `value[lo,hi]` + the inherited `*`/`-` marker;
   the config column is the one that may split, so the five values are read from the END of the row.
   Printed after the component table, logged to W&B.
   → **landed (off-pod ✔):** `_mean_cell` + `_mean_flag`; a pure walk of `points_means` (no
@@ -851,8 +854,9 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   — `::test_latency_means_table_matches_decompose`, `::test_latency_means_table_is_parseable_and
   _carries_its_markers`, `::test_latency_means_table_is_unscoped_and_identical_across_methods`,
   `::test_mean_table_does_not_touch_the_other_artifacts`. `pytest` 180 passed.
-  → verify (off-pod ✔): point estimates equal `report.decompose`'s `enc_cyc_ms`/`pred_cyc_ms`/
-  `model_cyc_ms`/`cycle_ms`/`overhead_ms` (anti-drift guard); a `max` and an `entropy` render write
+  → verify (off-pod ✔): the three per-cycle points equal `report.decompose`'s `model_cyc_ms`/
+  `cycle_ms`/`overhead_ms` and the two per-call points equal the engine-step means it weights
+  (anti-drift guard); a `max` and an `entropy` render write
   byte-identical files; the four method-scoped tables, the isolation/calibration tables and all three
   plots byte-identical with and without the section.
 
@@ -906,7 +910,7 @@ the per-cycle sample are already recorded at both methods; only the component ti
 **Verify:** owner sign-off recorded before any component interval; `latencies.{lewm,dino}.json` on the
 volume with the loops' raw samples, keyed per (precision, method) and covering both methods' quantized
 engines; every benchmarked speed-table row carries a component p50 interval — its OWN method's, never
-the other's — and an `ac` flag; the five mean per-cycle quantities carry bootstrap intervals +
+the other's — and an `ac` flag; the five mean latency quantities carry bootstrap intervals +
 inherited flags in
 `latency_means_table.txt`; no interval on any p95, on the dilution shares/speedups, or on any
 difference or ratio other than the named `overhead` decomposition; `sr.json`, `results.*.json` and
@@ -1010,7 +1014,7 @@ from; `pipeline_manifest.json` records every step's command, exit code and durat
   order-statistic p50 intervals over the stored `sr.json` samples **and the component p50 intervals
   over `latencies.<track>.json`, per (track, precision, method)** (Holm scoped per measurement
   surface), the Dwass lag-1 permutation
-  test, Holm secondary values, **and the percentile-bootstrap intervals on the five mean per-cycle
+  test, Holm secondary values, **and the percentile-bootstrap intervals on the five mean latency
   quantities** (`points_means`, rendered as `latency_means_table.txt` by `src/report.py`) →
   `stats.json`. Shares the per-cycle sample rule with `src/report.py`.
   Writes **no** interpretation of a rejected independence test — that is owner-authored
@@ -1066,8 +1070,8 @@ from; `pipeline_manifest.json` records every step's command, exit code and durat
    per (precision, calibration method) so both methods' quantized engines are timed and kept;
    `src.stats` extends the intervals to the encode-/predictor-step p50s off those samples (own Holm
    family, no truncation, no report-time drop) and the speed table carries that method's component
-   interval + `ac` flag on every benchmarked row; the same off-pod pass adds the five mean per-cycle quantities
-   (`enc_cyc`, `pred_cyc`, `t_comp`, `cycle`, `overhead`) with percentile-bootstrap intervals and
+   interval + `ac` flag on every benchmarked row; the same off-pod pass adds the five mean latency quantities
+   (per-call `enc`/`pred`; per-cycle `t_comp`, `cycle`, `overhead`) with percentile-bootstrap intervals and
    inherited independence markers to `stats.json` + `latency_means_table.txt`, with `sr.json` /
    `results.*.json` / `latencies.*.json` byte-unchanged (Phase 9).
 10. `uv run python -m src.pipeline dry_run=true` prints the whole stage plan off-pod without

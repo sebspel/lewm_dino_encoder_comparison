@@ -476,19 +476,22 @@ def _mean_payload(seed: int = 21, n_cycles: int = 40, **kwargs):
     )
 
 
-def test_mean_points_are_additive_and_bracketed():
-    """The five quantities are the decomposition, quantified: the POINTS add up
-    (`t_comp = enc_cyc + pred_cyc`, `overhead = cycle − t_comp`) and every bootstrap interval
-    brackets its own point — including the two composites, which is what `paired=False` resampling
-    of independent samples is there to support (SPEC §Interface Contracts)."""
+def test_mean_components_are_per_call_and_the_composites_are_per_cycle():
+    """`enc`/`pred` are the engine-step means as TIMED — one call, unweighted — while the CEM call
+    counts enter only the per-cycle composites, which stay the decomposition (`t_comp`,
+    `overhead = cycle − t_comp`). Every bootstrap interval brackets its own point, including the two
+    composites — what `paired=False` resampling of independent samples is there to support
+    (SPEC §Interface Contracts)."""
     _, latencies, payload = _mean_payload()
     e = payload["points_means"]["lewm"]["fp32"]["max"]
 
-    assert e["enc_cyc_mean_ms"] == 2 * fmean(latencies["lewm"]["fp32"]["max"]["encode_ms"])
-    assert e["pred_cyc_mean_ms"] == 150 * fmean(latencies["lewm"]["fp32"]["max"]["predict_ms"])
-    assert e["t_comp_mean_ms"] == e["enc_cyc_mean_ms"] + e["pred_cyc_mean_ms"]
+    enc = fmean(latencies["lewm"]["fp32"]["max"]["encode_ms"])
+    pred = fmean(latencies["lewm"]["fp32"]["max"]["predict_ms"])
+    assert e["enc_mean_ms"] == enc
+    assert e["pred_mean_ms"] == pred
+    assert e["t_comp_mean_ms"] == 2 * enc + 150 * pred
     assert e["overhead_mean_ms"] == e["cycle_mean_ms"] - e["t_comp_mean_ms"]
-    for key in ("enc_cyc", "pred_cyc", "t_comp", "cycle", "overhead"):
+    for key in ("enc", "pred", "t_comp", "cycle", "overhead"):
         lo, hi = e[f"{key}_ci95_ms"]
         assert lo <= e[f"{key}_mean_ms"] <= hi, key
 

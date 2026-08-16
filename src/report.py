@@ -417,12 +417,15 @@ def _mean_flag(entry: dict, prefix: str) -> str:
 
 
 def render_latency_means_table(stats_payload: dict | None) -> str:
-    """The five MEAN per-cycle latency quantities per configuration, with bootstrap intervals and the
+    """The five MEAN latency quantities per configuration, with bootstrap intervals and the
     inherited independence markers (SPEC §Interface Contracts, architecture.md §12).
 
+    `enc`/`pred` are per ENGINE CALL — the scale the loops time them on; `t_comp`, `cycle` and `ovh`
+    are per cycle, where the CEM call counts belong.
+
     A pure walk of `stats.json`'s `points_means` — deliberately NOT a recomputation off `bench`, so
-    the rendered numbers and the persisted ones cannot drift; they are the same numbers
-    `decompose` reports, now with intervals.
+    the rendered numbers and the persisted ones cannot drift; the three per-cycle quantities are the
+    same numbers `decompose` reports, now with intervals.
 
     **Method-unscoped**: the config column names the method (`INT8 (max)`), so one table spans both
     and a render at either method writes the same file — like `calibration_table.txt`. Returns ""
@@ -431,13 +434,14 @@ def render_latency_means_table(stats_payload: dict | None) -> str:
     if not points:
         return ""
     hdr = (
-        f"{'track':>6} {'config':>15} {'enc_cyc_ms':>30} {'pred_cyc_ms':>30} "
+        f"{'track':>6} {'config':>15} {'enc_call_ms':>30} {'pred_call_ms':>30} "
         f"{'t_comp_ms':>30} {'cycle_ms':>30} {'ovh_ms':>30}"
     )
     lines = [
-        f"  (MEAN basis, per-cycle scale: enc_cyc = mean(encode) × {_ENCODER_CALLS} calls, "
-        f"pred_cyc = mean(predict) × {_PREDICTOR_CALLS}; t_comp = enc_cyc + pred_cyc; "
-        "ovh = cycle − t_comp — the POINTS add up, the intervals do not)",
+        "  (MEAN basis. enc_call/pred_call = one engine call, UNWEIGHTED — the scale the "
+        "fixed-iteration loops time them on)",
+        f"  (per-cycle scale: t_comp = {_ENCODER_CALLS} × enc_call + {_PREDICTOR_CALLS} × "
+        "pred_call; ovh = cycle − t_comp — those three POINTS add up, the intervals do not)",
         "  (each cell = point[lo,hi]: a 95% non-parametric percentile BOOTSTRAP interval, "
         "paired=False, over the same stored samples the p50 intervals use — construction + seed in "
         "stats.json)",
@@ -461,8 +465,8 @@ def render_latency_means_table(stats_payload: dict | None) -> str:
                 e = by_method[method]
                 lines.append(
                     f"{track:>6} {e['label']:>15} "
-                    f"{_mean_cell(e['enc_cyc_mean_ms'], e['enc_cyc_ci95_ms'], _mean_flag(e, 'enc')):>30} "
-                    f"{_mean_cell(e['pred_cyc_mean_ms'], e['pred_cyc_ci95_ms'], _mean_flag(e, 'pred')):>30} "
+                    f"{_mean_cell(e['enc_mean_ms'], e['enc_ci95_ms'], _mean_flag(e, 'enc')):>30} "
+                    f"{_mean_cell(e['pred_mean_ms'], e['pred_ci95_ms'], _mean_flag(e, 'pred')):>30} "
                     f"{_mean_cell(e['t_comp_mean_ms'], e['t_comp_ci95_ms']):>30} "
                     f"{_mean_cell(e['cycle_mean_ms'], e['cycle_ci95_ms'], _mean_flag(e, 'cycle')):>30} "
                     f"{_mean_cell(e['overhead_mean_ms'], e['overhead_ci95_ms']):>30}"
@@ -1271,7 +1275,7 @@ def report(
     method in the body, so the two methods' artefacts coexist on disk. Three further tables render
     only when their data exists: `calibration_table.txt` (both methods' SR side by side),
     `isolation_table.<method>.txt` (component-precision isolation, architecture.md §9), and
-    `latency_means_table.txt` (the five mean per-cycle quantities with their bootstrap intervals —
+    `latency_means_table.txt` (the five mean latency quantities with their bootstrap intervals —
     unscoped, since its config column names the method).
 
     When `sr_overrides` is present the render also computes the 95% confidence intervals on every
@@ -1342,7 +1346,10 @@ def report(
     print(component_table)
     if latency_means_table:
         print()
-        print("Mean per-cycle latencies with bootstrap intervals (same decomposition, quantified):")
+        print(
+            "Mean latencies with bootstrap intervals "
+            "(components per engine call; the decomposition per cycle):"
+        )
         print(latency_means_table)
     print()
     print("Amdahl dilution (model-only vs realized per-cycle speedup):")

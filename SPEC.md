@@ -191,15 +191,16 @@ requirements those signatures must satisfy; it does not restate the signatures.
   p-value, the permutation null's own lag-1 summary, and the **fixed, recorded permutation seed** —
   so an interval can be re-derived and audited off the artefact rather than taken on trust.
   (`docs/architecture.md` §12.)
-- **The five MEAN per-cycle latency quantities carry a 95% non-parametric BOOTSTRAP interval, per
-  configuration (track × precision × calibration method).** All five live on the **per-cycle scale**,
-  the components weighted by the CEM call counts exactly as the decomposition weights them
-  (§per-component profile slices): `enc_cyc = ENCODER_CALLS × mean(encode-step)`,
-  `pred_cyc = PREDICTOR_CALLS × mean(predictor-step)`, the **component sum**
-  `t_comp = enc_cyc + pred_cyc`, the **measured cycle mean**, and
-  `overhead = cycle − t_comp`. The point estimates are therefore **additive by construction and
-  identical to the rendered decomposition** — this adds intervals to that surface, it does not
-  introduce a second set of numbers. The estimator is **scipy's `bootstrap`, percentile method,
+- **The five MEAN latency quantities carry a 95% non-parametric BOOTSTRAP interval, per
+  configuration (track × precision × calibration method).** The **two components are reported per
+  ENGINE CALL — unweighted, on the scale their fixed-iteration loops time them**: `enc =
+  mean(encode-step)`, `pred = mean(predictor-step)`, so each cell states the latency of the thing it
+  names and reads against that component's p50 on the speed table. The CEM call counts enter only
+  the **three per-cycle composites**: `t_comp = ENCODER_CALLS × enc + PREDICTOR_CALLS × pred`, the
+  **measured cycle mean**, and `overhead = cycle − t_comp`. Those three are therefore **identical to
+  the rendered decomposition** — this adds intervals to that surface, it does not introduce a second
+  set of numbers — and the table's two scales are **labelled in the header and the body**, never
+  inferred. The estimator is **scipy's `bootstrap`, percentile method,
   3,000 resamples, `paired=False`, α = 0.05, fixed recorded seed**, over the **same stored samples
   the p50 intervals use**: the fixed-iteration loop vectors as recorded for the components — **that
   configuration's own method's**, since the quantized engines differ per method — and the
@@ -210,7 +211,7 @@ requirements those signatures must satisfy; it does not restate the signatures.
   decomposition of measured absolute times into an absolute floor, not a comparison claim; it is
   never used to argue a difference *between* configurations, and the exception generalizes to
   nothing else — ΔSR, every speedup, and every ratio stay interval-free.
-  **No new independence test and no third Holm family.** `enc_cyc`, `pred_cyc` and `cycle` carry the
+  **No new independence test and no third Holm family.** `enc`, `pred` and `cycle` carry the
   flag of their constituent sample's already-run lag-1 test (same vector, same seed, same result),
   reported **beside the interval in the same cell**; `t_comp` and `overhead` carry no marker of their
   own, because a flag belongs to a sample and these are functions of two and three of them. The
@@ -365,7 +366,7 @@ is the width on **both** the predictor's input and output (dim-preserving; not s
   computed off the stored sample artefacts alone — `sr.json` (SR + per-cycle vectors) and the
   per-track component-latency artefact — with no eval, benchmark, or export run, and are
   **additive**: they land in their own `stats.json` (intervals on the absolute SR/p50s **and** on the
-  five mean per-cycle latency quantities) plus columns/error bars on the regenerable views and the
+  five mean latency quantities) plus columns/error bars on the regenerable views and the
   method-unscoped `latency_means_table.txt`,
   and `results.*.json`, `sr.json` and the component-latency artefact stay **byte-unchanged**, the
   same read-only discipline the derived clock render obeys.
@@ -429,13 +430,14 @@ touching:
   time is treated as clock-bound. A wrong choice is a plausible wrong corrected number (silent);
   CLAUDE Code wires the harvest/apply/render only once the owner has fixed the formula.
 - The **confidence-interval construction** — **which quantities carry an interval at all** (the
-  absolute SR, the per-cycle p50, the two component p50s, and the five mean per-cycle latency
-  quantities — `enc_cyc`, `pred_cyc`, `t_comp`, `cycle`, `overhead`; never a p95, a derived share,
+  absolute SR, the per-cycle p50, the two component p50s, and the five mean latency
+  quantities — `enc`, `pred`, `t_comp`, `cycle`, `overhead`; never a p95, a derived share,
   and no difference or ratio other than the named `overhead` decomposition), which estimator carries
   each (Clopper–Pearson for SR, the exact binomial
   order-statistic interval for every p50, the non-parametric **percentile bootstrap** — B = 3,000,
-  `paired=False`, α = 0.05, fixed seed — for every mean, on the **call-count-weighted** per-cycle
-  scale), the ruling that the mean intervals **inherit** their constituent sample's lag-1 flag rather
+  `paired=False`, α = 0.05, fixed seed — for every mean), **the scale each mean is reported on**
+  (the two components per engine call, unweighted; the three composites call-count-weighted onto the
+  per-cycle scale), the ruling that the mean intervals **inherit** their constituent sample's lag-1 flag rather
   than opening a third test family and that the two composites (`t_comp`, `overhead`) carry no flag
   of their own, **which sample each interval is computed over**
   (per-cycle: warm-up-dropped and equal-n-truncated; component: the fixed-iteration loop sample as
@@ -583,9 +585,9 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   Monte-Carlo permutation test on lag-1 autocorrelation (α = 0.05, 50,000 permutations, fixed seed),
   the decision taken on the unadjusted p-value with Holm values persisted as secondary reporting
   **per measurement surface** (per-cycle and component families kept separate).
-  **The mean-based per-cycle decomposition carries intervals too** — the five call-count-weighted
-  quantities `enc_cyc`, `pred_cyc`, `t_comp = enc_cyc + pred_cyc`, `cycle`, and
-  `overhead = cycle − t_comp`, per (track, precision, method), by non-parametric **percentile
+  **The mean latencies carry intervals too** — the per-call component means `enc` and `pred` and the
+  call-count-weighted per-cycle composites `t_comp = ENCODER_CALLS × enc + PREDICTOR_CALLS × pred`,
+  `cycle`, and `overhead = cycle − t_comp`, per (track, precision, method), by non-parametric **percentile
   bootstrap** (3,000 resamples, `paired=False`, fixed seed) over those same stored samples, with the
   constituent sample's lag-1 flag carried into the cell and no new test family opened. Apart from
   that named `overhead` decomposition, no interval is placed on any difference or ratio, on any p95,

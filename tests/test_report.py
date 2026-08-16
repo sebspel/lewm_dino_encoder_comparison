@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from src import report
+from src.interfaces import ENCODER_CALLS_PER_CYCLE, PREDICTOR_CALLS_PER_CYCLE
 
 
 def _bench(
@@ -559,10 +560,9 @@ def _mean_render(out_dir, method="max", seed=31):
 
 def test_latency_means_table_matches_decompose(tmp_path):
     """The anti-drift guard: the mean table quantifies the decomposition the study already reports,
-    it does not introduce a second set of numbers. Its five points must equal `decompose`'s
-    `enc_cyc_ms`/`pred_cyc_ms`/`model_cyc_ms`/`cycle_ms`/`overhead_ms` for the same configuration
-    (SPEC §Interface Contracts — "additive by construction and identical to the rendered
-    decomposition")."""
+    it does not introduce a second set of numbers. Its three per-cycle points must equal
+    `decompose`'s `model_cyc_ms`/`cycle_ms`/`overhead_ms`, and the two per-call components must equal
+    the engine-step means that decomposition is weighted from (SPEC §Interface Contracts)."""
     import json
 
     out, bench = _mean_render(tmp_path)  # `report` finalizes `bench` in place
@@ -572,8 +572,8 @@ def test_latency_means_table_matches_decompose(tmp_path):
         for prec in ("fp32", "fp16"):
             e = payload["points_means"][track][prec]["max"]
             d = report.decompose(bench[track][prec])
-            assert e["enc_cyc_mean_ms"] == d["enc_cyc_ms"]
-            assert e["pred_cyc_mean_ms"] == d["pred_cyc_ms"]
+            assert e["enc_mean_ms"] * ENCODER_CALLS_PER_CYCLE == d["enc_cyc_ms"]
+            assert e["pred_mean_ms"] * PREDICTOR_CALLS_PER_CYCLE == d["pred_cyc_ms"]
             assert e["t_comp_mean_ms"] == d["model_cyc_ms"]
             assert e["cycle_mean_ms"] == d["cycle_ms"]
             assert e["overhead_mean_ms"] == d["overhead_ms"]
@@ -592,7 +592,7 @@ def test_latency_means_table_is_parseable_and_carries_its_markers(tmp_path):
     payload = json.loads(Path(out["stats"]).read_text())
 
     header = [ln for ln in text.splitlines() if ln.split()[:1] == ["track"]][0].split()
-    assert header == ["track", "config", "enc_cyc_ms", "pred_cyc_ms", "t_comp_ms", "cycle_ms",
+    assert header == ["track", "config", "enc_call_ms", "pred_call_ms", "t_comp_ms", "cycle_ms",
                       "ovh_ms"]
     rows = [ln.split() for ln in text.splitlines() if ln.split()[:1] in (["lewm"], ["dino"])]
     assert len(rows) == sum(len(m) for t in payload["points_means"].values() for m in t.values())

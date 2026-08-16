@@ -20,14 +20,15 @@ the latency interval rests on:
     NO Student-t transform). Serial correlation would make the interval too NARROW — a stronger
     result than the sample supports — so it is measured, flagged, and never silently corrected.
   - **the five MEAN per-cycle latency quantities** → a non-parametric **percentile bootstrap**
-    (`scipy.stats.bootstrap`, 3,000 resamples, `paired=False`, fixed seed). All five sit on the
-    per-cycle scale, call-count-weighted exactly as `report.decompose` weights them:
-    `enc_cyc = 2 × mean(encode-step)`, `pred_cyc = 150 × mean(predictor-step)`,
-    `t_comp = enc_cyc + pred_cyc`, the measured `cycle` mean, and `overhead = cycle − t_comp`. The
-    samples are the ones the p50 intervals already use, so the point estimates ARE the rendered
-    decomposition — this adds intervals to that surface, not a second set of numbers. No new
-    independence test and no third Holm family: `enc_cyc`/`pred_cyc`/`cycle` carry the flag of their
-    constituent sample's lag-1 test, and the two composites carry none (a flag describes a sample).
+    (`scipy.stats.bootstrap`, 3,000 resamples, `paired=False`, fixed seed). The two components are
+    reported **per engine call**, the scale they are measured on — `enc = mean(encode-step)`,
+    `pred = mean(predictor-step)` — and the three composites on the **per-cycle** scale, where the
+    call-count weighting belongs: `t_comp = 2 × enc + 150 × pred`, the measured `cycle` mean, and
+    `overhead = cycle − t_comp`. The samples are the ones the p50 intervals already use, so the
+    composites ARE the rendered decomposition and the components ARE the timed engine steps — this
+    adds intervals to those surfaces, not a second set of numbers. No new independence test and no
+    third Holm family: `enc`/`pred`/`cycle` carry the flag of their constituent sample's lag-1 test,
+    and the two composites carry none (a flag describes a sample).
 
 **No interval on any difference or ratio** — not ΔSR, not the FP32-relative p50 speedup, not the
 DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max), and not the dilution shares (`p`, the Amdahl
@@ -312,8 +313,9 @@ def compute(
 
     `component_latencies` (the merged `latencies.<track>.json` blocks) adds the **component**
     surface — encode-/predict-step p50 intervals under `points_components` — with its OWN Holm
-    family, and the **mean** surface under `points_means` (the five call-count-weighted per-cycle
-    quantities, bootstrap intervals, flags inherited from the two sections above). Absent, both
+    family, and the **mean** surface under `points_means` (the two per-call component means and the
+    three per-cycle composites, bootstrap intervals, flags inherited from the two sections above).
+    Absent, both
     sections are simply omitted: a `stats.json` without them is still valid, and the per-cycle
     values are byte-identical either way (docs/architecture.md §12)."""
     # Invert to (label, method) -> {track: raw vector}: the equal-n truncation is defined ACROSS
@@ -441,9 +443,10 @@ def compute(
                 if means is None
                 else {
                     "mean_quantities": (
-                        "enc_cyc = ENCODER_CALLS x mean(encode); pred_cyc = PREDICTOR_CALLS x "
-                        "mean(predict); t_comp = enc_cyc + pred_cyc; cycle = mean(per-cycle "
-                        "sample); overhead = cycle - t_comp  (all on the per-cycle scale)"
+                        "enc = mean(encode); pred = mean(predict)  (per ENGINE CALL, the scale "
+                        "they are timed on); t_comp = ENCODER_CALLS x enc + PREDICTOR_CALLS x "
+                        "pred; cycle = mean(per-cycle sample); overhead = cycle - t_comp  (the "
+                        "three composites on the per-cycle scale)"
                     ),
                     "mean_estimator": "nonparametric-bootstrap-percentile",
                     "mean_resamples": bootstrap_resamples,
@@ -540,8 +543,9 @@ def bootstrap_mean_ci(
     seed: int = BOOTSTRAP_SEED,
 ) -> list | None:
     """Percentile-bootstrap interval for `sum_i weights[i] * mean(samples[i])` — the ONE estimator
-    behind all five mean quantities, with the call-count weighting (and, for `overhead`, the sign of
-    the subtraction) carried in `weights`.
+    behind all five mean quantities. `weights` carries whatever the quantity needs: 1.0 for the two
+    per-call component means and the measured cycle, the CEM call counts for the per-cycle composites
+    (and, for `overhead`, the sign of the subtraction).
 
     **`paired=False`** is a statement about the data, not a default: the component vectors are
     fixed-iteration engine loops and the per-cycle vector is per-decision timings off a different
@@ -606,8 +610,8 @@ def compute_means(
     n_resamples: int = BOOTSTRAP_RESAMPLES,
     seed: int = BOOTSTRAP_SEED,
 ) -> dict:
-    """Every configuration (track, precision, method) -> the five MEAN per-cycle latency quantities
-    with their bootstrap intervals and the inherited independence flags.
+    """Every configuration (track, precision, method) -> the five MEAN latency quantities with their
+    bootstrap intervals and the inherited independence flags.
 
     `per_cycle_samples` is `compute`'s `{(label, method): {track: sample}}` — the SAME reduced
     samples the p50 intervals are built on, passed in rather than recomputed so the mean and the p50
@@ -615,9 +619,11 @@ def compute_means(
     (precision, method); `points` / `component_points` are the two interval sections, read only for
     their lag-1 verdicts.
 
-    Everything is weighted onto the per-cycle scale by the CEM call counts, so the point estimates
-    are `report.decompose`'s and the columns add up: `t_comp = enc_cyc + pred_cyc`,
-    `overhead = cycle − t_comp`.
+    `enc` and `pred` are the engine-step means **as timed** — one call, unweighted — so each reads as
+    the latency of the thing it names and is comparable to that component's p50 on the speed table.
+    The CEM call counts enter only where the quantity is genuinely per-cycle: `t_comp =
+    ENCODER_CALLS × enc + PREDICTOR_CALLS × pred`, `overhead = cycle − t_comp`, which keeps those
+    three byte-equal to `report.decompose`'s `model_cyc_ms`/`cycle_ms`/`overhead_ms`.
 
     Composite `enc-<A>+pred-<B>` isolation labels never appear — they are an SR diagnostic and are
     never benchmarked for latency, so no component sample exists for them (architecture.md §9); a
@@ -655,12 +661,12 @@ def compute_means(
             # `statistics.fmean`, not `np.mean`: `benchmark._mean_ms` and
             # `report._finalize_per_cycle` both use it, so the point estimates here are byte-equal
             # to the ones the decomposition tables already print rather than merely close.
-            enc_cyc = ENCODER_CALLS_PER_CYCLE * fmean(enc)
-            pred_cyc = PREDICTOR_CALLS_PER_CYCLE * fmean(pred)
+            enc_mean = fmean(enc)
+            pred_mean = fmean(pred)
             cycle_mean = fmean(cycle)
-            # Grouped exactly as `report.decompose` groups them (`cycle - (enc + pred)`), so the two
-            # renderings of the same decomposition agree to the last bit, not just to a tolerance.
-            t_comp = enc_cyc + pred_cyc
+            # Weighted and grouped exactly as `report.decompose` does it, so the two renderings of
+            # the same decomposition agree to the last bit, not just to a tolerance.
+            t_comp = ENCODER_CALLS_PER_CYCLE * enc_mean + PREDICTOR_CALLS_PER_CYCLE * pred_mean
             comp_pt = component_points.get(track, {}).get(label, {}).get(comp_method, {})
             entry = {
                 "label": config_label(label, method),
@@ -672,16 +678,13 @@ def compute_means(
                 "component_method": comp_method,
                 "encoder_calls_per_cycle": ENCODER_CALLS_PER_CYCLE,
                 "predictor_calls_per_cycle": PREDICTOR_CALLS_PER_CYCLE,
-                "enc_cyc_mean_ms": enc_cyc,
-                "enc_cyc_ci95_ms": bootstrap_mean_ci(
-                    (enc,), (ENCODER_CALLS_PER_CYCLE,), alpha, n_resamples, seed
-                ),
+                # Per CALL, unweighted: the mean of the sample exactly as the loop timed it.
+                "enc_mean_ms": enc_mean,
+                "enc_ci95_ms": bootstrap_mean_ci((enc,), (1.0,), alpha, n_resamples, seed),
                 "enc_n": len(enc),
                 **{f"enc_{k}": v for k, v in _flags(comp_pt.get("encode", {})).items()},
-                "pred_cyc_mean_ms": pred_cyc,
-                "pred_cyc_ci95_ms": bootstrap_mean_ci(
-                    (pred,), (PREDICTOR_CALLS_PER_CYCLE,), alpha, n_resamples, seed
-                ),
+                "pred_mean_ms": pred_mean,
+                "pred_ci95_ms": bootstrap_mean_ci((pred,), (1.0,), alpha, n_resamples, seed),
                 "pred_n": len(pred),
                 **{f"pred_{k}": v for k, v in _flags(comp_pt.get("predict", {})).items()},
                 # composite of two independent samples -> no flag of its own; the two above are it
@@ -798,7 +801,7 @@ def main() -> None:
         + ("" if latency_paths else " — none found, component section omitted")
         + "\n"
         f"[stats] {n_mean} configurations x 5 mean latency quantities "
-        f"(enc_cyc/pred_cyc/t_comp/cycle/overhead), "
+        f"(enc/pred per call; t_comp/cycle/overhead per cycle), "
         f"{meta.get('mean_estimator', 'n/a')}, B={meta.get('mean_resamples', 0)}\n"
         f"[stats] independence: {meta['independence_test']} on {meta['test_statistic']}, "
         f"B={meta['n_resamples']}, seed={meta['seed']}, decision on the UNADJUSTED p-value; "

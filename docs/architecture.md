@@ -662,8 +662,8 @@ about — the property §12 has to engineer on the per-cycle side is free here.
 **Only the p50 carries an interval.** p95 does not, for the reason §8 already gives — it carries no
 claim, and putting a 95% interval on a statistic the study declines to compare would invite exactly the
 comparison the ruling forbids. The means carry **no order-statistic interval** — that estimator is for a
-quantile. The five decomposition quantities (`enc_cyc_ms`, `pred_cyc_ms`, `t_comp`, `cycle`,
-`overhead_ms`) carry a percentile **bootstrap** interval instead — see "Mean latencies and the overhead
+quantile. The five mean quantities (`enc`, `pred`, `t_comp`, `cycle`,
+`overhead`) carry a percentile **bootstrap** interval instead — see "Mean latencies and the overhead
 decomposition carry bootstrap intervals" below. The derived shares (`p`, the
 Amdahl ceiling) carry none. Clopper–Pearson does not appear on this surface at all: there
 is no proportion to bound, only a latency quantile.
@@ -717,15 +717,25 @@ of the identity, but not of the question the table is used to answer: **how much
 is model time, and how much is the un-optimizable floor** — a claim about this hardware and this
 planner, made from ~100 timed iterations per component and ~60 decisions per cycle. A claim from a
 finite sample deserves a sampling interval, and the samples that supply one have been on the volume
-since Phase 9. Hence intervals on the five decomposition quantities, and only those.
+since Phase 9. Hence intervals on the five mean latency quantities, and only those.
 
-**Everything stays on the per-cycle scale, so the point estimates do not move.** `enc_cyc = 2 ×
-mean(encode-step)`, `pred_cyc = 150 × mean(predictor-step)`, `t_comp = enc_cyc + pred_cyc`, `cycle`
-the measured mean, `overhead = cycle − t_comp` — the same five numbers `report.decompose` renders.
-Reporting the *unweighted* per-call means beside a weighted `overhead` is not an option: the table
-would print three columns that visibly fail to add up, and an `overhead` computed against unweighted
-components would absorb 149 uncounted predictor calls and stop being the planner floor. The interval
-is the only thing that is new.
+**Two scales, both labelled: the components as measured, the decomposition per cycle.** `enc =
+mean(encode-step)` and `pred = mean(predictor-step)` are reported **per engine call**, which is the
+scale the fixed-iteration loops time them on and the scale their p50 already appears at on the speed
+table — so a reader comparing two encoders, or one precision against another, reads the latency of
+the call itself rather than a call multiplied by a planner constant. The call counts are not
+information about the engine; folding them in would detach each component cell from its own p50
+column two tables away, for no gain a reader cannot get by multiplying.
+
+The composites answer the decomposition question above instead, and that one is only well posed at
+the real call frequency.
+So `t_comp = 2 × enc + 150 × pred`, `cycle` the measured mean, and `overhead = cycle − t_comp` stay
+on the per-cycle scale and stay byte-equal to what `report.decompose` renders; an `overhead`
+subtracted from unweighted components would absorb 149 uncounted predictor calls and stop being the
+planner floor. The table therefore names its component columns `enc_call_ms`/`pred_call_ms`, states
+the weighting that produces `t_comp` in the body, and does not pretend the first two columns sum
+into the third. Each interval sits on its own point's scale — a call count is a deterministic
+rescale, so nothing statistical turns on which scale is printed.
 
 **Why a bootstrap, when every other interval here is exact.** There is no distribution-free exact
 interval for a mean — the order-statistic construction is available for a *quantile* precisely
@@ -760,7 +770,7 @@ lag-1 autocorrelation §12 already measures on these very vectors, a percentile 
 **too narrow** in the same direction. The tests were already run on the same samples with the same
 seed, so re-running them would produce identical numbers under a third Holm family whose only effect
 would be to make the existing published adjusted p-values look like one of several competing
-versions. Instead the flag is *carried*: `enc_cyc`, `pred_cyc` and `cycle` show their sample's `*`/`-`
+versions. Instead the flag is *carried*: `enc`, `pred` and `cycle` show their sample's `*`/`-`
 beside the interval in the same cell. `t_comp` and `overhead` show none, because a flag describes a
 sample and those are functions of two and three samples — the constituent flags on the same row are
 the honest disclosure, and inventing a composite flag would be a modelling choice, not a measurement.
