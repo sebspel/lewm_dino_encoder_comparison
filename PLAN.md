@@ -809,7 +809,7 @@ Extends the intervals to the **mean-based decomposition surface** (SPEC §Interf
 MEAN per-cycle latency quantities"). Re-analysis of the samples already on the volume — `sr.json` +
 `latencies.{lewm,dino}.json` — with **no** eval/benchmark/export run.
 
-- [ ] 🔴 **OWNER GATE — mean-interval construction** (2026-08-14). Five quantities per (track,
+- [x] 🔴 **OWNER GATE — mean-interval construction** (2026-08-14). Five quantities per (track,
   precision, method). Components **per engine call, unweighted**: `enc = mean(encode)`,
   `pred = mean(predict)`. Composites **per cycle**: `t_comp = 2 × enc + 150 × pred`,
   `cycle = mean(per-cycle sample)`, `overhead = cycle − t_comp`. Estimator:
@@ -821,11 +821,11 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   → verify: recorded in SPEC §Interface Contracts + `docs/architecture.md` §12 + the `src.stats`
   docstring **before** any mean interval is written.
 
-- [ ] 🟢 **Constants** — `BOOTSTRAP_RESAMPLES = 3000`, `BOOTSTRAP_SEED = 0` in `src/interfaces.py`,
+- [x] 🟢 **Constants** — `BOOTSTRAP_RESAMPLES = 3000`, `BOOTSTRAP_SEED = 0` in `src/interfaces.py`,
   beside the existing CI block.
   → **landed (off-pod ✔).**
 
-- [ ] 🟢 **`src/stats.py::compute_means`** → new top-level `points_means` section
+- [x] 🟢 **`src/stats.py::compute_means`** → new top-level `points_means` section
   (`[track][precision][method]`) + `bootstrap_mean_ci` (one wrapper, all five quantities). `meta`
   records the estimator, B, `paired`, seed and the two call counts; `compute` threads it through;
   `main` reports the count.
@@ -843,7 +843,7 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   both Holm family sizes unchanged; each mean point records its per-sample `n`; two runs at the fixed
   seed give identical bounds; `t_comp == 2 × enc + 150 × pred` and `overhead == cycle − t_comp`.
 
-- [ ] 🟢 **`src/report.py::render_latency_means_table`** → `latency_means_table.txt`, **unscoped**
+- [x] 🟢 **`src/report.py::render_latency_means_table`** → `latency_means_table.txt`, **unscoped**
   (the config column carries `FP32` / `INT8 (max)` / `FP8 (entropy)`, so it spans both methods like
   `calibration_table.txt`). Components per engine call (`enc_call_ms`, `pred_call_ms`), composites
   per cycle. One token per VALUE cell — `value[lo,hi]` + the inherited `*`/`-` marker;
@@ -860,7 +860,7 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   byte-identical files; the four method-scoped tables, the isolation/calibration tables and all three
   plots byte-identical with and without the section.
 
-- [ ] 🟢 **`src/report.py::plot_component_analysis`** → `component_analysis/{enc_call_ms,
+- [x] 🟢 **`src/report.py::plot_component_analysis`** → `component_analysis/{enc_call_ms,
   pred_call_ms,t_comp_ms,cycle_ms,ovh_ms}.png`, **five figures, one per mean quantity**, in a
   subdirectory of the report out dir so nothing existing is overwritten. Two panels (LeWM |
   DINOv3-WM), **separate y-axes** (the cross-model gap is faceted, as on speed-vs-SR); x = the
@@ -878,7 +878,7 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   identical in both panels; a `max` and an `entropy` render write the same set; every other table,
   plot and `stats.json` byte-identical with and without the figures.
 
-- [ ] 🟢 **Figure chrome (owner ruling, 2026-08-19):** error bars in the axis ink (BLACK) on
+- [x] 🟢 **Figure chrome (owner ruling, 2026-08-19):** error bars in the axis ink (BLACK) on
   `speed_vs_sr*.png` and the `component_analysis/` figures, and **no grid lines on any figure** —
   `report._style` drops the grid for the whole set (`per_cycle_ratio.png`,
   `component_breakdown_*.png` and `src.clock_norm`'s throttle plot included), so the chrome stays
@@ -901,7 +901,7 @@ The quantized engines are per-method BUILDS, so their measured latencies are key
 (SPEC §Parity). The `entropy` cells stand; this closes the `max` ones. **No `sr_eval` run** — SR and
 the per-cycle sample are already recorded at both methods; only the component timing is outstanding.
 
-- [ ] 🟢 **Method axis on the measured artefacts.** `results.<track>.json` `bench` and
+- [x] 🟢 **Method axis on the measured artefacts.** `results.<track>.json` `bench` and
   `latencies.<track>.json` `latencies` keyed `{precision: {method: …}}`, merged per cell
   (`study._merge_by_method`); `report.method_key`/`select_by_method` is the ONE selection rule
   (fp32/fp16 read across labels, quantized never fall back) and `report.load_results(paths, method)`
