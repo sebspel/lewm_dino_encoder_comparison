@@ -800,7 +800,7 @@ def render_isolation_table(
 # Static report/print PNGs on the light surface (matplotlib Agg). Validated categorical hues in
 # FIXED order so the figure set reads as one system (dataviz skill): colour follows the ENTITY
 # (track / component), never rank. Sentence-case titles, UPPERCASE precisions, black axes + axis
-# values; grey is reserved for grid/leader lines on the bar charts.
+# values; grey is reserved for the leader lines on the bar charts.
 # DINO is RED (not orange) so the track colours stay clear of the component palette's orange
 _TRACK_COLOR = {"lewm": "#2a78d6", "dino": "#e34948"}  # blue / red (slots 1, 8)
 _TRACK_DISPLAY = {"lewm": "LeWM", "dino": "DINOv3-WM"}
@@ -817,7 +817,6 @@ _QUANTIZED_MARKER = {
 _RATIO_HUE = "#81c784"  # light green — distinct from the component encoder green and the track hues
 # encoder green / predictor purple / overhead orange (validated slots 3, 7, 2)
 _COMPONENT_COLOR = {"encoder": "#1baf7a", "predictor": "#4a3aa7", "overhead": "#eb6834"}
-_GRID = "#e1e0d9"
 _MUTED = "#898781"
 _INK = "#0b0b0b"
 
@@ -875,10 +874,10 @@ def _fmt_time_ms(ms) -> str:
     return f"{ms / 1000:.1f} s" if ms >= 1000 else f"{ms:.3g} ms"
 
 
-def _style(ax, *, grid_axis: str = "y") -> None:
-    """Recessive grey grid, BLACK spines + tick values — the shared chrome across the figure set."""
-    ax.grid(axis=grid_axis, color=_GRID, lw=0.6, zorder=0)
-    ax.set_axisbelow(True)
+def _style(ax) -> None:
+    """BLACK spines + tick values, no grid — the shared chrome across the figure set. The gridless
+    surface is deliberate (owner ruling): every figure either value-labels its marks or is read for
+    the spread between them, so rules would only add ink."""
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     for side in ("left", "bottom"):
@@ -971,16 +970,17 @@ def _render_speed_vs_sr(
             handles = []
             hue = _TRACK_COLOR[track]
             for p in _speed_vs_sr_points(bench, track, method, stats_payload):
-                # Error bars UNDER the markers in a recessive grey, so the points still read first.
+                # Error bars UNDER the markers, drawn in the axis ink so the interval is as
+                # legible as the point it belongs to.
                 if p.xerr or p.yerr:
-                    ax.errorbar(p.x_ms, p.sr, xerr=p.xerr, yerr=p.yerr, fmt="none", ecolor=_MUTED,
+                    ax.errorbar(p.x_ms, p.sr, xerr=p.xerr, yerr=p.yerr, fmt="none", ecolor=_INK,
                                 elinewidth=0.9, capsize=2.5, capthick=0.9, zorder=2)
                 ax.scatter(p.x_ms, p.sr, marker=p.marker, s=90, color=hue,
                            edgecolor="white", linewidth=0.8, zorder=p.zorder)
                 handles.append(Line2D([], [], marker=p.marker, ls="", color=hue, label=p.label))
             ax.set_title(_TRACK_DISPLAY[track])
             ax.set_xlabel("Per-cycle latency $p_{50}$ (ms)")
-            _style(ax, grid_axis="both")
+            _style(ax)
             if handles:
                 ax.legend(handles=handles, title="Precision", fontsize=7.5, loc=legend_loc[track],
                           borderpad=0.6, labelspacing=0.35, handletextpad=0.4)
@@ -1035,7 +1035,7 @@ def plot_per_cycle_ratio(bench: dict, out_dir: Path) -> Path:
         ax.annotate(f"{vals[p]:.0f}×", (b.get_x() + b.get_width() / 2, b.get_height()),
                     textcoords="offset points", xytext=(0, 3), ha="center", fontsize=8, color=_INK)
     ax.set_ylabel("p50 latency ratio (DINOv3-WM relative to LeWM)")
-    _style(ax, grid_axis="y")
+    _style(ax)
     fig.tight_layout()
     path = out_dir / "per_cycle_ratio.png"
     fig.savefig(path, dpi=150)
@@ -1086,7 +1086,7 @@ def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32"
                      fontsize=9)
         ax.set_xticks([])
         ax.set_ylim(0, 100)
-        _style(ax, grid_axis="y")
+        _style(ax)
     axes[0][0].set_ylabel("Share of per-cycle time (%)")
     fig.tight_layout()
     path = out_dir / f"component_breakdown_{precision}.png"
@@ -1109,15 +1109,19 @@ _MEAN_QUANTITIES = (
 # precisions with FP8 BEFORE INT8, each once per calibration method — so `INT8 (entropy)` is the
 # rightmost category. Deliberately not `_PRECISIONS`, whose order is the sweep's, not this axis's.
 _MEAN_PLOT_PRECISIONS = ("fp32", "fp16", "fp8", "int8")
+# One shape for every point on these figures (the x axis already keys the configuration), sized so
+# the interval it sits on reads around it while the point itself still carries the eye.
+_MEAN_MARKER = "o"
+_MEAN_MARKER_SIZE = 30
 
 
-def _mean_configs() -> list[tuple[str, str]]:
-    """Every x category as `(label, marker)`, in the fixed axis order above. `_prec_label` renders
-    the same string `stats.config_label` writes into `points_means`, which is what the panel lookup
-    keys on; the method-invariant precisions carry the default method only to pick that label and
-    marker, never to select a point (they have one row whichever run recorded it)."""
+def _mean_configs() -> list[str]:
+    """Every x category label, in the fixed axis order above. `_prec_label` renders the same string
+    `stats.config_label` writes into `points_means`, which is what the panel lookup keys on; the
+    method-invariant precisions carry the default method only to pick that label, never to select a
+    point (they have one row whichever run recorded it)."""
     return [
-        (_prec_label(prec, m), _prec_marker(prec, m))
+        _prec_label(prec, m)
         for prec in _MEAN_PLOT_PRECISIONS
         for m in (
             CALIBRATION_METHODS
@@ -1145,11 +1149,13 @@ def plot_component_analysis(stats_payload: dict | None, out_dir: Path) -> dict[s
 
     Two panels per figure (LeWM | DINOv3-WM) on SEPARATE y-axes: the cross-track latency gap that
     one shared scale would collapse is handled by faceting, the same treatment (and the same serif
-    typography, chrome and grey error bars) as the speed-vs-SR figure. x = the configuration, in
-    `_mean_configs` order; y = that quantity's mean with its 95% bootstrap interval as the error
-    bar. No legend: the x tick labels already name every configuration, so one would only restate
-    the axis. Marker still follows (precision, method), keeping the shapes consistent across the
-    figure set.
+    typography and chrome) as the speed-vs-SR figure. x = the configuration, in `_mean_configs`
+    order; y = that quantity's mean with its 95% bootstrap interval as the error bar. No legend:
+    the x tick labels already name every configuration, so one would only restate the axis.
+
+    ONE marker shape throughout, sized so the interval it sits on stays visible around it: the x
+    axis already identifies each configuration, so a shape-per-precision would encode nothing the
+    ticks do not — unlike the speed-vs-SR panels, where the marker IS the configuration key.
 
     A pure walk of `stats.json`'s `points_means`, exactly like `render_latency_means_table` — the
     plotted numbers are the persisted ones, never a recomputation off `bench` — and likewise
@@ -1161,31 +1167,30 @@ def plot_component_analysis(stats_payload: dict | None, out_dir: Path) -> dict[s
     sub_dir.mkdir(parents=True, exist_ok=True)
     panels = {t: _mean_panel(points, t) for t in _TRACKS}
     # One shared category list across both panels, so a configuration sits at the same x in each.
-    configs = [(lbl, mk) for lbl, mk in _mean_configs() if any(lbl in p for p in panels.values())]
+    configs = [lbl for lbl in _mean_configs() if any(lbl in p for p in panels.values())]
     paths = {}
     with plt.rc_context(_serif_rc()):
         for stem, key, title in _MEAN_QUANTITIES:
             fig, axes = plt.subplots(1, 2, figsize=(8, 4))
             for ax, track in zip(axes, _TRACKS):
                 hue = _TRACK_COLOR[track]
-                for x, (label, marker) in enumerate(configs):
+                for x, label in enumerate(configs):
                     entry = panels[track].get(label)
                     value = None if entry is None else entry[f"{key}_mean_ms"]
                     if _missing(value):
                         continue
                     err = _asym_err(value, entry[f"{key}_ci95_ms"])
                     if err:
-                        ax.errorbar(x, value, yerr=err, fmt="none", ecolor=_MUTED, elinewidth=0.9,
-                                    capsize=2.5, capthick=0.9, zorder=2)
-                    ax.scatter(x, value, marker=marker, s=90, color=hue,
-                               edgecolor="white", linewidth=0.8, zorder=3)
+                        ax.errorbar(x, value, yerr=err, fmt="none", ecolor=_INK, elinewidth=0.9,
+                                    capsize=3, capthick=0.9, zorder=2)
+                    ax.scatter(x, value, marker=_MEAN_MARKER, s=_MEAN_MARKER_SIZE, color=hue,
+                               edgecolor="white", linewidth=0.6, zorder=3)
                 ax.set_title(_TRACK_DISPLAY[track])
                 ax.set_xlim(-0.5, len(configs) - 0.5)
                 ax.set_xticks(range(len(configs)))
-                ax.set_xticklabels([lbl for lbl, _ in configs], rotation=30, ha="right",
-                                   fontsize=8)
+                ax.set_xticklabels(configs, rotation=30, ha="right", fontsize=8)
                 ax.set_ylabel("Mean latency (ms)")
-                _style(ax, grid_axis="y")
+                _style(ax)
             fig.suptitle(title)
             fig.tight_layout()
             path = sub_dir / f"{stem}.png"

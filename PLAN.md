@@ -867,15 +867,26 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   configuration in the fixed order `FP32, FP16, FP8 (max), FP8 (entropy), INT8 (max),
   INT8 (entropy)`; y = that quantity's mean with its bootstrap interval as the error bar. A pure
   walk of `points_means` (no recomputation off `bench`), **unscoped** like the table it plots.
-  → **landed (off-pod ✔):** `_MEAN_QUANTITIES` + `_mean_configs`/`_mean_panel`; serif rc, chrome
-  and grey error bars shared with the speed-vs-SR render; no legend (the x labels already name
-  every configuration). `tests/test_report.py` —
+  → **landed (off-pod ✔):** `_MEAN_QUANTITIES` + `_mean_configs`/`_mean_panel`; serif rc and chrome
+  shared with the speed-vs-SR render; ONE marker shape (`_MEAN_MARKER`), sized so the black error
+  bar reads around it; no legend (the x labels already name every configuration).
+  `tests/test_report.py` —
   `::test_component_analysis_figures_are_one_per_mean_quantity`,
   `::test_component_analysis_x_order_is_fixed_and_shared`,
   `::test_component_analysis_is_unscoped_across_methods`. `pytest` 189 passed.
   → verify (off-pod ✔): five PNGs under `component_analysis/`; the config order is fixed and
   identical in both panels; a `max` and an `entropy` render write the same set; every other table,
   plot and `stats.json` byte-identical with and without the figures.
+
+- [ ] 🟢 **Figure chrome (owner ruling, 2026-08-19):** error bars in the axis ink (BLACK) on
+  `speed_vs_sr*.png` and the `component_analysis/` figures, and **no grid lines on any figure** —
+  `report._style` drops the grid for the whole set (`per_cycle_ratio.png`,
+  `component_breakdown_*.png` and `src.clock_norm`'s throttle plot included), so the chrome stays
+  one system.
+  → **landed (off-pod ✔):** `_GRID` and `_style`'s `grid_axis` argument removed with their last
+  caller; `_MUTED` stays for the breakdown leader lines. `pytest` 189 passed.
+  → verify (off-pod ✔): every render gridless with black spines/ticks kept; tables and
+  `stats.json` byte-identical across the change.
 
 - [ ] 🟢 **Regenerate off-pod:** `uv run python -m src.stats from=<reports/phase5>`, then
   `uv run python -m src.report from=<reports/phase5> sr=<…/sr.json> calibration_method=<max|entropy>`.

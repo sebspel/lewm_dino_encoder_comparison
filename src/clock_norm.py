@@ -623,7 +623,7 @@ def plot_throttle(clocks: dict, run_type: str, out_dir: Path, method: str) -> Pa
                         zorder=3,
                     )
         ax.set_ylabel(label)
-        report._style(ax, grid_axis="y")
+        report._style(ax)
     # The reference lines (boost ceiling, board power limit). Deliberately unexplained in-figure —
     # the PNG carries no caption text (owner ruling, 2026-07-26); what the dashes and the n=…
     # labels mean is documented here and in the disclosure prose, not on the figure.

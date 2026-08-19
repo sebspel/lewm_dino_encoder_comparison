@@ -649,7 +649,7 @@ def test_component_analysis_x_order_is_fixed_and_shared(tmp_path):
     payload = json.loads(Path(out["stats"]).read_text())
     points = payload["points_means"]
 
-    labels = [lbl for lbl, _ in report._mean_configs()]
+    labels = report._mean_configs()
     assert labels == ["FP32", "FP16", "FP8 (max)", "FP8 (entropy)", "INT8 (max)", "INT8 (entropy)"]
     for track in ("lewm", "dino"):
         panel = report._mean_panel(points, track)
