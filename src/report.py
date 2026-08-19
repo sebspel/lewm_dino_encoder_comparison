@@ -10,6 +10,8 @@ Consumes the benchmark results (per track × precision) and emits the headline o
   - per-component **encoder / predictor / overhead** bottleneck breakdown, derived from the
     engine-step times × CEM call counts minus the measured per-cycle time (overhead by
     subtraction, SPEC §Interface Contracts)
+  - **component analysis** — the five mean latency quantities of `latency_means_table.txt` as one
+    dot plot each, per model and configuration, in a `component_analysis/` subdirectory
   - **calibration-method comparison** (`max` vs `entropy` SR side by side) — the ONE table that
     spans methods, so the two labelled points coexist on the page (architecture.md §7)
   - **component-precision isolation** — which component's quantization caused a measured SR drop,
@@ -1093,6 +1095,106 @@ def plot_component_breakdown(bench: dict, out_dir: Path, precision: str = "fp32"
     return path
 
 
+# --- component analysis (the five mean latency quantities, one figure each) ------------
+# The columns of `latency_means_table.txt`, as (file stem = that column's name, `points_means` key
+# prefix, figure title). One figure per quantity — five in all — so each is read on its own scale.
+_MEAN_QUANTITIES = (
+    ("enc_call_ms", "enc", "Mean encode-step latency per engine call"),
+    ("pred_call_ms", "pred", "Mean predictor-step latency per engine call"),
+    ("t_comp_ms", "t_comp", "Mean component latency per cycle"),
+    ("cycle_ms", "cycle", "Mean per-cycle latency"),
+    ("ovh_ms", "overhead", "Mean overhead per cycle"),
+)
+# x-axis order for those figures (SPEC §Uncertainty quantification): FP32, FP16, then the quantized
+# precisions with FP8 BEFORE INT8, each once per calibration method — so `INT8 (entropy)` is the
+# rightmost category. Deliberately not `_PRECISIONS`, whose order is the sweep's, not this axis's.
+_MEAN_PLOT_PRECISIONS = ("fp32", "fp16", "fp8", "int8")
+
+
+def _mean_configs() -> list[tuple[str, str]]:
+    """Every x category as `(label, marker)`, in the fixed axis order above. `_prec_label` renders
+    the same string `stats.config_label` writes into `points_means`, which is what the panel lookup
+    keys on; the method-invariant precisions carry the default method only to pick that label and
+    marker, never to select a point (they have one row whichever run recorded it)."""
+    return [
+        (_prec_label(prec, m), _prec_marker(prec, m))
+        for prec in _MEAN_PLOT_PRECISIONS
+        for m in (
+            CALIBRATION_METHODS
+            if prec in QUANTIZED_PRECISIONS
+            else (DEFAULT_CALIBRATION_METHOD,)
+        )
+    ]
+
+
+def _mean_panel(points: dict, track: str) -> dict:
+    """One panel's points as `{config label: mean entry}` — a pure read of `points_means`, keyed by
+    the same label the mean table prints, so figure and table cannot name a configuration
+    differently."""
+    return {
+        e["label"]: e
+        for prec in _MEAN_PLOT_PRECISIONS
+        for e in (points.get(track, {}).get(prec) or {}).values()
+    }
+
+
+def plot_component_analysis(stats_payload: dict | None, out_dir: Path) -> dict[str, Path]:
+    """The five mean latency quantities as five dot plots, written to `out_dir/component_analysis/`
+    — a subdirectory, so this figure set is ADDITIVE and overwrites no existing plot, table or
+    result (CLAUDE §8). Returns `{stem: path}`, empty when the payload carries no mean section.
+
+    Two panels per figure (LeWM | DINOv3-WM) on SEPARATE y-axes: the cross-track latency gap that
+    one shared scale would collapse is handled by faceting, the same treatment (and the same serif
+    typography, chrome and grey error bars) as the speed-vs-SR figure. x = the configuration, in
+    `_mean_configs` order; y = that quantity's mean with its 95% bootstrap interval as the error
+    bar. No legend: the x tick labels already name every configuration, so one would only restate
+    the axis. Marker still follows (precision, method), keeping the shapes consistent across the
+    figure set.
+
+    A pure walk of `stats.json`'s `points_means`, exactly like `render_latency_means_table` — the
+    plotted numbers are the persisted ones, never a recomputation off `bench` — and likewise
+    method-unscoped: the x labels name the method, so either render writes the same five figures."""
+    points = (stats_payload or {}).get("points_means") or {}
+    if not points:
+        return {}
+    sub_dir = Path(out_dir) / "component_analysis"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    panels = {t: _mean_panel(points, t) for t in _TRACKS}
+    # One shared category list across both panels, so a configuration sits at the same x in each.
+    configs = [(lbl, mk) for lbl, mk in _mean_configs() if any(lbl in p for p in panels.values())]
+    paths = {}
+    with plt.rc_context(_serif_rc()):
+        for stem, key, title in _MEAN_QUANTITIES:
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+            for ax, track in zip(axes, _TRACKS):
+                hue = _TRACK_COLOR[track]
+                for x, (label, marker) in enumerate(configs):
+                    entry = panels[track].get(label)
+                    value = None if entry is None else entry[f"{key}_mean_ms"]
+                    if _missing(value):
+                        continue
+                    err = _asym_err(value, entry[f"{key}_ci95_ms"])
+                    if err:
+                        ax.errorbar(x, value, yerr=err, fmt="none", ecolor=_MUTED, elinewidth=0.9,
+                                    capsize=2.5, capthick=0.9, zorder=2)
+                    ax.scatter(x, value, marker=marker, s=90, color=hue,
+                               edgecolor="white", linewidth=0.8, zorder=3)
+                ax.set_title(_TRACK_DISPLAY[track])
+                ax.set_xlim(-0.5, len(configs) - 0.5)
+                ax.set_xticks(range(len(configs)))
+                ax.set_xticklabels([lbl for lbl, _ in configs], rotation=30, ha="right",
+                                   fontsize=8)
+                ax.set_ylabel("Mean latency (ms)")
+                _style(ax, grid_axis="y")
+            fig.suptitle(title)
+            fig.tight_layout()
+            path = sub_dir / f"{stem}.png"
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            paths[stem] = path
+    return paths
+
+
 # --- eval-shim join (SR + per-cycle latency, equal-n) ---------------------------------
 def _select_method(raw, method: str, precision: str | None = None):
     """From one sr.json precision entry, return the point for `method` (or None if this precision
@@ -1280,7 +1382,8 @@ def report(
 
     When `sr_overrides` is present the render also computes the 95% confidence intervals on every
     absolute SR and absolute per-cycle p50 plus the lag-1 independence test (`src.stats`), surfaces
-    them as table columns and plot error bars, and persists them to **`stats.json`**. It is pure
+    them as table columns and plot error bars, and persists them to **`stats.json`**. The mean
+    section additionally renders as five dot plots under `out_dir/component_analysis/`. It is pure
     re-analysis of the same stored samples — no run, no GPU — so it rides this cheap render rather
     than requiring a `src.study` pass.
 
@@ -1291,7 +1394,8 @@ def report(
     `latency_means_table.txt` — the mean decomposition needs a component sample to weight and a
     cycle sample to subtract it from.
 
-    **Writes only `.txt`, `.png` and `stats.json` into `out_dir`.** The canonical inputs —
+    **Writes only `.txt`, `.png` and `stats.json` into `out_dir`** (plus the `component_analysis/`
+    subdirectory of `.png`s). The canonical inputs —
     `results.<track>.json` + `latencies.<track>.json` (`src.study`) and `sr.json` (`src.sr_eval`) —
     are read-only here and are
     never rewritten, even when `out_dir` is the directory holding them (CLAUDE §8; pinned by
@@ -1412,6 +1516,12 @@ def report(
         "component_breakdown": plot_component_breakdown(bench, out_dir),
     }
     plots["speed_vs_sr_titled"] = plots["speed_vs_sr"].with_name("speed_vs_sr.titled.png")  # README headline
+    # The five mean latency quantities, one figure each, in their own `component_analysis/`
+    # subdirectory — additive to every artefact above (SPEC §Uncertainty quantification).
+    plots.update(
+        {f"mean_{stem}": path
+         for stem, path in plot_component_analysis(stats_payload, out_dir).items()}
+    )
     # The cross-track (LeWM-vs-DINOv3) ratio plot needs BOTH tracks at a shared precision; a
     # single-track render would emit misleading empty bars, so skip it unless a ratio exists
     # (SPEC §Headline-artifact durability).

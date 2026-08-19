@@ -471,9 +471,9 @@ touching:
   and permutation test over the stored samples, the bootstrap over the mean quantities, the Holm
   secondary values, the `stats.json` write,
   the interval columns on the tables where SR and the p50s appear, the `latency_means_table.txt`
-  render, and the error bars on the
-  speed-vs-SR plot. Off-pod over the existing canonical artifacts, read-only, like the derived
-  clock render.
+  render, the error bars on the
+  speed-vs-SR plot, and the per-quantity component-analysis figures. Off-pod over the existing
+  canonical artifacts, read-only, like the derived clock render.
 - **Retaining and persisting the timing loops' raw per-call latencies** (the component-latency
   artefact + its merge/no-clobber discipline). Record-and-write plumbing only: it must not change
   what is timed, the iteration count, the warm-up, the batches, or the reported percentiles — those
@@ -596,8 +596,21 @@ What the finished project must satisfy (ordered build steps live in `PLAN.md`).
   persistent network volume** (same durability contract as the other headline artifacts) and are
   surfaced as interval columns in the tables where SR and the p50s appear, as the method-unscoped
   **`latency_means_table.txt`**, and as error bars on the
-  speed-vs-SR plot. `results.*.json`, `sr.json` and the component-latency artefact are **read-only**
+  speed-vs-SR plot and on the per-quantity component-analysis figures below. `results.*.json`,
+  `sr.json` and the component-latency artefact are **read-only**
   to this analysis and stay byte-unchanged. (`docs/architecture.md` §12.)
+  - **Component-analysis figures (`component_analysis/`).** The five mean latency quantities are
+    ALSO rendered as figures — **one figure per quantity, five in all** — written to a
+    `component_analysis/` subdirectory of the report output directory, so they are additive and
+    overwrite no existing plot, table, or result. Each figure is a two-panel **dot plot** (LeWM |
+    DINOv3-WM, one panel per model, **each on its own y-axis** — the cross-model gap is faceted, as
+    on the speed-vs-SR figure, never collapsed onto one shared scale): x = the configuration, in
+    the fixed order **FP32 → FP16 → FP8 → INT8**, each quantized precision appearing once per
+    calibration method (`max` then `entropy`, so `INT8 (entropy)` is rightmost); y = that
+    quantity's mean, with its 95% bootstrap interval as the error bar. Like
+    `latency_means_table.txt` they are a pure read of the persisted mean section — nothing
+    recomputed — method-**unscoped** (the x labels name the method), and carry the same typography
+    and chrome as the speed-vs-SR figure.
 - **Clock-state confound disclosure.** Because GPU clocks cannot be locked (§Execution Environment)
   and the observed throttle is differential — one-sided on the heavier track, so it does not cancel
   in the ratio — the study discloses the confound and bounds it from the logged telemetry: the

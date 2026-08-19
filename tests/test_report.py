@@ -619,6 +619,55 @@ def test_latency_means_table_is_unscoped_and_identical_across_methods(tmp_path):
     )
 
 
+def test_component_analysis_figures_are_one_per_mean_quantity(tmp_path):
+    """Five figures — one per column of the mean table — in their OWN subdirectory, so the figure
+    set is additive and no existing plot name can collide with it (SPEC §Uncertainty
+    quantification)."""
+    out, _ = _mean_render(tmp_path)
+
+    sub = tmp_path / "component_analysis"
+    stems = {stem for stem, _, _ in report._MEAN_QUANTITIES}
+    assert stems == {"enc_call_ms", "pred_call_ms", "t_comp_ms", "cycle_ms", "ovh_ms"}
+    assert {p.name for p in sub.glob("*.png")} == {f"{s}.png" for s in stems}
+    for stem in stems:
+        assert Path(out["plots"][f"mean_{stem}"]) == sub / f"{stem}.png"
+        assert (sub / f"{stem}.png").stat().st_size > 0
+    # the top-level plot set is untouched — the new figures live only under the subdirectory
+    assert {p.name for p in tmp_path.glob("*.png")} == {
+        "speed_vs_sr.png", "speed_vs_sr.titled.png", "per_cycle_ratio.png",
+        "component_breakdown_fp32.png",
+    }
+
+
+def test_component_analysis_x_order_is_fixed_and_shared(tmp_path):
+    """FP32 leftmost, FP8 before INT8, `INT8 (entropy)` rightmost — one category list for both
+    panels, so a configuration sits at the same x in each. The labels are the mean table's own,
+    which is what the panel lookup keys on."""
+    import json
+
+    out, _ = _mean_render(tmp_path)
+    payload = json.loads(Path(out["stats"]).read_text())
+    points = payload["points_means"]
+
+    labels = [lbl for lbl, _ in report._mean_configs()]
+    assert labels == ["FP32", "FP16", "FP8 (max)", "FP8 (entropy)", "INT8 (max)", "INT8 (entropy)"]
+    for track in ("lewm", "dino"):
+        panel = report._mean_panel(points, track)
+        assert set(panel) <= set(labels)
+        assert {"FP32", "FP16", "INT8 (max)", "INT8 (entropy)"} == set(panel)
+
+
+def test_component_analysis_is_unscoped_across_methods(tmp_path):
+    """Like `latency_means_table.txt`: the x labels name the method, so either render writes the
+    same five figures rather than clobbering the other method's."""
+    at_max, _ = _mean_render(tmp_path / "max", method="max")
+    at_entropy, _ = _mean_render(tmp_path / "entropy", method="entropy")
+
+    names = {k for k in at_max["plots"] if k.startswith("mean_")}
+    assert names == {f"mean_{stem}" for stem, _, _ in report._MEAN_QUANTITIES}
+    assert names == {k for k in at_entropy["plots"] if k.startswith("mean_")}
+
+
 def test_mean_table_does_not_touch_the_other_artifacts(tmp_path):
     """The mean surface is additive: it adds a file and changes none. The four method-scoped tables
     and every plot must be byte-identical with and without the component samples that unlock it."""

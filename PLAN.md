@@ -860,6 +860,23 @@ MEAN per-cycle latency quantities"). Re-analysis of the samples already on the v
   byte-identical files; the four method-scoped tables, the isolation/calibration tables and all three
   plots byte-identical with and without the section.
 
+- [ ] 🟢 **`src/report.py::plot_component_analysis`** → `component_analysis/{enc_call_ms,
+  pred_call_ms,t_comp_ms,cycle_ms,ovh_ms}.png`, **five figures, one per mean quantity**, in a
+  subdirectory of the report out dir so nothing existing is overwritten. Two panels (LeWM |
+  DINOv3-WM), **separate y-axes** (the cross-model gap is faceted, as on speed-vs-SR); x = the
+  configuration in the fixed order `FP32, FP16, FP8 (max), FP8 (entropy), INT8 (max),
+  INT8 (entropy)`; y = that quantity's mean with its bootstrap interval as the error bar. A pure
+  walk of `points_means` (no recomputation off `bench`), **unscoped** like the table it plots.
+  → **landed (off-pod ✔):** `_MEAN_QUANTITIES` + `_mean_configs`/`_mean_panel`; serif rc, chrome
+  and grey error bars shared with the speed-vs-SR render; no legend (the x labels already name
+  every configuration). `tests/test_report.py` —
+  `::test_component_analysis_figures_are_one_per_mean_quantity`,
+  `::test_component_analysis_x_order_is_fixed_and_shared`,
+  `::test_component_analysis_is_unscoped_across_methods`. `pytest` 189 passed.
+  → verify (off-pod ✔): five PNGs under `component_analysis/`; the config order is fixed and
+  identical in both panels; a `max` and an `entropy` render write the same set; every other table,
+  plot and `stats.json` byte-identical with and without the figures.
+
 - [ ] 🟢 **Regenerate off-pod:** `uv run python -m src.stats from=<reports/phase5>`, then
   `uv run python -m src.report from=<reports/phase5> sr=<…/sr.json> calibration_method=<max|entropy>`.
   → verify: `points_means` carries **12** entries (2 tracks × {FP32, FP16, INT8 (max), INT8 (entropy),
