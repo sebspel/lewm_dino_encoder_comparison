@@ -3,21 +3,22 @@
 Owned PLUMBING (fails LOUDLY). SPEC §Parity: **GPU clocks are not locked.** This passive observer
 records per-sample telemetry — SM/mem **clock (MHz)**, **power (W)**, **temperature (C)**,
 utilization, and memory — alongside every timed engine run, so the actual per-run clock/thermal
-state is logged rather than assumed. Like the `cudaMemGetInfo` peak-mem sampling in `src.benchmark`,
-it is a separate `nvidia-smi` subprocess and does NOT touch seeds / samples / the plan.
+state is logged rather than assumed. It is a separate `nvidia-smi` subprocess and does NOT touch
+seeds / samples / the plan.
 
 Runs ONLY where `nvidia-smi` is present (the L40S pod); the context manager fails loud if it is
 absent. The logs persist to `$STABLEWM_HOME/reports/phase5/gpu_logs/` (network volume, same
-durability contract as the headline artifacts).
+durability contract as the reported artifacts).
 """
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+
+from src.env import stablewm_home
 
 # `nvidia-smi dmon -s` field groups: p=power+temperature, u=utilization, c=SM/mem clocks (MHz),
 # m=framebuffer/BAR1 memory. `-o DT` prepends the date + time to each sample so the log is a
@@ -28,10 +29,8 @@ _DMON_METRICS = "pucm"
 def default_log_dir() -> Path:
     """Where the telemetry logs land by default: `$STABLEWM_HOME/reports/phase5/gpu_logs/` — the
     persistent network volume, same durability contract as the headline artifacts (SPEC §Parity).
-    Falls back to repo-local `reports/phase5/gpu_logs` off-pod where `STABLEWM_HOME` is unset."""
-    home = os.environ.get("STABLEWM_HOME")
-    base = Path(home) / "reports" / "phase5" if home else Path("reports/phase5")
-    return base / "gpu_logs"
+    `STABLEWM_HOME` comes from `.env` and is required — see `src.env.stablewm_home`."""
+    return stablewm_home() / "reports" / "phase5" / "gpu_logs"
 
 
 def run_tag(track: str, precision: str, method: str, run_type: str) -> str:
@@ -39,7 +38,7 @@ def run_tag(track: str, precision: str, method: str, run_type: str) -> str:
 
     The calibration method is part of the tag because int8/fp8 are run once per method and
     `log_gpu` opens the log with `"w"`: under an unscoped `<track>.<precision>.<run_type>` tag an
-    `entropy` re-run **overwrote the `max` run's telemetry in place**, leaving `src.clock_norm` to
+    `entropy` re-run **overwrote the `max` run's telemetry in place**, leaving `src.gpu_telemetry` to
     pair the surviving log with whichever method it happened to be rendering — a silently wrong
     normalization input. Same defect the derived tables' method-scoped filenames already guard
     against (SPEC §Parity, CLAUDE §8).
@@ -47,7 +46,7 @@ def run_tag(track: str, precision: str, method: str, run_type: str) -> str:
     fp32/fp16 engines are method-INVARIANT but are still tagged with the run's method: the solves
     the observer brackets are a separate run per method, so their telemetry is too.
 
-    `src.clock_norm.harvest` parses this back, and also accepts the legacy 3-part
+    `src.gpu_telemetry.harvest` parses this back, and also accepts the legacy 3-part
     `<track>.<precision>.<run_type>` names already on the volume."""
     return f"{track}.{precision}.{method}.{run_type}"
 

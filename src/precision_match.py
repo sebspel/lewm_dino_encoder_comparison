@@ -43,7 +43,7 @@ from src.trt_runtime import engine_vs_reference
 
 # The batch every graph is TRACED at. Distinct from the batch each engine is BUILT for
 # (`export._BATCH_PROFILE`) — the trace fixes the non-batch axes and the shape modelopt feeds its
-# ORT sessions, the profile fixes what TensorRT tunes tactics at (docs/architecture.md §6).
+# ORT sessions, the profile fixes what TensorRT tunes tactics at (docs/architecture.md §5).
 _MATCH_BATCH = 8
 
 # Precision-match batches, as (encoder batch, predictor batch) pairs — each engine is exercised at
@@ -158,7 +158,7 @@ def precision_match_track(
             predict_inputs=trace_predict,
             engine_dir=engine_dir / precision,
             calib_loader=calib_loader if precision in QUANTIZED_PRECISIONS else None,
-            # PTQ method (`max` | `entropy`, a build option for both tracks — architecture.md §7), so the
+            # PTQ method (`max` | `entropy`, a build option for both tracks — architecture.md §6), so the
             # drift table the owner signs off is measured on the engine SR-eval will build with the
             # same method. Drift IS method-dependent (different scales), so this run is labelled.
             calibration_method=calibration_method,
@@ -241,7 +241,7 @@ def precision_match_track(
 def _print_table(rows: list[dict]) -> None:
     # `hist < cfg.hist` rows are the off-nominal (sub-HS) predictor windows the rollout feeds;
     # `hist == cfg.hist` rows are the traced-HS batch sweep. `enc_b`/`pred_b` are the two engines'
-    # batches — they differ because each engine is built at its own profile (architecture.md §6),
+    # batches — they differ because each engine is built at its own profile (architecture.md §5),
     # so `enc_b` is constant at the encoder's single production batch across every row.
     hdr = f"{'model':>6} {'prec':>5} {'enc_b':>6} {'pred_b':>6} {'hist':>5} {'enc_abs':>10} {'enc_rel':>10} {'pred_abs':>10} {'pred_rel':>10}"
     print(hdr)

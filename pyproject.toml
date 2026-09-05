@@ -36,6 +36,10 @@ dependencies = [
     # could drop them — an interval must not depend on somebody else's dependency graph.
     "scipy",
     "numpy",
+    # Runtime configuration (`src/env.py`): STABLEWM_HOME, WANDB_API_KEY and HF_TOKEN are read
+    # from an uncommitted `.env` at the repo root rather than typed into a shell, so a pod
+    # session and an off-pod render resolve the same paths and secrets.
+    "python-dotenv",
 ]
 
 [dependency-groups]

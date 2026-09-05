@@ -20,7 +20,7 @@ def test_percentiles_ms_orders_p50_p95():
 
 
 def test_stored_p50_matches_the_percentile_the_interval_is_built_on():
-    """ANTI-DRIFT (architecture.md §12): the p50 stored in `results.<track>.json` and the p50 that
+    """ANTI-DRIFT (architecture.md §9): the p50 stored in `results.<track>.json` and the p50 that
     `src.stats` recomputes from the persisted sample must be the SAME number — otherwise the
     rendered interval brackets a value the table does not print. One shared percentile definition,
     float64 on both sides; a float32 reduction here would differ in the last bits."""

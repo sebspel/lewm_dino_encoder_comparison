@@ -8,6 +8,7 @@ exercising the orchestration + skip path without a GPU.
 import dataclasses
 import json
 
+import pytest
 import torch
 
 from src import study
@@ -18,15 +19,17 @@ from src.smoke import build_dummy_lewm
 
 def test_default_out_dir_uses_stablewm_home(monkeypatch, tmp_path):
     """Durability (SPEC §Headline-artifact durability): the study writes under
-    `$STABLEWM_HOME/reports/phase5/` (persistent network volume) so it survives pod teardown,
-    falling back to repo-local `reports/phase5` off-pod."""
+    `$STABLEWM_HOME/reports/phase5/` (persistent network volume) so it survives pod teardown.
+
+    Unset must RAISE, not fall back: the platform's own default is the ephemeral container fs,
+    so a silent fallback would put a multi-hour run's artifacts where a pod restart loses them.
+    """
     monkeypatch.setenv("STABLEWM_HOME", str(tmp_path))
     assert study.default_out_dir() == tmp_path / "reports" / "phase5"
 
     monkeypatch.delenv("STABLEWM_HOME", raising=False)
-    from pathlib import Path
-
-    assert study.default_out_dir() == Path("reports/phase5")
+    with pytest.raises(RuntimeError, match=r"STABLEWM_HOME.*\.env"):
+        study.default_out_dir()
 
 
 def test_engine_paths_convention(tmp_path):
@@ -38,7 +41,7 @@ def test_engine_paths_convention(tmp_path):
 
 def test_engine_paths_quantized_are_method_tagged(tmp_path):
     """int8/fp8 plans are TAGGED with the calibration method so max/entropy engines coexist without
-    overwriting (architecture.md §7); the loader selects by method."""
+    overwriting (architecture.md §6); the loader selects by method."""
     mx = study.engine_paths("dino", "int8", engine_root=tmp_path, method="max")
     assert mx["encoder"] == tmp_path / "dino" / "encoder.int8.max.plan"
 
@@ -107,13 +110,13 @@ def test_dump_track_results_roundtrips(tmp_path, monkeypatch):
     meta = json.loads(path.read_text())["meta"]
     assert meta["num_samples"] == study.CEM_NUM_SAMPLES
     assert meta["n_latency_iters"] == 2
-    # PTQ calibration method label — a build option for both tracks (architecture.md §7), default `max`
+    # PTQ calibration method label — a build option for both tracks (architecture.md §6), default `max`
     assert meta["calibration_method"] == "max"
 
 
 def test_check_calibration_method_validates():
     """Calibration method is a build option for BOTH tracks (`max` | `entropy`); an unknown value
-    fails loudly rather than mislabelling an artefact or crashing deep in modelopt (architecture.md §7)."""
+    fails loudly rather than mislabelling an artefact or crashing deep in modelopt (architecture.md §6)."""
     import pytest
 
     from src.interfaces import check_calibration_method
@@ -178,13 +181,13 @@ def test_a_quantized_precision_never_borrows_the_other_methods_numbers(tmp_path)
 
     cfg = ExportConfig()
     path = study.dump_track_results(
-        "lewm", {"fp32": {"peak_mem_mb": 1.0}, "int8": {"peak_mem_mb": 2.0}}, cfg,
+        "lewm", {"fp32": {"encode_mean_ms": 1.0}, "int8": {"encode_mean_ms": 2.0}}, cfg,
         tmp_path, "entropy",
     )
 
     at_max = report.load_results([path], "max")["lewm"]
     assert "int8" not in at_max  # quantized: absent, never borrowed
-    assert at_max["fp32"] == {"peak_mem_mb": 1.0}  # method-invariant: read across the label
+    assert at_max["fp32"] == {"encode_mean_ms": 1.0}  # method-invariant: read across the label
 
 
 def test_dump_track_latencies_roundtrips_and_records_the_loop_conditions(tmp_path):

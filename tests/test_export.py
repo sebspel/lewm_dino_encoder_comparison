@@ -13,7 +13,7 @@ import pytest
 import torch
 from torch import nn
 
-from src.export import _BATCH_PROFILE, _batch_dynamic, build_engine, export_onnx
+from src.export import _BATCH_PROFILE, _batch_dynamic, build_engine, engine_root, export_onnx
 from src.interfaces import CEM_NUM_SAMPLES, EnginePaths
 
 
@@ -22,9 +22,20 @@ class _Sum(nn.Module):
         return x.sum(-1)
 
 
+def test_engine_root_uses_stablewm_home(monkeypatch, tmp_path):
+    """Engines live on the persistent network volume so a pod session's builds survive teardown.
+    Unset raises rather than falling back — the same discipline as the report/telemetry roots."""
+    monkeypatch.setenv("STABLEWM_HOME", str(tmp_path))
+    assert engine_root() == tmp_path / "engines"
+
+    monkeypatch.delenv("STABLEWM_HOME", raising=False)
+    with pytest.raises(RuntimeError, match=r"STABLEWM_HOME.*\.env"):
+        engine_root()
+
+
 def test_encoder_is_built_at_its_single_production_batch():
     # The CEM slices the candidate axis away before encoding and pins batch_size=1, so the encoder
-    # is only ever called at batch 1 — min, opt and max alike (docs/architecture.md §6).
+    # is only ever called at batch 1 — min, opt and max alike (docs/architecture.md §5).
     assert _BATCH_PROFILE["encoder"] == (1, 1, 1)
 
 

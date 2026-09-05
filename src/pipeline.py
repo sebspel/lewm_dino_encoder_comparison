@@ -57,13 +57,7 @@ _TRACKS = ("lewm", "dino")
 # The committed display copies (SPEC §Headline-artifact durability — the one exception to the
 # never-in-git rule for artifacts). Source path relative to `out_dir`; they are re-copied from a
 # render, never hand-edited.
-_DISPLAY_FIGS = (
-    "speed_vs_sr.png",
-    "speed_vs_sr.titled.png",
-    "per_cycle_ratio.png",
-    "component_breakdown_fp32.png",
-    "gpu_logs/sr_eval_clock_diag.png",
-)
+_DISPLAY_FIGS = ("speed_vs_sr.png",)
 
 # What the archive stage preserves before the run supersedes it (CLAUDE §8 — log before you
 # delete). Globs are non-recursive against `out_dir`, so the archive subtree never archives itself.
@@ -72,7 +66,6 @@ _ARCHIVE_GLOBS = (
     "latencies.*.json",
     "sr.json",
     "stats.json",
-    "derived_clocks.json",
     "*.txt",
     "*.png",
     "gpu_logs/*.dmon.log",
@@ -109,7 +102,7 @@ _STAGE_ORDER = (
     "benchmark",
     "stats",
     "report",
-    "clock_norm",
+    "gpu_telemetry",
     "figs",
 )
 
@@ -195,7 +188,7 @@ def refresh_figs(out_dir: Path, repo_root: Path) -> list[Path]:
     if not copied:
         raise SystemExit(
             f"[pipeline:figs] none of {list(_DISPLAY_FIGS)} exist under {out_dir} — "
-            "run the `report` and `clock_norm` stages first"
+            "run the `report` and `gpu_telemetry` stages first"
         )
     print(f"[pipeline:figs] refreshed {len(copied)} display copies -> {figs}")
     return copied
@@ -328,7 +321,7 @@ def build_steps(
             # Component-precision isolation: ONE component quantized, the other held at FP16, two
             # runs per (track, quantized precision, calibration method). Recorded under composite
             # `enc-<A>+pred-<B>` keys that cannot collide with a pure precision, so the headline is
-            # unchanged by construction (docs/architecture.md §9).
+            # unchanged by construction (docs/architecture.md §8).
             # BOTH methods, unlike the benchmark above: the composite keys carry their method and
             # never fall back across methods (`report._select_method`), so a row only explains a
             # headline row rendered at the SAME method — and the headline renders at either. One
@@ -394,16 +387,11 @@ def build_steps(
                     ),
                 )
 
-        elif stage == "clock_norm":
+        elif stage == "gpu_telemetry":
             for method in CALIBRATION_METHODS:
                 add(
                     stage,
-                    _module(
-                        "src.clock_norm",
-                        f"from={out}",
-                        f"out={out}",
-                        f"calibration_method={method}",
-                    ),
+                    _module("src.gpu_telemetry", f"from={out}", f"calibration_method={method}"),
                 )
 
         elif stage == "figs":

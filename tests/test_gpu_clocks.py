@@ -6,8 +6,6 @@ open the log file, launch `dmon` with the clock/power/temp/util/mem selectors, a
 observer on exit.
 """
 
-from pathlib import Path
-
 import pytest
 
 from src import gpu_clocks
@@ -15,12 +13,13 @@ from src import gpu_clocks
 
 def test_default_log_dir_uses_stablewm_home(monkeypatch, tmp_path):
     """Durability (SPEC §Parity): telemetry logs land under
-    `$STABLEWM_HOME/reports/phase5/gpu_logs/`, falling back to repo-local off-pod."""
+    `$STABLEWM_HOME/reports/phase5/gpu_logs/`; unset raises rather than falling back."""
     monkeypatch.setenv("STABLEWM_HOME", str(tmp_path))
     assert gpu_clocks.default_log_dir() == tmp_path / "reports" / "phase5" / "gpu_logs"
 
     monkeypatch.delenv("STABLEWM_HOME", raising=False)
-    assert gpu_clocks.default_log_dir() == Path("reports/phase5/gpu_logs")
+    with pytest.raises(RuntimeError, match=r"STABLEWM_HOME.*\.env"):
+        gpu_clocks.default_log_dir()
 
 
 def test_log_gpu_fails_loud_without_nvidia_smi(monkeypatch, tmp_path):
@@ -73,7 +72,7 @@ def test_run_tag_carries_the_calibration_method():
     assert gpu_clocks.run_tag("dino", "int8", "entropy", "sr_eval") != gpu_clocks.run_tag(
         "dino", "int8", "max", "sr_eval"
     )
-    # `src.clock_norm.harvest` splits the tag on "." — a composite isolation key must survive it
+    # `src.gpu_telemetry.harvest` splits the tag on "." — a composite isolation key must survive it
     assert (
         gpu_clocks.run_tag("dino", "enc-fp16+pred-int8", "entropy", "sr_eval").split(".")
         == ["dino", "enc-fp16+pred-int8", "entropy", "sr_eval"]

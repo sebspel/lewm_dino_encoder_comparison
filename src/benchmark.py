@@ -4,28 +4,24 @@ Owned PLUMBING (fails LOUDLY). **Latency is the headline** (SPEC §Interface Con
 this harness measures the two COMPONENT latency distributions in isolated, equal-n
 fixed-iteration loops on the engines — **encode-step** (exposes the LeWM↔DINOv3 encoder
 token-count asymmetry) and **predict-step** (quantization's kernel target) — each as p50/p95,
-warm-up dropped. It also samples peak GPU memory. Each step additionally carries its arithmetic
+warm-up dropped. Each step additionally carries its arithmetic
 **mean**, which feeds `src.report`'s per-component decomposition ONLY (means compose additively,
 percentiles do not) and is never reported as a headline.
 
 Alongside those summaries it returns the loops' **raw per-call samples** (`ComponentSamples`), which
 `src.study` persists to `latencies.<track>.json` — so the component p50's confidence interval and its
 lag-1 independence test are re-derivable off-pod rather than taken on trust, and no added statistic
-costs an L40S run (SPEC §Interface Contracts, docs/architecture.md §12).
+costs an L40S run (SPEC §Interface Contracts, docs/architecture.md §9).
 
 There is **no fixed-wall-clock rollout-count run** (owner decision — redundant with the
 per-cycle latency under serial planning). The HEADLINE **per-cycle** latency (one episode's full
 decision) and the **SR** are NOT produced here: both come from the gated eval-shim re-run
 (`src.sr_eval`, via the observation-only per-decision latency callback), so they share the same
 solves. This
-harness therefore returns real component-latency + peak-mem numbers with `per_cycle_*` and
+harness therefore returns real component-latency numbers with `per_cycle_*` and
 `success_rate` left NaN; `src.report` joins the per-cycle latency + SR back in per precision.
 
 Runs ONLY on the L40S: `EngineRunner` lazy-imports `tensorrt` and allocates CUDA buffers.
-`peak_mem_mb` is sampled from **cudaMemGetInfo** (`torch.cuda.mem_get_info`) — device-level
-used memory, so it counts TensorRT's engine + execution-context arena, which a
-`torch.cuda.max_memory_allocated` (torch-allocator) reading would silently miss on exactly
-the optimized path (SPEC §Interface Contracts).
 """
 
 from __future__ import annotations
@@ -47,7 +43,7 @@ def _percentiles_ms(step_ms: list[float]) -> tuple[float, float]:
     **float64, matching `src.report._percentile_ms` exactly.** The raw sample is persisted
     (`ComponentSamples`) and `src.stats` computes the p50's confidence interval from it, so the
     stored point estimate and the later interval must come from the SAME percentile definition —
-    otherwise an interval could bracket a number the table does not print (docs/architecture.md §12).
+    otherwise an interval could bracket a number the table does not print (docs/architecture.md §9).
     float32 would differ in the last bits."""
     lat = torch.tensor(step_ms, dtype=torch.float64)
     return torch.quantile(lat, 0.50).item(), torch.quantile(lat, 0.95).item()
@@ -55,7 +51,7 @@ def _percentiles_ms(step_ms: list[float]) -> tuple[float, float]:
 
 def _mean_ms(step_ms: list[float]) -> float:
     """Arithmetic mean over a list of per-call latencies in ms — the DECOMPOSITION basis
-    (`src.report.decompose`), never a reported headline. Means are what make
+    (the mean latency table), never a reported headline. Means are what make
     `cycle = enc·calls + pred·calls + overhead` exact (linearity of expectation); percentiles
     do not compose that way. Reported latency stays p50/p95 (SPEC §Interface Contracts)."""
     return fmean(step_ms)
@@ -85,7 +81,7 @@ def benchmark(
     `latencies.<track>.json`. Retaining the samples changes nothing about the measurement — same
     loops, same `n_iters`, same `warmup`, same inputs — it only stops throwing them away, so the
     component p50's confidence interval and independence test can be computed off-pod later
-    (SPEC §Interface Contracts, docs/architecture.md §12)."""
+    (SPEC §Interface Contracts, docs/architecture.md §9)."""
     for name, path in engines.items():
         if not path.exists():
             raise FileNotFoundError(f"{name} engine missing: {path}")
@@ -103,18 +99,8 @@ def benchmark(
         predictor.run(predict_inputs)
     torch.cuda.synchronize(device)
 
-    def _used_mem_mb() -> float:
-        # cudaMemGetInfo via torch: device-level (total - free) used bytes. Captures the TRT
-        # engine + context arena (a separate cudaMalloc outside torch's allocator). Sampled
-        # after warm-up, so engines/contexts/I-O buffers are already resident.
-        free, total = torch.cuda.mem_get_info(device)
-        return (total - free) / 1e6
-
-    peak_mem_mb = _used_mem_mb()
     encode_ms = _time_loop(encoder, encode_inputs, n_iters)
-    peak_mem_mb = max(peak_mem_mb, _used_mem_mb())
     predict_ms = _time_loop(predictor, predict_inputs, n_iters)
-    peak_mem_mb = max(peak_mem_mb, _used_mem_mb())
 
     encode_p50, encode_p95 = _percentiles_ms(encode_ms)
     predict_p50, predict_p95 = _percentiles_ms(predict_ms)
@@ -128,7 +114,6 @@ def benchmark(
         predict_p50_ms=predict_p50,
         predict_p95_ms=predict_p95,
         predict_mean_ms=_mean_ms(predict_ms),
-        peak_mem_mb=peak_mem_mb,
         success_rate=math.nan,  # joined in by src.report from the gated eval-shim re-run
     )
     return result, ComponentSamples(encode_ms=encode_ms, predict_ms=predict_ms)

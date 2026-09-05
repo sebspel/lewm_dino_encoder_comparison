@@ -1,10 +1,9 @@
-# Platform API — read from the real pinned source (Phase 1)
+# Platform API — read from the real pinned source
 
-> Per CLAUDE.md §10, this records the **actual** `stable-worldmodel` /
-> `stable-pretraining` API as installed at our pinned versions — not from memory.
-> Values marked **⟨runtime-confirm⟩** need the model instantiated on the L40S pod
-> (HF weights download) to be certain; values marked **🔴 OWNER** are the
-> sign-off gate before any dim is hard-coded in `src/interfaces.py` (Phase 4).
+> This records the **actual** `stable-worldmodel` / `stable-pretraining` API as installed
+> at the pinned versions — read from the source, never from memory. The dims the owned
+> layer hard-codes in `src/interfaces.py` are derived here and confirmed against the real
+> models on the pod, because a wrong dim mis-shapes an engine silently.
 
 ## Provenance
 
@@ -14,9 +13,8 @@
   from GitHub `galilai-group/stable-worldmodel` at tag **`0.1.1`** (matches the wheel):
   `scripts/train/{lewm,prejepa}.py`, `scripts/plan/eval_wm.py`,
   `scripts/{train,plan}/config/**`.
-- This was read on the **edit-only WSL box** (no GPU pod, platform not installed
-  locally). The static API/dim *derivations* below are version-locked and reliable;
-  the ⟨runtime-confirm⟩ items still require a one-shot introspection on the pod.
+- The static API/dim *derivations* below are version-locked; the values marked ✓ were
+  additionally confirmed by instantiating the real models on the pod.
 
 ---
 
@@ -57,7 +55,7 @@ if hasattr(pixels_embed, 'last_hidden_state'):
 
 ---
 
-## 2. Dims — runtime-confirmed on the L40S pod (2026-06-26) ✓
+## 2. Dims — confirmed against the real models on the L40S ✓
 
 DINOv3 alias available at 0.1.1 (`wm/prejepa/module.py :: BACKBONE_ALIASES`):
 `dinov3_small -> facebook/dinov3-vits16-pretrain-lvd1689m` (**ViT-S/16, the only v3 alias**).
@@ -74,7 +72,7 @@ All values below verified by instantiating the real encoders + PushT env on the 
 | DINOv3 true patches | **196** | (224/16)² ✓ |
 | DINOv3 register tokens | **4** | `encoder.config.num_register_tokens == 4` ✓ |
 | `last_hidden_state` length | **201** | `(1, 201, 384)` = 1 CLS + 4 reg + 196 patch ✓ |
-| **Resolved `N_patches`** | **196** | OWNER: slice CLS **and** registers (§6) → true 196-patch grid ✓ |
+| **Resolved `N_patches`** | **196** | Slice CLS **and** registers (§6) → true 196-patch grid ✓ |
 | predictor token dim | **404** | `hidden(384) + proprio(10) + action(10)`; extras from `wm.encoding` |
 
 `scripts/train/prejepa.py` sizes the predictor **from config, not from the encoder
@@ -108,11 +106,11 @@ do not vary between tracks):**
 - `PlanConfig`: `horizon=5`, `receding_horizon=5`, `action_block=5` (frameskip).
 - `eval`: `num_eval=50`, `goal_offset_steps=25`, `eval_budget=50`, `img_size=224`.
 - Normalization: ImageNet stats applied in `img_transform` (`transforms.Normalize(**spt.data.dataset_stats.ImageNet)`).
-- Matches SPEC §Parity ("300 samples, 30 elites, horizon 5, init var 1, 10–30 iters").
+- Matches SPEC §Parity ("300 samples, 30 elites, horizon 5, init var 1, 30 iterations").
 
 ---
 
-## 4. DINOv2 → DINOv3 override (Phase-2 `conf/`, flagged here)
+## 4. DINOv2 → DINOv3 override
 
 `prejepa.yaml` defaults to DINOv2 and assumes patch 14. The DINOv3 track needs, at
 minimum:
@@ -120,15 +118,14 @@ minimum:
 - `patch_size=16` (DINOv3 ViT-S/16, **not** the dinov2 default of 14) — otherwise
   `num_patches=(224//14)²=256`, silently wrong.
 
-⚠️ **RESOLVED in PLAN/SPEC (2026-06-26):** the original literal command
-`prejepa backbone=dinov3` does **not** map to anything — there is no `backbone=` config
-group. Corrected to `backbone.name=dinov3_small backbone.type=dinov3_small patch_size=16`
-(or a new `conf/` group we add in Phase 2). The register slice is applied via a `PreJEPA`
-subclass in `src/` (§6), not by editing the wheel.
+⚠️ There is no `backbone=` config group, so `prejepa backbone=dinov3` maps to nothing.
+The working override is `backbone.name=dinov3_small backbone.type=dinov3_small
+patch_size=16`. The register slice is applied via a `PreJEPA` subclass in `src/` (§6),
+not by editing the wheel.
 
 ---
 
-## 5. One CEM planning cycle → encoder / predictor / planner (for Phase-5 profiling)
+## 5. One CEM planning cycle → encoder / predictor / planner
 
 `CEMSolver.solve` (one `policy.get_action` replan):
 1. `prepare_init_action` (warm-start). **Outside the latency-callback bracket** (the callback
@@ -153,30 +150,29 @@ accordingly (SPEC §Parity). Export boundary is confirmed: `eval_wm.py` `torch.c
 **`encoder` + `predictor` only** — the CEM loop stays in Python, exactly the
 `WMStepAdapter` boundary TRT will optimize.
 
-**Latency-scope note (Phase-3 metric).** The owned observation-only latency measure is a
-config-injected `CEMSolver.Callback` bracketing one solve (`reset → end_solve`), so it times
-the **optimization body (step 2 onward)** and excludes the step-1 `prepare_init_action`
-warm-start. For LeWM and DINO-WM that warm-start is a **zero-pad** — neither model is
-`Actionable` (`get_cost` only, no `get_action`), so `prepare_init_action` takes the
-`torch.zeros` branch, no model forward. The exclusion is therefore negligible and
-model-independent (same for both tracks, so it cannot bias the LeWM-vs-DINOv3 ratio). The
-metric is labelled **CEM-solve latency**, not full planning-cycle latency; if an actor were
-ever added (making a model `Actionable`) this would need revisiting — no phase does so.
+**Latency-scope note.** The owned observation-only latency measure is a config-injected
+`CEMSolver.Callback` that brackets **one decision** (consecutive `start_batch` hooks, the
+last closing at `end_solve` — see `docs/architecture.md` §7), so it times the optimization
+body and excludes the `prepare_init_action` warm-start. For LeWM and DINO-WM that warm-start
+is a **zero-pad** — neither model is `Actionable` (`get_cost` only, no `get_action`), so
+`prepare_init_action` takes the `torch.zeros` branch, no model forward. The exclusion is
+therefore negligible and model-independent (same for both tracks, so it cannot bias the
+cross-model comparison). If an actor were ever added, making a model `Actionable`, this
+would need revisiting.
 
 ---
 
-## 6. 🔴 OWNER GATE — RESOLVED (2026-06-26)
+## 6. The encode-path override and the hard-coded dims
 
-1. **DINOv3 register tokens → SLICE THEM (match SPEC).** OWNER chose to drop **CLS +
-   the N register tokens** so the DINO-WM grid is the true **196 patches** (`D=384`),
-   not the platform's default 200. Implementation (Phase 2, now owner-approved as the
-   single surgical core-encoder edit): in the vendored/overridden `prejepa` path change
-   `_encode_image`'s `last_hidden_state[:, 1:, :]` → `[:, 1+num_reg:, :]`, and set the
-   config `num_patches=196`, `patch_size=16`. Must apply to **both** training and eval
-   so the predictor is trained on the same 196-token grid it plans over.
-   `num_reg == 4` confirmed on the pod → slice is `[:, 5:, :]` (1 CLS + 4 reg).
-2. **Dims to hard-code in Phase 4** (after one-shot pod confirmation of `hidden_size`,
-   `num_reg`, `vit_hf(tiny)` dim, PushT action space): `LATENT_DIM=192` (LeWM),
+1. **DINOv3 register tokens are SLICED.** CLS **and** the N register tokens are dropped so
+   the DINO-WM grid is the true **196 patches** (`D=384`), not the platform's default 200.
+   Implementation: in the overridden `prejepa` path, `_encode_image`'s
+   `last_hidden_state[:, 1:, :]` becomes `[:, 1+num_reg:, :]`, with config
+   `num_patches=196`, `patch_size=16`. It must apply to **both** training and eval so the
+   predictor is trained on the same 196-token grid it plans over.
+   `num_reg == 4` confirmed on the pod → the slice is `[:, 5:, :]` (1 CLS + 4 reg).
+2. **The dims hard-coded in `src/interfaces.py`**, after pod confirmation of `hidden_size`,
+   `num_reg`, `vit_hf(tiny)` dim and the PushT action space: `LATENT_DIM=192` (LeWM),
    DINO-WM patch grid `(N_patches, D) = (196, 384)`, `ACTION_DIM=2`.
-3. **DINOv3 size → stay on `dinov3_small`** (ViT-S/16, 384-d). Encoder-compute
-   asymmetry vs LeWM ViT-Tiny is modest at this backbone size; accepted for now.
+3. **The DINOv3 size is `dinov3_small`** (ViT-S/16, 384-d) — the only v3 alias the platform
+   ships at this version.

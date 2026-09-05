@@ -21,11 +21,11 @@ Precision = Literal["fp32", "fp16", "int8", "fp8"]
 QUANTIZED_PRECISIONS: tuple[str, ...] = ("int8", "fp8")
 
 # PTQ calibration method — a BUILD OPTION available to BOTH tracks (`max` | `entropy`), not a
-# hidden per-track setting (architecture.md §7). `max` (ORT MinMax + symmetric)
+# hidden per-track setting (architecture.md §6). `max` (ORT MinMax + symmetric)
 # sets each per-tensor scale to the largest abs activation seen — zero outlier rejection; `entropy`
 # (ORT Entropy) picks a KL-optimal threshold that clips the outlier tail. The ONNX int8/fp8 flow
 # supports exactly these two. Which one wins is an SR question, MEASURED per (track, precision,
-# method) — NOT asserted per track: LeWM's action signal (widened by architecture.md §7) may prefer `max`;
+# method) — NOT asserted per track: LeWM's action signal (widened by architecture.md §6) may prefer `max`;
 # DINO's outlier-heavy frozen-DINOv3 activations may prefer `entropy`'s tail-clip. Held CONSTANT
 # across a track's INT8 and FP8 within a labelled comparison so the INT8->FP8 step isolates the
 # format (SPEC §Parity). Surfaced as a report LABEL (results.<track>.json meta + method-scoped
@@ -90,12 +90,12 @@ ENCODER_CALLS_PER_CYCLE = 2  # goal encode + initial-obs encode (both cached, ba
 PREDICTOR_CALLS_PER_CYCLE = 150  # (horizon 5 − n_obs 1 + 1) × n_steps 30, batched over the candidates
 
 # Per-cycle warm-up: decisions dropped from the HEAD of each per-cycle latency vector before the
-# equal-n truncation (architecture.md §8). The engine-step loops
+# equal-n truncation (architecture.md §7). The engine-step loops
 # already drop `ExportConfig.warmup` iters; the per-cycle callback records from the first decision of
 # the first solve, so without this the cold first execute_v2 / kernel autotune / clock ramp sits in
 # the cycle mean and NOT in the component means — and `overhead = cycle − enc − pred` books all of it
-# as planner overhead, deflating `p` and the Amdahl ceiling. Applied at REPORT time, never at record
-# time: `sr.json` keeps the complete raw vector, so the architecture.md §8 span-sum reconciliation still holds
+# as planner overhead, overstating the un-optimizable floor. Applied at REPORT time, never at record
+# time: `sr.json` keeps the complete raw vector, so the architecture.md §7 span-sum reconciliation still holds
 # and both views re-render off-pod. Costs 1 of ~50-100 samples; the p50 headline is unmoved either
 # way (median robustness) — this is for the mean-based decomposition.
 PER_CYCLE_WARMUP_DROP = 1
@@ -117,7 +117,7 @@ CI_ALPHA = 0.05
 # still-alive episodes on a thermally drifting GPU, so independence is a claim, not a given; serial
 # correlation would make the interval too NARROW (a stronger result than the sample supports).
 PERMUTATION_RESAMPLES = 50_000
-# Fixed and recorded, and set to the owned layer's seed convention (`ExportConfig.seed`,
+# Fixed and recorded, and set to the owned code's seed convention (`ExportConfig.seed`,
 # `calibrate.predictor_batches`) rather than a fresh value: a Monte-Carlo p-value that moves between
 # renders is not an artefact anyone can audit.
 PERMUTATION_SEED = 0
@@ -130,30 +130,19 @@ PERMUTATION_SEED = 0
 BOOTSTRAP_RESAMPLES = 3_000
 BOOTSTRAP_SEED = 0
 
-# --- Clock normalization (owner-gated; SPEC §Implementation Boundaries "clock-normalization
-# construction", signed off 2026-07-25). GPU clocks are unlockable on this platform, and the
-# observed throttle is DIFFERENTIAL — the heavier track power-throttles while the lighter one holds
-# the boost ceiling — so it does not cancel in the cross-model ratio. These fix the derived-bound
-# construction; a wrong value is a plausible wrong CORRECTED number (silent), hence owner-set.
+# GPU-telemetry summarisation (`src.gpu_telemetry`). Clocks cannot be locked on the benchmark
+# platform (`nvidia-smi -lgc` denied by the RunPod virtualization layer, confirmed as root with
+# persistence mode on — SPEC §Execution Environment), so the per-run clock/thermal state is
+# RECORDED rather than controlled and these fix how a run's log is reduced to one clock.
 #
-# Scaling model: `T_ref = T × f_measured / f_ref` (time ∝ 1/f_sm). It knowingly OVER-corrects —
-# memory-bound and host/Python time do not scale with SM clock — which is exactly what makes the
-# normalized figure a BOUND (the maximum plausible correction) rather than a point estimate
-# (SPEC §Parity). ALL measured latency is treated as clock-bound: per-cycle, encode-step and
-# predict-step alike, so the overhead decomposition subtracts terms taken at a matched clock.
-# `f_ref` cancels in every ratio (R′ and the within-model deltas); it only scales the absolute
-# derived ms values, which read as "as if unthrottled" at the boost ceiling.
-CLOCK_F_REF_MHZ = 2520  # L40S boost ceiling — the clock the lighter track (LeWM) actually held
 # `f_measured` is the UTIL-CONDITIONED median SM clock: the median `pclk` over the run's dmon
-# samples with SM utilization ≥ the threshold. Conditioning is load-bearing, not cosmetic — a
+# samples with SM utilization >= the threshold. Conditioning is load-bearing, not cosmetic — a
 # 1 Hz dmon over a short run catches idle/ramp samples (one log medians to 1260 MHz at 7% util),
-# and an unconditioned median would halve that run's normalized time from a sample where nothing
-# was running.
+# and an unconditioned median would report a clock nothing was ever running at.
 CLOCK_BUSY_UTIL_PCT = 50
-# A run with fewer than this many busy samples is recorded as UNMEASURED (null) and excluded from
-# normalization — its measured latency is reported without a derived counterpart and the gap is
-# disclosed. Never invent a clock: asserting one from an idle sample is the silent-failure mode
-# this whole gate exists to prevent.
+# A run with fewer than this many busy samples is recorded as UNMEASURED (null) rather than
+# summarised. Never invent a clock: asserting one from an idle sample is the silent-failure mode
+# this gate exists to prevent.
 CLOCK_MIN_BUSY_SAMPLES = 3
 
 # CEM action-proposal shape — the distribution `predict` is ACTUALLY driven by at eval, and
@@ -242,8 +231,8 @@ class BenchResult(TypedDict):
     # precision from that gated run, so per-cycle latency and SR come from the same solves
     # (SPEC §Interface Contracts). Equal-n across tracks (report truncates to the common
     # min-n before reducing).
-    # `p50` is the COMPARISON basis (the LeWM-vs-DINOv3 headline ratio + the FP32-relative
-    # degradation): robust to the tail at this n. `p95` is reported as the descriptive tail.
+    # `p50` is the COMPARISON basis: robust to the tail at this n. `p95` is reported as the
+    # descriptive tail and carries no claim.
     per_cycle_p50_ms: float
     per_cycle_p95_ms: float
     # `mean` is the DECOMPOSITION basis only (never the headline) — see the call counts above.
@@ -252,19 +241,14 @@ class BenchResult(TypedDict):
     # (warm-up dropped, equal-n). `encode_*` exposes the encoder token-count asymmetry
     # (LeWM 1 token vs DINOv3 196); `predict_*` is quantization's kernel target. Each engine
     # call syncs its stream, so for LeWM's tiny ops these sit on a launch+sync floor.
-    # p50/p95 are reported; `*_mean_ms` feeds the decomposition ONLY.
+    # `*_mean_ms` is what the decomposition and the mean latency table report; the component
+    # percentiles are computed but are not a reported surface.
     encode_p50_ms: float
     encode_p95_ms: float
     encode_mean_ms: float
     predict_p50_ms: float
     predict_p95_ms: float
     predict_mean_ms: float
-    # Sampled from cudaMemGetInfo (`torch.cuda.mem_get_info`), NOT `torch.cuda.max_memory_
-    # allocated`: TensorRT's engine + execution-context device allocations bypass torch's
-    # caching allocator, so the allocator would undercount exactly the optimized path
-    # (SPEC §Interface Contracts). Device-level → whole-GPU used memory (benchmark pod is
-    # dedicated).
-    peak_mem_mb: float
     success_rate: float  # Push-T SR paired with this engine config (gated eval shim; NaN until then)
 
 
@@ -278,7 +262,7 @@ class ComponentSamples(TypedDict):
     (`latencies.<track>.json`, `src.study.dump_track_latencies`) so a later statistic over the
     component distributions — the p50 confidence interval + its independence test (`src.stats`), or
     any future quantile — is an off-pod re-analysis instead of an L40S booking
-    (SPEC §Interface Contracts, docs/architecture.md §12).
+    (SPEC §Interface Contracts, docs/architecture.md §9).
 
     Warm-up is already excluded: `benchmark` runs `warmup` untimed iters before the timed loop, so
     the recorded vector IS the sample — no truncation and no report-time drop, unlike the per-cycle

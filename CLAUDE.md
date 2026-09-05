@@ -68,12 +68,11 @@ Simple explanation or "how do I run X" questions get a direct, concise answer �
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## 6. Ground in the Plan
+## 6. Ground in the Spec
 
-At the start of each session or new phase, re-read `PLAN.md` before writing any code.
-- Don't implement a phase until the previous phase's verify step is confirmed.
-- If a task contradicts the plan, flag it before proceeding.
-- If the plan is ambiguous, ask — don't resolve silently.
+At the start of each session, re-read `SPEC.md` before writing any code.
+- If a task contradicts the spec, flag it before proceeding.
+- If the spec is ambiguous, ask — don't resolve silently.
 
 ## 7. Hard Caps on Debugging Loops
 
@@ -103,8 +102,8 @@ training-data knowledge of them may be stale. Read their real API from the insta
 source (.venv/...) and scripts/train/*.py before wiring to it. When unsure, read the
 source or ask — never call a platform method from memory.
 
-## 12. Plan vs Spec Separation
-`PLAN.md` carries execution steps only — ordered checkboxes, commands, file paths, owner gates, and verify criteria.
+## 12. Spec vs Rationale Separation
 `SPEC.md` carries the stable contract — requirements, invariants, scope, and ownership boundaries.
-Rationale, design reasoning, and tradeoffs belong in `docs/architecture.md` and `docs/adr/`, never in `PLAN.md`.
-Keep PLAN steps terse; if a "why" is worth recording, put it in architecture/ADR docs and reference them from SPEC or PLAN if needed.
+`docs/architecture.md` carries design rationale, and only the NON-OBVIOUS kind: silent-failure traps,
+platform quirks, and library deviations a reader could not derive from the code.
+`README.md` carries how to run it. Measured results belong in the artifacts, never in the repo docs.

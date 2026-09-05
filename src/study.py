@@ -1,7 +1,7 @@
 """Phase-5 speedup-study driver — owned PLUMBING (fails LOUDLY).
 
 Ties the finished Phase-5 workers into one L40S command: for each track it benchmarks every
-precision whose engines `src.export` has already built (component-latency + peak memory), and
+precision whose engines `src.export` has already built (the component-latency loops), and
 hands the assembled bench dict to `src.report` for the headline tables + plots.
 
     uv run python -m src.study                  # both tracks, all built precisions
@@ -15,7 +15,7 @@ hands the assembled bench dict to `src.report` for the headline tables + plots.
                                                 # fp32/fp16 need timing once, not once per method)
 
 **Latency is the headline** (SPEC §Interface Contracts). This driver produces the two COMPONENT
-latency distributions (encode-step + predict-step p50/p95, engine step loops) + peak memory; the
+latency distributions (encode-step + predict-step, engine step loops); the
 HEADLINE **per-cycle** latency and the **SR** come from the separate, gated `src.sr_eval` run
 (same solves) and are joined off-pod by `src.report`. There is no fixed-wall-clock rollout-count
 run.
@@ -43,13 +43,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
 
+from src.env import stablewm_home
 from src.interfaces import (
     EnginePaths,
     ExportConfig,
@@ -70,10 +70,9 @@ _TRACKS = ("lewm", "dino")
 def default_out_dir() -> Path:
     """Where the headline artifacts land by default: `$STABLEWM_HOME/reports/phase5/` — the
     persistent network volume, same durability contract as checkpoints + engines, so a
-    completed study survives pod teardown (SPEC §Headline-artifact durability). Falls back to
-    the repo-local `reports/phase5` off-pod where `STABLEWM_HOME` is unset."""
-    home = os.environ.get("STABLEWM_HOME")
-    return Path(home) / "reports" / "phase5" if home else Path("reports/phase5")
+    completed study survives pod teardown (SPEC §Headline-artifact durability). `STABLEWM_HOME`
+    comes from `.env` and is required — see `src.env.stablewm_home`."""
+    return stablewm_home() / "reports" / "phase5"
 
 
 def engine_paths(
@@ -145,7 +144,7 @@ def dump_track_results(
     `NaN` token (Python's json round-trips them; `src.report.load_results` reads them back).
 
     Keyed by **(precision, calibration method)**: an int8/fp8 engine is a per-method BUILD, so the
-    latency + peak-mem measured off it belong to that method and coexist with the other's as
+    latency measured off it belongs to that method and coexists with the other's as
     separately-labelled points (SPEC §Parity), which `src.report calibration_method=` then selects
     like-for-like across tracks. FP32/FP16 carry one data-free build, so whichever run recorded them
     the number describes the same engine and a render reads it across labels
@@ -164,7 +163,7 @@ def dump_track_results(
             "seed": cfg.seed,
             "obs_shape": list(cfg.obs_shape),
             # The int8/fp8 PTQ method THIS run's engines were built with (a build option for both
-            # tracks — architecture.md §7) and therefore the key its rows landed under. The per-cell
+            # tracks — architecture.md §6) and therefore the key its rows landed under. The per-cell
             # labels in `bench` are the authority; this records the latest writer, and is what a
             # legacy flat entry is folded under.
             "calibration_method": calibration_method,
@@ -191,7 +190,7 @@ def dump_track_latencies(
     ~800 floats per track into it would make that schema heavier for one consumer. This file is what
     `src.stats` computes the component p50 confidence intervals + lag-1 independence tests from, so a
     later statistic over the component distributions is an off-pod re-analysis rather than an L40S
-    booking (SPEC §Interface Contracts, docs/architecture.md §12).
+    booking (SPEC §Interface Contracts, docs/architecture.md §9).
 
     Keyed by **(precision, calibration method)**, exactly as `dump_track_results` is: these are the
     per-call latencies of a specific pair of engine plans, and the quantized plans are per-method
@@ -210,7 +209,7 @@ def dump_track_latencies(
             # The loop conditions these samples were recorded under. n is equal across tracks by
             # construction (fixed-iteration), and `warmup` iters ran UNTIMED before the first
             # recorded call — so each vector is already the sample, needing no truncation and no
-            # report-time warm-up drop (docs/architecture.md §12).
+            # report-time warm-up drop (docs/architecture.md §9).
             "n_latency_iters": cfg.n_latency_iters,
             "warmup": cfg.warmup,
             "calibration_method": calibration_method,

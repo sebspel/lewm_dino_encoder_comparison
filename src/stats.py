@@ -26,26 +26,21 @@ the latency interval rests on:
     call-count weighting belongs: `t_comp = 2 × enc + 150 × pred`, the measured `cycle` mean, and
     `overhead = cycle − t_comp`. The samples are the ones the p50 intervals already use, so the
     composites ARE the rendered decomposition and the components ARE the timed engine steps — this
-    adds intervals to those surfaces, not a second set of numbers. No new independence test and no
-    third Holm family: `enc`/`pred`/`cycle` carry the flag of their constituent sample's lag-1 test,
-    and the two composites carry none (a flag describes a sample).
+    adds intervals to those surfaces, not a second set of numbers. No new independence test:
+    `enc`/`pred`/`cycle` carry the flag of their constituent sample's lag-1 test, and the two
+    composites carry none (a flag describes a sample).
 
-**No interval on any difference or ratio** — not ΔSR, not the FP32-relative p50 speedup, not the
-DINOv3÷LeWM per-cycle ratio, not Δ(entropy−max), and not the dilution shares (`p`, the Amdahl
-ceiling, the model-only/realized speedups). `overhead` is the single named exception, and only
-because it is one configuration's absolute floor obtained by subtraction — never a contrast between
-two of them. Owner ruling; rationale in architecture.md §12.
-
-**Holm is scoped per measurement surface**: the per-cycle tests form one family, the component tests
-another, never pooled. Pooling would make every published adjusted p-value a function of which other
-surfaces happen to exist in the file. The decision is the unadjusted p-value either way.
+**No interval on any difference or ratio** — not ΔSR, not a speedup, not a cross-model ratio, not
+Δ(entropy−max). `overhead` is the single named exception, and only because it is one
+configuration's absolute floor obtained by subtraction — never a contrast between two of them.
+Owner ruling; rationale in architecture.md §9.
 
 **Pure re-analysis of stored samples.** Reads `sr.json` and `latencies.<track>.json`, nothing else.
 It requires no
 `src.study`, no `src.benchmark`, no `src.sr_eval`, no engines and no L40S — the samples it needs
 were persisted by the completed runs. `sr.json`, `latencies.*.json` and `results.*.json` are
 **read-only** here and are
-never rewritten (SPEC §Parity, CLAUDE §8), the same discipline `src.clock_norm` obeys.
+never rewritten (SPEC §Parity, CLAUDE §8), the same discipline `src.gpu_telemetry` obeys.
 
 Writes ONE artifact, `stats.json`, defaulting to `$STABLEWM_HOME/reports/phase5/` — the persistent
 network volume, same durability contract as the other headline artifacts — with `from=`/`out=` to
@@ -60,14 +55,12 @@ it cannot — each is pinned by a test in `tests/test_stats.py`):
   2. No scipy function computes the order-statistic quantile interval. `mstats.median_cihs`
      (Hettmansperger-Sheather) and `mstats.mquantiles_cimj` (Maritz-Jarrett) are DIFFERENT
      estimators and must not be substituted; only `binom.cdf` is used.
-  3. scipy has no Holm. `scipy.stats.false_discovery_control` is Benjamini-Hochberg/Yekutieli —
-     FDR, not FWER. Holm is written out below.
-  4. The naive rank choice `binom.ppf(a/2)` / `binom.isf(a/2)` UNDER-covers (0.9481 at n=59); the
+  3. The naive rank choice `binom.ppf(a/2)` / `binom.isf(a/2)` UNDER-covers (0.9481 at n=59); the
      conservative recipe in `order_statistic_ci` is used instead.
 Clopper-Pearson is the one construction taken wholesale from scipy, because it is exact there.
 
-**Writes no interpretation.** What a rejected independence test licenses about the headline is
-owner-authored (SPEC §Implementation Boundaries), like the Phase-7 disclosure prose.
+**Writes no interpretation.** It reports the interval and the test result; what a rejected
+independence test licenses about a reported number is not decided here.
 
 Usage:
   uv run python -m src.stats
@@ -145,9 +138,9 @@ def order_statistic_ci(sample, q: float = _MEDIAN_Q, alpha: float = CI_ALPHA) ->
     coverage — or **None** when no rank pair reaches `1-alpha` (n <= 5 at q=0.5).
 
     Never invent an interval for a sample too small to support one: the same "unmeasured, never
-    asserted" discipline `src.clock_norm` applies to undersampled clock runs.
+    asserted" discipline `src.gpu_telemetry` applies to undersampled clock runs.
 
-    **The rank convention is load-bearing** (architecture.md §12). The obvious
+    **The rank convention is load-bearing** (architecture.md §9). The obvious
     `j = binom.ppf(alpha/2)` / `k = binom.isf(alpha/2)` UNDER-covers — 0.9481 at n=59 — because
     `ppf` returns the smallest rank whose CDF is at LEAST alpha/2. The conservative recipe is:
 
@@ -263,24 +256,6 @@ def dwass_permutation_test(
     return out
 
 
-def holm(pvalues: dict) -> dict:
-    """Holm step-down FWER-adjusted p-values, keyed as given. **Secondary reporting only** — the
-    test decision is the unadjusted p-value (SPEC §Interface Contracts), because each run's interval
-    is read on its own rather than as one of 18 simultaneous claims. Computed unconditionally so
-    "did multiplicity matter here" is answerable off the artefact instead of argued.
-
-    `p_adj_(i) = min(1, max_{j<=i} (m-j+1) * p_(j))` — the running max enforces the monotonicity
-    Holm requires. NOT `scipy.stats.false_discovery_control`, which controls FDR, a different
-    quantity; Holm over Bonferroni because it is uniformly more powerful at the same FWER."""
-    items = [(k, v) for k, v in pvalues.items() if v == v]  # drop NaN (untested runs)
-    m = len(items)
-    adjusted, running = {}, 0.0
-    for i, (key, p) in enumerate(sorted(items, key=lambda kv: kv[1])):
-        running = max(running, (m - i) * p)
-        adjusted[key] = min(1.0, running)
-    return {k: adjusted.get(k, float("nan")) for k in pvalues}
-
-
 # --- the payload ----------------------------------------------------------------------
 def _method_map(raw) -> dict:
     """One sr.json precision entry -> `{method: point}`. Legacy flat entries (pre-labelling) are
@@ -312,12 +287,12 @@ def compute(
     tracks present at that (label, method).
 
     `component_latencies` (the merged `latencies.<track>.json` blocks) adds the **component**
-    surface — encode-/predict-step p50 intervals under `points_components` — with its OWN Holm
-    family, and the **mean** surface under `points_means` (the two per-call component means and the
-    three per-cycle composites, bootstrap intervals, flags inherited from the two sections above).
+    surface — encode-/predict-step samples under `points_components` — and the **mean** surface
+    under `points_means` (the two per-call component means and the three per-cycle composites,
+    bootstrap intervals, flags inherited from the two sections above).
     Absent, both
     sections are simply omitted: a `stats.json` without them is still valid, and the per-cycle
-    values are byte-identical either way (docs/architecture.md §12)."""
+    values are byte-identical either way (docs/architecture.md §9)."""
     # Invert to (label, method) -> {track: raw vector}: the equal-n truncation is defined ACROSS
     # tracks at one label, so the grouping has to happen before any sample is cut.
     vectors: dict = {}
@@ -334,7 +309,6 @@ def compute(
     }
 
     points: dict = {}
-    raw_p: dict = {}
     for track, by_label in sr_json.items():
         for label, raw in by_label.items():
             for method, point in _method_map(raw).items():
@@ -361,17 +335,7 @@ def compute(
                         p50_ci_coverage=None if ci is None else ci["coverage"],
                     )
                     entry.update(dwass_permutation_test(sample, n_resamples, seed, alpha))
-                    raw_p[(track, label, method)] = entry["lag1_p_permutation"]
                 points.setdefault(track, {}).setdefault(label, {})[method] = entry
-
-    # Holm across the per-cycle family of independence tests — SECONDARY, flags nothing. The
-    # component tests form their OWN family below and are never pooled into this one, so these
-    # values do not move when a component section is added (docs/architecture.md §12).
-    for key, adj in holm(raw_p).items():
-        track, label, method = key
-        entry = points[track][label][method]
-        entry["lag1_p_holm"] = adj
-        entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
 
     components = (
         compute_components(component_latencies, alpha, n_resamples, seed)
@@ -414,16 +378,12 @@ def compute(
             "n_resamples": n_resamples,
             "seed": seed,
             "student_t_adjustment": False,
-            "decision_pvalue": "lag1_p_permutation (UNADJUSTED)",
-            "holm": "secondary reporting only — adjusts no flag and no table",
-            "holm_scope": "per measurement surface — the per-cycle and component families are never pooled",
-            "holm_family_size": len(raw_p),  # the per-cycle family
+            "decision_pvalue": "lag1_p_permutation",
             "per_cycle_warmup_drop": warmup_drop,
             "no_interval_on": (
-                "differences and ratios (dSR, fp32-relative speedup, cross-model ratio); "
-                "any p95; the dilution shares and speedups (p, Amdahl ceiling, model-only, "
-                "realized). The mean per-cycle decomposition carries bootstrap intervals, and its "
-                "`overhead` is the ONE permitted difference — an absolute floor, never a contrast"
+                "differences and ratios (dSR, any speedup, any cross-model ratio); any p95. The "
+                "mean per-cycle decomposition carries bootstrap intervals, and its `overhead` is "
+                "the ONE permitted difference — an absolute floor, never a contrast"
             ),
             **(
                 {}
@@ -435,7 +395,6 @@ def compute(
                         "precision, calibration method) — warm-up dropped at record time, no "
                         "truncation, no report-time drop"
                     ),
-                    "holm_family_size_components": components["holm_family_size"],
                 }
             ),
             **(
@@ -458,8 +417,7 @@ def compute(
                     ),
                     "mean_independence": (
                         "inherited from the constituent sample's lag-1 test (same vector, same "
-                        "seed) — no new test and no separate Holm family; t_comp and overhead "
-                        "carry no flag of their own"
+                        "seed) — no new test; t_comp and overhead carry no flag of their own"
                     ),
                     "encoder_calls_per_cycle": ENCODER_CALLS_PER_CYCLE,
                     "predictor_calls_per_cycle": PREDICTOR_CALLS_PER_CYCLE,
@@ -487,7 +445,7 @@ def compute_components(
     independence test. Same estimator and same test as the per-cycle p50 — only the SAMPLE differs,
     and it differs by being simpler: the loop is fixed-iteration and drops its warm-up at RECORD
     time, so the stored vector is already the sample (no equal-n truncation, no report-time drop —
-    docs/architecture.md §12).
+    docs/architecture.md §9).
 
     `latencies_by_track` is `{track: {precision: {method: {encode_ms: [...], predict_ms: [...]}}}}` —
     the `latencies` block of `latencies.<track>.json`. The method axis is the engine's: int8/fp8 are
@@ -499,12 +457,9 @@ def compute_components(
     means (the decomposition basis, an algebraic identity rather than an inference), or on anything
     derived from them.
 
-    Holm is applied over THIS family alone, never pooled with the per-cycle tests: pooling would make
-    every published adjusted p-value a function of which other surfaces happen to exist in the file
-    (docs/architecture.md §12). It is secondary reporting either way — the decision is the unadjusted
-    p-value."""
+    Each sample's own lag-1 test is run here and its verdict is what the mean latency table's
+    markers inherit."""
     points: dict = {}
-    raw_p: dict = {}
     for track, by_precision in latencies_by_track.items():
         for precision, by_method in by_precision.items():
             for method, vectors in by_method.items():
@@ -524,14 +479,8 @@ def compute_components(
                     points.setdefault(track, {}).setdefault(precision, {}).setdefault(
                         method, {}
                     )[component] = entry
-                    raw_p[(track, precision, method, component)] = entry["lag1_p_permutation"]
 
-    for key, adj in holm(raw_p).items():
-        track, precision, method, component = key
-        entry = points[track][precision][method][component]
-        entry["lag1_p_holm"] = adj
-        entry["lag1_reject_holm"] = bool(adj == adj and adj < alpha)
-    return {"points": points, "holm_family_size": len(raw_p)}
+    return {"points": points}
 
 
 # --- the five MEAN per-cycle quantities: percentile bootstrap over the same samples ----
@@ -552,7 +501,7 @@ def bootstrap_mean_ci(
     run, of different length, with no i-th observation in common. scipy enforces equal lengths only
     under `paired=True`, so getting this wrong would either raise or silently pair unrelated
     observations. **Percentile, not BCa**: BCa's bias/acceleration terms are estimated from the same
-    small sample; the percentile interval is what the resamples say (architecture.md §12).
+    small sample; the percentile interval is what the resamples say (architecture.md §9).
 
     Returns None — never an invented interval — for a sample too small to resample or a degenerate
     (constant) one, the same discipline `order_statistic_ci` applies at small n."""
@@ -593,12 +542,27 @@ def config_label(precision: str, method: str) -> str:
 
 def _flags(point: dict) -> dict:
     """The lag-1 verdict of one already-tested sample, carried onto the mean it also supports. NOT a
-    re-run: same vector, same seed, same result — so re-testing would only open a third Holm family
-    whose existence would make the two published ones look like competing versions."""
+    re-run: same vector, same seed, same result."""
     return {
         "lag1_reject": point.get("lag1_reject"),
         "lag1_p_permutation": point.get("lag1_p_permutation"),
     }
+
+
+def _checked_overhead(overhead: float, track: str, label: str, method: str) -> float:
+    """`cycle − t_comp`, with a NEGATIVE value surfaced loudly and never clamped (SPEC §Interface
+    Contracts). Negative means the model time weighted by the CEM call counts exceeds the measured
+    cycle it was subtracted from — the call-count weighting or the isolated engine-step timing is
+    off, and the decomposition for that configuration cannot be trusted. Clamping it to zero would
+    hide exactly that."""
+    if overhead < 0:
+        print(
+            f"⚠ negative overhead ({overhead:.4f} ms) for {track} {label}@{method}: the weighted "
+            "enc+pred model time exceeds the measured per-cycle time — the call-count weighting or "
+            "the isolated engine-step timing is off. Reporting as-is; do not trust this "
+            "decomposition."
+        )
+    return overhead
 
 
 def compute_means(
@@ -622,11 +586,10 @@ def compute_means(
     `enc` and `pred` are the engine-step means **as timed** — one call, unweighted — so each reads as
     the latency of the thing it names and is comparable to that component's p50 on the speed table.
     The CEM call counts enter only where the quantity is genuinely per-cycle: `t_comp =
-    ENCODER_CALLS × enc + PREDICTOR_CALLS × pred`, `overhead = cycle − t_comp`, which keeps those
-    three byte-equal to `report.decompose`'s `model_cyc_ms`/`cycle_ms`/`overhead_ms`.
+    ENCODER_CALLS × enc + PREDICTOR_CALLS × pred`, `overhead = cycle − t_comp`.
 
     Composite `enc-<A>+pred-<B>` isolation labels never appear — they are an SR diagnostic and are
-    never benchmarked for latency, so no component sample exists for them (architecture.md §9); a
+    never benchmarked for latency, so no component sample exists for them (architecture.md §8); a
     row for them would be a mean weighted by components that were never timed. Method-invariant
     precisions collapse to ONE row (the `max`-first pick `report._stats_lookup` uses), since their
     method label is only the stamp of whichever run recorded them.
@@ -660,12 +623,10 @@ def compute_means(
             cycle = by_method[method]
             # `statistics.fmean`, not `np.mean`: `benchmark._mean_ms` and
             # `report._finalize_per_cycle` both use it, so the point estimates here are byte-equal
-            # to the ones the decomposition tables already print rather than merely close.
+            # to the reported per-cycle numbers rather than merely close.
             enc_mean = fmean(enc)
             pred_mean = fmean(pred)
             cycle_mean = fmean(cycle)
-            # Weighted and grouped exactly as `report.decompose` does it, so the two renderings of
-            # the same decomposition agree to the last bit, not just to a tolerance.
             t_comp = ENCODER_CALLS_PER_CYCLE * enc_mean + PREDICTOR_CALLS_PER_CYCLE * pred_mean
             comp_pt = component_points.get(track, {}).get(label, {}).get(comp_method, {})
             entry = {
@@ -703,7 +664,7 @@ def compute_means(
                     f"cycle_{k}": v
                     for k, v in _flags(points.get(track, {}).get(label, {}).get(method, {})).items()
                 },
-                "overhead_mean_ms": cycle_mean - t_comp,
+                "overhead_mean_ms": _checked_overhead(cycle_mean - t_comp, track, label, method),
                 "overhead_ci95_ms": bootstrap_mean_ci(
                     (cycle, enc, pred),
                     (1.0, -ENCODER_CALLS_PER_CYCLE, -PREDICTOR_CALLS_PER_CYCLE),
@@ -804,8 +765,7 @@ def main() -> None:
         f"(enc/pred per call; t_comp/cycle/overhead per cycle), "
         f"{meta.get('mean_estimator', 'n/a')}, B={meta.get('mean_resamples', 0)}\n"
         f"[stats] independence: {meta['independence_test']} on {meta['test_statistic']}, "
-        f"B={meta['n_resamples']}, seed={meta['seed']}, decision on the UNADJUSTED p-value; "
-        f"Holm {meta['holm_scope']}\n"
+        f"B={meta['n_resamples']}, seed={meta['seed']}\n"
         f"[stats] wrote {path}  (sr.json + latencies.*.json read-only, untouched)"
     )
 

@@ -223,6 +223,9 @@ __marimo__/
 # Secrets
 .env
 
+# Paper drafts (kept out of the repo; the study stands on its own artifacts)
+Report.md
+
 # Experiment tracking and wandb outputs
 wandb/
 outputs/

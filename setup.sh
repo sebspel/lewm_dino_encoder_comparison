@@ -23,6 +23,17 @@
 # lock); re-run this script (or the step 3 installs) to restore them.
 set -euo pipefail
 
+# 0) runtime configuration: STABLEWM_HOME, WANDB_API_KEY and HF_TOKEN come from an
+#    uncommitted `.env` at the repo root, never from an `export` typed into a shell.
+#    Checked for existence HERE so a missing file fails before the ~15-minute install; the
+#    values themselves are read at step 4b, once Python is available to read them.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$repo_root/.env" ]; then
+  echo "ERROR: $repo_root/.env not found. Copy the template and fill it in:" >&2
+  echo "         cp .env.example .env" >&2
+  exit 1
+fi
+
 # Pin TensorRT so re-loading a pod reproduces the same engine toolchain. Must be a
 # cu12 build compatible with CUDA 12.4; override if the L40S needs another.
 TENSORRT_VERSION="${TENSORRT_VERSION:-10.7.0}"
@@ -142,40 +153,63 @@ else:
     print("no GPU (torch.cuda.is_available() == False) -- skipping CUDA-EP session check (CPU pod)")
 PY
 
-# 5) secrets: HF_TOKEN must be in the runtime env for gated DINOv3 downloads
-#    (facebook/dinov3-*). Provisioning still succeeds without it (LeWM uses a
-#    scratch ViT), so this warns loudly rather than aborting.
+# 4b) runtime configuration, read through the SAME loader every Python process uses
+#     (`src.env.load_env` -> python-dotenv). Delegating rather than re-parsing `.env` in shell
+#     is the point: a hand-rolled reader silently disagrees with python-dotenv on inline
+#     comments (`a #b` is a comment, `a#b` is not), CRLF line endings, quoting, `export `
+#     prefixes and whitespace — and each disagreement means setup.sh provisioning one path
+#     while training reads another. `load_env` leaves an existing variable alone, INCLUDING an
+#     empty one, so the shell inherits exactly what Python will see. Runs after `uv sync`
+#     because it needs the interpreter; nothing above this line reads these three.
+#     Captured into a variable BEFORE the eval: `eval "$(cmd)"` reports the exit status of
+#     `eval`, not of the substitution, so a failure there would be swallowed by `set -e` and the
+#     script would carry on with the variables unset.
+env_exports="$(cd "$repo_root" && uv run python -c '
+import os, shlex
+from src.env import load_env
+
+load_env()
+for key in ("STABLEWM_HOME", "WANDB_API_KEY", "HF_TOKEN"):
+    value = os.environ.get(key)
+    if value is not None:
+        print("export %s=%s" % (key, shlex.quote(value)))
+')"
+eval "$env_exports"
+
+# 5) secrets: HF_TOKEN is needed for gated DINOv3 downloads (facebook/dinov3-*).
+#    Provisioning still succeeds without it (LeWM uses a scratch ViT), so this warns
+#    loudly rather than aborting.
 if [ -z "${HF_TOKEN:-}" ]; then
-  echo "WARNING: HF_TOKEN is not set. Gated DINOv3 downloads will 401." >&2
-  echo "         export HF_TOKEN=hf_... (and accept the model license on HF)" >&2
+  echo "WARNING: HF_TOKEN is unset or empty. Gated DINOv3 downloads will 401." >&2
+  echo "         Set HF_TOKEN=hf_... in .env (and accept the model license on HF)" >&2
   echo "         before running prejepa/introspection." >&2
 else
   echo "HF_TOKEN is set."
 fi
 
-# 6) secrets: WANDB_API_KEY must be in the runtime env for training. The Phase-2
-#    +experiment overlays set wandb.enabled=true, so the trainer inits WandbLogger at
-#    startup and will stall on an interactive prompt (or fail) without it. Provisioning
-#    still succeeds without it (smoke with wandb.enabled=false), so this warns rather
-#    than aborting.
+# 6) secrets: WANDB_API_KEY is needed for training. The +experiment overlays set
+#    wandb.enabled=true, so the trainer inits WandbLogger at startup and will stall on an
+#    interactive prompt (or fail) without it. Provisioning still succeeds without it
+#    (smoke with wandb.enabled=false), so this warns rather than aborting.
 if [ -z "${WANDB_API_KEY:-}" ]; then
-  echo "WARNING: WANDB_API_KEY is not set. Training (+experiment overlays enable W&B)" >&2
-  echo "         will stall on a login prompt. export WANDB_API_KEY=... before" >&2
-  echo "         training, or pass wandb.enabled=false for a no-logging smoke." >&2
+  echo "WARNING: WANDB_API_KEY is unset or empty. Training (+experiment overlays enable" >&2
+  echo "         W&B) will stall on a login prompt. Set WANDB_API_KEY=... in .env," >&2
+  echo "         or pass wandb.enabled=false for a no-logging smoke." >&2
 else
   echo "WANDB_API_KEY is set."
 fi
 
 # 7) persistent storage: STABLEWM_HOME is the platform's cache root — datasets land in
 #    $STABLEWM_HOME/datasets and checkpoints in $STABLEWM_HOME/checkpoints/<run_name>/
-#    (stable_worldmodel.wm.utils.save_pretrained). Its own default (~/.stable_worldmodel)
-#    is the EPHEMERAL container fs on RunPod — a multi-hour run's checkpoints are lost on
-#    pod restart. Default it to the persistent network volume (RunPod mounts it at
-#    /workspace) unless already set in the env, and export so this script's own steps
-#    (mkdir + dataset download below) target it.
-#    NOTE: this export only reaches this script's subprocesses, not your other shells —
-#    set STABLEWM_HOME as a RunPod env var too so training/eval terminals inherit it.
-export STABLEWM_HOME="${STABLEWM_HOME:-/workspace/.stablewm}"
+#    (stable_worldmodel.wm.utils.save_pretrained). The platform's own default
+#    (~/.stable_worldmodel) is the EPHEMERAL container fs on RunPod — a multi-hour run's
+#    checkpoints are lost on pod restart — so it is required rather than defaulted, and
+#    comes from .env (step 0) which src/env.py reads too.
+if [ -z "${STABLEWM_HOME:-}" ]; then
+  echo "ERROR: STABLEWM_HOME is unset or empty. Set it in .env (an existing environment" >&2
+  echo "       variable wins, so unset an empty one too), e.g. /workspace/.stablewm" >&2
+  exit 1
+fi
 case "$STABLEWM_HOME" in
   "$HOME" | "$HOME"/*)
     echo "WARNING: STABLEWM_HOME=$STABLEWM_HOME is under \$HOME (ephemeral on RunPod)." >&2

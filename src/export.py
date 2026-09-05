@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import os
 import sys
 from pathlib import Path
 
@@ -48,6 +47,7 @@ from torch import Tensor, nn
 from torch.export import Dim
 from torch.nn.utils.fusion import fuse_linear_bn_eval
 
+from src.env import stablewm_home
 from src.interfaces import (
     Precision,
     EnginePaths,
@@ -68,7 +68,7 @@ _MAX_CANDIDATE_BATCH = 300
 # (`PreJEPA.rollout`: `init_info_dict[k] = info[k][:, 0]`, then `.expand(...)` the latent across
 # candidates; `get_cost` embeds the goal by the same `[:, 0]` path) and the vendored solver pins
 # `batch_size = 1`, so the encoder is only ever called at batch 1 — the two cached, batch-1 encodes
-# per decision that `ENCODER_CALLS_PER_CYCLE` counts. docs/architecture.md §6.
+# per decision that `ENCODER_CALLS_PER_CYCLE` counts. docs/architecture.md §5.
 _ENCODER_BATCH = 1
 
 # (min, opt, max) batch per component — the shape each engine is ACTUALLY called at. TensorRT
@@ -76,7 +76,7 @@ _ENCODER_BATCH = 1
 # runs at is tuned for the wrong kernel. The predictor keeps `min = 1` for the profile-min rows the
 # precision-match gate drives (a profile minimum costs nothing). Single source of truth for the
 # convention — `build_engine` takes the triple explicitly rather than inferring it from the example
-# inputs, whose batch is a TRACE property, not a build one. docs/architecture.md §6,
+# inputs, whose batch is a TRACE property, not a build one. docs/architecture.md §5,
 # SPEC §Interface Contracts (Export shape).
 _BATCH_PROFILE: dict[str, tuple[int, int, int]] = {
     "encoder": (_ENCODER_BATCH, _ENCODER_BATCH, _ENCODER_BATCH),
@@ -86,8 +86,8 @@ _WORKSPACE_BYTES = 24 << 30  # 24 GiB TensorRT per-tactic scratch CEILING (not a
 #                              runtime uses only what the selected tactics need). L40S has
 #                              48 GiB; a 16 GiB cap still pruned a ~19.5 GiB DINO-predictor
 #                              attention tactic, so widen the search to not handicap the
-#                              latency study. Uniform across tracks/precisions; govern real
-#                              footprint via measured peak GPU memory, not this knob.
+#                              latency study. Uniform across tracks/precisions, so it cannot
+#                              differ between the two models being compared.
 
 
 # --- thin method wrappers: aim the tracer at ONE method each.
@@ -261,7 +261,7 @@ def precision_match(reference: Tensor, engine_out: Tensor) -> dict:
 # attention MatMuls fully quantized (the real QK^T/scores ranges are unpolluted — the mask is added
 # AFTER the score MatMul). The pass is self-targeting (edits only tensors carrying the sentinel), so
 # it is a NO-OP on LeWM's graph — parity preserved, both tracks stay fully quantized.
-# architecture.md §7. OWNER-approved graph edit before PTQ.
+# architecture.md §6. OWNER-approved graph edit before PTQ.
 _MASK_SENTINEL_THRESHOLD = 1e30  # |x| >= this ⇒ the -3.4e38 mask sentinel, never a real activation
 _MASK_FILL = -3.0e4  # softmax-equivalent to -inf; within FP16 range (<65504) + FP32 histogram edge
 
@@ -360,12 +360,12 @@ def quantize_onnx(
     the quantized graph (verified: the FP32 engine off the same graph runs at batch 1/8/300) —
     so it is feed plumbing, not a quant-config knob. It is likewise independent of the BUILD
     profile (`_BATCH_PROFILE`): the shape pinned here is the TRACE batch, and the profile TRT is
-    later built with is free to differ (architecture.md §6)."""
+    later built with is free to differ (architecture.md §5)."""
     from modelopt.onnx.quantization import quantize
 
     # Neutralize DINO's -3.4e38 attention mask sentinel before calibration (no-op on LeWM). Both
     # calibration methods otherwise choke on it: `entropy` overflows the histogram, `max` collapses
-    # the scale. See `_neutralize_attention_mask_sentinel` / architecture.md §7.
+    # the scale. See `_neutralize_attention_mask_sentinel` / architecture.md §6.
     onnx_path = _neutralize_attention_mask_sentinel(onnx_path)
 
     # Prefer the CUDA EP so calibration inference runs on the L40S GPU; fall back to CPU
@@ -381,7 +381,8 @@ def quantize_onnx(
     # `max` method (format-independent — SPEC §Export shape); only the quantized dtype differs.
     # Threaded to modelopt's `quantize_mode` ONLY for the non-default format so the owner-signed-
     # off INT8 call stays byte-identical. 🔴 pod-verify: the `quantize_mode` kwarg name + "fp8"
-    # value are the owner-set quant config (PLAN §Phase-6); an unknown kwarg fails loudly here.
+    # value are the owner-set quant config (SPEC §Implementation Boundaries); an unknown kwarg
+    # fails loudly here.
     mode_kwargs = {} if quant_mode == "int8" else {"quantize_mode": quant_mode}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     quantize(
@@ -454,7 +455,8 @@ def build_engine(
         # TRT pick FP8 tactics for the Q/DQ layers, and FP16 is set for the same reason as INT8
         # (the Model Optimizer casts the non-quantized remainder to FP16). No calibrator/profile
         # — scales are in the graph. "FP8" == FP8+FP16 (SPEC §Export shape). 🔴 pod-verify:
-        # `BuilderFlag.FP8` is the owner-set build config (PLAN §Phase-6); build failures raise
+        # `BuilderFlag.FP8` is the owner-set build config (SPEC §Implementation Boundaries); build
+        # failures raise
         # loudly here for the owner's judgement.
         config.set_flag(trt.BuilderFlag.FP8)
         config.set_flag(trt.BuilderFlag.FP16)
@@ -488,7 +490,7 @@ def engine_filename(
     """Engine-plan filename for one `component` (`encoder` | `predictor`). Quantized precisions
     (int8/fp8) are TAGGED with the PTQ calibration method so `int8` @ `max` and `int8` @ `entropy`
     engines coexist on the volume without overwriting each other (the SR they yield differs —
-    architecture.md §7); FP32/FP16 carry no scales and are method-invariant, so they stay untagged.
+    architecture.md §6); FP32/FP16 carry no scales and are method-invariant, so they stay untagged.
     Single source of truth for the convention, shared by the writer (`export`) and the loader
     (`study.engine_paths`)."""
     if precision in QUANTIZED_PRECISIONS:
@@ -564,7 +566,7 @@ def export(
                 # never collide in the same engine dir (each is a separately quantized ONNX —
                 # SPEC §Export shape); mirrors the method-tagged .plan below.
                 engine_dir / f"{name}.{precision}.{calibration_method}.onnx",
-                # Per-track method (max for LeWM, entropy for DINO — owner-set, architecture.md §7); the
+                # Per-track method (max for LeWM, entropy for DINO — owner-set, architecture.md §6); the
                 # same for this track's int8 and fp8 so only the format differs.
                 calibration_method=calibration_method,
                 calibration_shapes=shapes,
@@ -580,11 +582,11 @@ def export(
             onnx_path,
             precision,
             # Method-tagged for int8/fp8 (untagged for fp32/fp16), so a second calibration
-            # method's engines are additive and never overwrite the first's (architecture.md §7).
+            # method's engines are additive and never overwrite the first's (architecture.md §6).
             engine_dir / engine_filename(name, precision, calibration_method),
             inputs,
             # This component's production call batch — encoder 1, predictor the CEM candidate
-            # fan-out (architecture.md §6). TRT tunes tactics at `opt`.
+            # fan-out (architecture.md §5). TRT tunes tactics at `opt`.
             _BATCH_PROFILE[name],
         )
     return EnginePaths(encoder=engines["encoder"], predictor=engines["predictor"])
@@ -593,11 +595,10 @@ def export(
 def engine_root() -> Path:
     """Where the TensorRT engines are saved + loaded by default: `$STABLEWM_HOME/engines/` — the
     persistent network volume, so a pod session's built engines survive teardown and are not
-    rebuilt each session (SPEC §Execution Environment). Falls back to the repo-local `engines/`
-    only off-pod where `STABLEWM_HOME` is unset. Engines stay large + device-specific + gitignored
-    (`*.plan`/`*.onnx` ignored) either way — regenerable on the L40S, one subdir per track."""
-    home = os.environ.get("STABLEWM_HOME")
-    return Path(home) / "engines" if home else Path("engines")
+    rebuilt each session (SPEC §Execution Environment). `STABLEWM_HOME` comes from `.env` and is
+    required — see `src.env.stablewm_home`. Engines stay large + device-specific + gitignored
+    (`*.plan`/`*.onnx` ignored) — regenerable on the L40S, one subdir per track."""
+    return stablewm_home() / "engines"
 
 
 def main() -> None:

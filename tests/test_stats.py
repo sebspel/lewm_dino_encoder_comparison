@@ -2,7 +2,7 @@
 
 Off-pod, CPU-only: the stored `sr.json` samples stand in for the pod artifacts. What these pin is
 mostly the OWNER-SET CONSTRUCTION (SPEC §Implementation Boundaries "confidence-interval
-construction", architecture.md §12) — a wrong estimator, rank convention, or p-value convention
+construction", architecture.md §9) — a wrong estimator, rank convention, or p-value convention
 produces a plausible wrong INTERVAL, which no runtime check would catch. Four tests are explicit
 guards against a future "just use scipy" refactor silently changing a number.
 """
@@ -15,7 +15,7 @@ from statistics import fmean
 
 import numpy as np
 import pytest
-from scipy.stats import binom, false_discovery_control
+from scipy.stats import binom
 
 from src import report, stats
 from src.interfaces import PER_CYCLE_WARMUP_DROP
@@ -40,7 +40,7 @@ def _bench(vec_lewm, vec_dino) -> dict:
         "per_cycle_p50_ms": float("nan"), "per_cycle_p95_ms": float("nan"),
         "per_cycle_mean_ms": float("nan"), "encode_p50_ms": 1.0, "encode_p95_ms": 1.0,
         "encode_mean_ms": 1.0, "predict_p50_ms": 1.0, "predict_p95_ms": 1.0,
-        "predict_mean_ms": 1.0, "peak_mem_mb": 1.0, "success_rate": float("nan"),
+        "predict_mean_ms": 1.0, "success_rate": float("nan"),
     }
     return {"lewm": {"fp32": row()}, "dino": {"fp32": row()}}
 
@@ -71,7 +71,7 @@ def test_successes_from_sr_fails_loudly_when_not_integral():
 
 # --- per-cycle p50: exact binomial order-statistic interval ----------------------------
 def test_order_statistic_ranks_are_conservative_not_naive():
-    """GUARD (architecture.md §12): the obvious `binom.ppf(a/2)` / `binom.isf(a/2)` rank choice
+    """GUARD (architecture.md §9): the obvious `binom.ppf(a/2)` / `binom.isf(a/2)` rank choice
     UNDER-covers — 0.9481 at n=59, below the nominal 0.95 — because `ppf` returns the smallest rank
     whose CDF is at LEAST a/2. Achieved coverage must reach 1-alpha at every n this study has."""
     for n in (55, 56, 58, 59, 61, 63, 65, 97, 100):
@@ -86,7 +86,7 @@ def test_order_statistic_ranks_are_conservative_not_naive():
 
 def test_order_statistic_ci_returns_none_when_n_too_small():
     """No rank pair reaches 95% at n=5, so NO interval is emitted — the same 'unmeasured, never
-    asserted' discipline `src.clock_norm` applies to undersampled clock runs. Inventing one would
+    asserted' discipline `src.gpu_telemetry` applies to undersampled clock runs. Inventing one would
     be the silent wrong-number failure the whole gate exists to prevent."""
     assert stats.order_statistic_ci([1.0, 2.0, 3.0, 4.0, 5.0]) is None
     assert stats.order_statistic_ci([]) is None
@@ -132,7 +132,7 @@ def test_dwass_two_sided_is_absolute_value_not_twice_the_smaller():
 
 
 def test_dwass_detects_serial_correlation_and_clears_iid():
-    """The test is the PREMISE CHECK on the order-statistic interval (architecture.md §12): serial
+    """The test is the PREMISE CHECK on the order-statistic interval (architecture.md §9): serial
     correlation makes that interval too narrow. It must fire on correlated input and stay quiet on
     i.i.d. input, or it licenses nothing."""
     rng = np.random.default_rng(3)
@@ -163,40 +163,6 @@ def test_permutation_test_is_reproducible_at_a_fixed_seed():
     assert a["lag1_p_permutation"] == b["lag1_p_permutation"]
 
 
-# --- multiplicity: Holm, secondary only ------------------------------------------------
-def test_holm_is_step_down_fwer_not_fdr():
-    """GUARD: `scipy.stats.false_discovery_control` is Benjamini-Hochberg — FDR, a different
-    quantity — and must not be substituted for Holm. Hand-worked m=3 example."""
-    adj = stats.holm({"a": 0.01, "b": 0.02, "c": 0.04})
-    assert adj == {"a": pytest.approx(0.03), "b": pytest.approx(0.04), "c": pytest.approx(0.04)}
-    bh = false_discovery_control([0.01, 0.02, 0.04])
-    assert adj["b"] != pytest.approx(bh[1]), "Holm must not coincide with BH here"
-
-
-def test_holm_is_monotone_and_capped():
-    adj = stats.holm({"a": 0.5, "b": 0.001, "c": 0.4, "d": 0.9})
-    ordered = [adj[k] for k in sorted(adj, key=lambda k: {"a": 0.5, "b": 0.001, "c": 0.4, "d": 0.9}[k])]
-    assert ordered == sorted(ordered), "adjusted p-values must be non-decreasing in raw order"
-    assert all(v <= 1.0 for v in adj.values())
-
-
-def test_holm_is_secondary_and_drives_no_decision():
-    """SPEC §Interface Contracts: the test decision is the UNADJUSTED p-value; Holm is persisted as
-    secondary reporting only. Pinned on the real-shaped case where the two disagree — a point that
-    rejects raw but not after Holm must still carry `lag1_reject=True`."""
-    rng = np.random.default_rng(11)
-    sr = _sr_json(
-        lewm__fp32=(90.0, np.cumsum(rng.normal(size=40))),
-        **{f"lewm__f{i}": (90.0, rng.normal(size=40)) for i in range(12)},
-    )
-    payload = stats.compute(sr, n_resamples=2000, n_episodes=50)
-    entries = [e for lab in payload["points"]["lewm"].values() for e in lab.values()]
-    assert all("lag1_p_holm" in e and "lag1_reject" in e for e in entries)
-    disagree = [e for e in entries if e["lag1_reject"] and not e["lag1_reject_holm"]]
-    assert disagree, "fixture no longer exercises the raw-vs-Holm disagreement"
-    assert payload["meta"]["decision_pvalue"].startswith("lag1_p_permutation")
-
-
 # --- the payload ------------------------------------------------------------------------
 def test_ci_sample_is_byte_identical_to_the_p50_sample():
     """The interval must bracket the SAME sample the reported p50 comes from. Both sides go through
@@ -222,7 +188,7 @@ def test_ci_sample_is_byte_identical_to_the_p50_sample():
 def test_stats_covers_every_point_including_the_isolation_composites():
     """`stats.json` is method-UNSCOPED and label-complete: the composite `enc-<A>+pred-<B>` points
     report an absolute SR in the isolation table, so they get an interval too — even though they
-    deliberately never enter `bench` (architecture.md §9)."""
+    deliberately never enter `bench` (architecture.md §8)."""
     vec = list(np.random.default_rng(1).normal(100, 5, size=40))
     point = {"entropy": {"success_rate": 90.0, "per_cycle_latencies_ms": vec}}
     sr = {"lewm": {"fp32": point, "int8": point, "enc-int8+pred-fp16": point}}
@@ -263,7 +229,6 @@ def test_stats_json_round_trips_and_records_its_construction(tmp_path):
     assert meta["student_t_adjustment"] is False
     assert "NOT scipy" in meta["two_sided_convention"]
     assert meta["alpha"] == 0.05 and meta["n_episodes"] == 50 and meta["seed"] == 0
-    assert "secondary" in meta["holm"]
     assert "ratios" in meta["no_interval_on"]
 
 
@@ -287,7 +252,7 @@ def test_method_invariant_intervals_join_across_methods(tmp_path):
 
 def test_stats_never_rewrites_canonical_results(tmp_path):
     """The same read-only guard as `test_report_never_rewrites_canonical_results` and
-    `test_clock_norm_never_rewrites_canonical_results`: intervals are ADDITIVE re-analysis —
+    `test_telemetry_render_writes_nothing_but_its_plots`: intervals are ADDITIVE re-analysis —
     `sr.json`, `latencies.*.json` and `results.*.json` are inputs, never outputs (SPEC §Parity,
     CLAUDE §8). The latency file matters most: it is the ONLY copy of the engine-step samples, so a
     render that rewrote it would put an L40S run at risk."""
@@ -333,7 +298,7 @@ def _components(seed: int, n: int = 100, method: str = "max") -> dict:
 def test_component_interval_uses_the_recorded_vector_as_the_sample():
     """The component sample needs NO truncation and NO warm-up drop — the loop is fixed-iteration
     and drops its warm-up before the first timed call, so the stored vector IS the sample
-    (architecture.md §12). n must therefore equal the stored length exactly, and the interval must
+    (architecture.md §9). n must therefore equal the stored length exactly, and the interval must
     bracket the same p50 the speed table prints (`report._percentile_ms`)."""
     latencies = {"dino": _components(11, n=40)}
     payload = stats.compute({}, n_resamples=200, component_latencies=latencies)
@@ -356,24 +321,6 @@ def test_component_points_carry_p50_only_never_p95_or_mean():
     e = payload["points_components"]["lewm"]["fp32"]["max"]["encode"]
     assert "p50_ci95_ms" in e
     assert not [k for k in e if "p95" in k or "mean_ms" in k]
-
-
-def test_component_holm_family_is_separate_from_the_per_cycle_family():
-    """Holm is scoped PER MEASUREMENT SURFACE (owner ruling, architecture.md §12). Pooling would make
-    every published per-cycle adjusted p-value a function of which other surfaces happen to exist in
-    the file — so adding the component section must leave the per-cycle values byte-identical."""
-    vec = list(np.random.default_rng(13).normal(100, 5, size=40))
-    sr = _sr_json(lewm__fp32=(90.0, vec), dino__fp32=(70.0, vec))
-
-    without = stats.compute(sr, n_resamples=200)
-    with_components = stats.compute(
-        sr, n_resamples=200, component_latencies={"lewm": _components(14), "dino": _components(15)}
-    )
-
-    assert with_components["points"] == without["points"]  # untouched, Holm values included
-    assert with_components["meta"]["holm_family_size"] == without["meta"]["holm_family_size"] == 2
-    assert with_components["meta"]["holm_family_size_components"] == 4  # 2 tracks x 2 components
-    assert "never pooled" in with_components["meta"]["holm_scope"]
 
 
 def test_component_section_omitted_without_stored_samples():
@@ -406,13 +353,12 @@ def test_component_points_are_keyed_per_calibration_method():
         points["int8"]["max"]["encode"]["p50_ms"] != points["int8"]["entropy"]["encode"]["p50_ms"]
     )
     assert set(points["fp8"]) == {"entropy"}  # the max build was never timed -> no point
-    assert payload["meta"]["holm_family_size_components"] == 6  # 3 (precision, method) x 2
 
 
 def test_a_quantized_mean_row_needs_its_own_methods_components():
     """A mean row weights the components its cycle was measured on. Where only one method's engines
     were timed, the other method's cycle gets no mean row — never a mean built out of the other
-    build's component samples (architecture.md §12)."""
+    build's component samples (architecture.md §9)."""
     vec = lambda s: list(np.random.default_rng(s).normal(120.0, 4.0, size=40))  # noqa: E731
     sr = {
         "lewm": {
@@ -476,6 +422,30 @@ def _mean_payload(seed: int = 21, n_cycles: int = 40, **kwargs):
     )
 
 
+def test_negative_overhead_surfaced_not_clamped(capsys):
+    """A measured cycle smaller than the call-count-weighted enc+pred model time means the
+    weighting or the isolated timing is off; it must be surfaced loudly (SPEC §Interface
+    Contracts), never clamped to 0."""
+    rng = np.random.default_rng(3)
+    # Engine steps an order of magnitude too slow for the cycle they are subtracted from:
+    # 2 x enc + 150 x pred >> mean(cycle).
+    sr = {"lewm": {"fp32": {"max": {
+        "success_rate": 90.0,
+        "per_cycle_latencies_ms": list(rng.normal(20.0, 0.5, size=40)),
+    }}}}
+    latencies = {"lewm": {"fp32": {"max": {
+        "encode_ms": list(rng.normal(1.0, 0.05, size=100)),
+        "predict_ms": list(rng.normal(1.0, 0.05, size=100)),
+    }}}}
+
+    payload = stats.compute(
+        sr, n_resamples=200, component_latencies=latencies, bootstrap_resamples=200
+    )
+
+    assert payload["points_means"]["lewm"]["fp32"]["max"]["overhead_mean_ms"] < 0
+    assert "negative overhead" in capsys.readouterr().out
+
+
 def test_mean_components_are_per_call_and_the_composites_are_per_cycle():
     """`enc`/`pred` are the engine-step means as TIMED — one call, unweighted — while the CEM call
     counts enter only the per-cycle composites, which stay the decomposition (`t_comp`,
@@ -498,7 +468,7 @@ def test_mean_components_are_per_call_and_the_composites_are_per_cycle():
 
 def test_mean_cycle_uses_the_same_sample_as_the_p50_interval():
     """The mean and the p50 must describe the SAME decisions — warm-up-dropped and equal-n-truncated
-    — so the sample is passed through from `compute`, never re-derived (architecture.md §12)."""
+    — so the sample is passed through from `compute`, never re-derived (architecture.md §9)."""
     sr, _, payload = _mean_payload()
     sample = report.per_cycle_samples(
         {"lewm": sr["lewm"]["fp32"]["max"]["per_cycle_latencies_ms"]}, PER_CYCLE_WARMUP_DROP
@@ -509,9 +479,9 @@ def test_mean_cycle_uses_the_same_sample_as_the_p50_interval():
 
 
 def test_mean_flags_are_inherited_never_re_tested():
-    """No new independence test and no third Holm family: the three sampled quantities carry the
-    verdict already recorded for their own sample, and the two composites carry none — a flag
-    describes a sample (SPEC §Interface Contracts)."""
+    """No new independence test: the three sampled quantities carry the verdict already recorded
+    for their own sample, and the two composites carry none — a flag describes a sample
+    (SPEC §Interface Contracts)."""
     _, _, payload = _mean_payload()
     e = payload["points_means"]["lewm"]["int8"]["entropy"]
     comp = payload["points_components"]["lewm"]["int8"]["entropy"]
@@ -521,11 +491,6 @@ def test_mean_flags_are_inherited_never_re_tested():
     assert e["pred_lag1_reject"] == comp["predict"]["lag1_reject"]
     assert e["cycle_lag1_p_permutation"] == cyc["lag1_p_permutation"]
     assert not [k for k in e if k.startswith(("t_comp_lag1", "overhead_lag1"))]
-    assert "holm_family_size_means" not in payload["meta"]
-    # 3 per-cycle tests (fp32@max, int8@max, int8@entropy); 3 component configs x 2 components
-    assert payload["meta"]["holm_family_size"] == 3 and payload["meta"][
-        "holm_family_size_components"
-    ] == 6
 
 
 def test_mean_labels_name_the_method_only_where_it_applies():
@@ -545,8 +510,8 @@ def test_mean_labels_name_the_method_only_where_it_applies():
 
 
 def test_mean_section_leaves_the_other_surfaces_byte_identical():
-    """Adding the mean surface must not move a published interval or a Holm value: it is
-    re-analysis of the SAME samples, and the two existing families are scoped per surface."""
+    """Adding the mean surface must not move a published interval: it is re-analysis of the SAME
+    samples."""
     sr, latencies, payload = _mean_payload()
     without = stats.compute(sr, n_resamples=200, component_latencies=latencies)
     assert payload["points"] == without["points"]
@@ -570,7 +535,7 @@ def test_mean_section_omitted_without_component_samples():
 
 
 def test_isolation_composites_get_no_mean_row():
-    """Isolation is an SR diagnostic and is never benchmarked for latency (architecture.md §9), so a
+    """Isolation is an SR diagnostic and is never benchmarked for latency (architecture.md §8), so a
     composite row would weight component means that were never timed for that configuration."""
     vec = list(np.random.default_rng(7).normal(120.0, 4.0, size=40))
     point = {"max": {"success_rate": 50.0, "per_cycle_latencies_ms": vec}}

@@ -1,14 +1,13 @@
 """Phase-5 headline runner plumbing — ratios, tables, plots, per-cycle join (CPU).
 
-Synthetic bench dicts stand in for the real pod results. The per-component decomposition and
-Amdahl dilution are derived in the report from the engine-step MEANS × CEM call counts minus the
-measured mean per-cycle time (overhead by subtraction), so the fixtures carry per-cycle + step
-latencies with positive overhead (a realistic full solve dominates the model step time).
+Synthetic bench dicts stand in for the real pod results. The per-component decomposition is
+derived from the engine-step MEANS × CEM call counts minus the measured mean per-cycle time
+(residual overhead by subtraction), so the fixtures carry per-cycle + step latencies with a
+positive residual (a realistic full solve dominates the model step time).
 
 Statistic split under test (SPEC §Interface Contracts): p50 = comparison basis, p95 = reported
 tail, mean = decomposition basis only. The fixture defaults each mean to its p50 so the
-arithmetic stays readable; `test_decompose_uses_mean_not_p50` breaks that tie deliberately to
-pin which one `decompose` actually reads.
+arithmetic stays readable.
 """
 
 import math
@@ -21,7 +20,7 @@ from src.interfaces import ENCODER_CALLS_PER_CYCLE, PREDICTOR_CALLS_PER_CYCLE
 
 
 def _bench(
-    cyc_p50, cyc_p95, enc_p50, pred_p50, sr, mem=100.0,
+    cyc_p50, cyc_p95, enc_p50, pred_p50, sr,
     cyc_mean=None, enc_mean=None, pred_mean=None,
 ):
     """A BenchResult with per-cycle latency already filled (as if joined). Means default to the
@@ -36,7 +35,6 @@ def _bench(
         predict_p50_ms=pred_p50,
         predict_p95_ms=pred_p50 * 1.1,
         predict_mean_ms=pred_p50 if pred_mean is None else pred_mean,
-        peak_mem_mb=mem,
         success_rate=sr,
     )
 
@@ -55,121 +53,31 @@ def _synthetic():
     return bench
 
 
-def test_per_cycle_ratio():
-    bench = _synthetic()
-    assert report.per_cycle_ratio(bench, "fp32", "p95") == 20.0  # 2000 / 100
-    assert report.per_cycle_ratio(bench, "fp32", "p50") == 10.0  # 1000 / 100
-
-
-def test_per_cycle_ratio_nan_until_joined():
-    bench = _synthetic()
-    bench["lewm"]["fp32"]["per_cycle_p95_ms"] = math.nan
-    assert math.isnan(report.per_cycle_ratio(bench, "fp32", "p95"))
-
-
-def test_fp32_relative_speed_and_sr():
-    bench = _synthetic()
-    rel = report.fp32_relative(bench, "lewm")
-    # p50 basis — agrees with the headline ratio rather than adding a second, tail-based speedup
-    assert math.isclose(rel["fp16"]["per_cycle_p50_speedup_vs_fp32"], 100.0 / 60.0)
-    assert math.isclose(rel["fp16"]["sr_delta_vs_fp32"], -1.0)
-
-
-def test_fp32_relative_survives_single_track_render():
-    """`report` iterates both tracks unconditionally, so a single-track render (separate pod
-    sessions, SPEC §Headline-artifact durability) reaches a track with no rows. Must not KeyError."""
-    bench = {"lewm": _synthetic()["lewm"]}
-    assert report.fp32_relative(bench, "dino") == {}
-    assert "lewm" in report.render_fp32_relative_table(bench)
-
-
-def test_fp32_relative_table_shows_speed_and_sr_together(tmp_path):
-    """SPEC §Parity: a precision that is faster but degrades task quality must be VISIBLE —
-    which means the speedup and the SR delta land in the same row, not two tables."""
-    bench = _synthetic()
-    out = report.report(bench, tmp_path)
-    text = Path(out["tables"]["fp32_relative_table"]).read_text()
-    assert "ΔSR_vs_fp32" in text and "cyc_p50_speedup" in text
-    fp16_row = [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp16"]][0]
-    assert "1.667" in fp16_row and "-1.0" in fp16_row
-
-
-def test_decompose_overhead_by_subtraction():
-    """overhead = cycle − enc·2 − pred·150; p = (enc+pred)/cycle."""
-    bench = _synthetic()
-    d = report.decompose(bench["lewm"]["fp32"])
-    # enc_cyc = 1.0*2 = 2; pred_cyc = 0.25*150 = 37.5; model = 39.5; cycle = 100
-    assert math.isclose(d["enc_cyc_ms"], 2.0)
-    assert math.isclose(d["pred_cyc_ms"], 37.5)
-    assert math.isclose(d["overhead_ms"], 60.5)  # 100 - 39.5
-    assert math.isclose(d["optimizable_fraction"], 0.395)
-
-
-def test_decompose_cycle_none_until_joined():
-    bench = _synthetic()
-    bench["lewm"]["fp32"]["per_cycle_mean_ms"] = math.nan
-    d = report.decompose(bench["lewm"]["fp32"])
-    assert d["overhead_ms"] is None and d["optimizable_fraction"] is None
-    assert math.isclose(d["model_cyc_ms"], 39.5)  # enc/pred model shares still stand
-
-
-def test_decompose_uses_mean_not_p50():
-    """The decomposition basis is the MEAN, not p50: `cycle = enc·calls + pred·calls + overhead`
-    is exact for means (linearity of expectation) and only approximate for percentiles. Means are
-    set well away from the p50s here, so reading the wrong field fails loudly."""
-    row = _bench(
-        cyc_p50=100.0, cyc_p95=100.0, enc_p50=1.0, pred_p50=0.25, sr=90.0,
-        cyc_mean=200.0, enc_mean=2.0, pred_mean=0.5,
-    )
-    d = report.decompose(row)
-    assert math.isclose(d["enc_cyc_ms"], 4.0)  # 2.0 mean × 2 calls (p50 would give 2.0)
-    assert math.isclose(d["pred_cyc_ms"], 75.0)  # 0.5 mean × 150 calls (p50 would give 37.5)
-    assert math.isclose(d["overhead_ms"], 121.0)  # 200 mean cycle − 79 (p50 would give 60.5)
-    assert math.isclose(d["optimizable_fraction"], 79.0 / 200.0)
-
-
-def test_dilution_disclosure_model_only_and_realized():
-    bench = _synthetic()
-    d = report.dilution_disclosure(bench, "lewm")
-    assert math.isclose(d["optimizable_fraction"], 0.395)
-    assert d["amdahl_ceiling"] > 1.0
-    fp16 = d["per_precision"]["fp16"]
-    # model-only speedup = 39.5 / (0.6*2 + 0.15*150) = 39.5 / 23.7
-    assert math.isclose(fp16["model_only_speedup"], 39.5 / 23.7)
-    # measured realized = per-cycle MEAN ratio = 100 / 60 (mean-based so it reconciles against
-    # predicted_realized, which is derived from the mean-based `p`)
-    assert math.isclose(fp16["measured_realized_speedup"], 100.0 / 60.0)
-    # predicted realized diluted below the model-only speedup by the overhead floor
-    assert fp16["predicted_realized_speedup"] < fp16["model_only_speedup"]
-
-
 def test_tables_render_and_report_emits_plots(tmp_path):
     bench = _synthetic()
     assert "lewm" in report.render_speed_table(bench)
-    assert "pred_cyc_ms" in report.render_component_table(bench)
     out = report.report(bench, tmp_path)
     for path in out["plots"].values():
         assert Path(path).exists()
-    assert out["ratios"]["fp32"]["per_cycle_p50_ratio"] == 10.0  # headline basis
-    assert out["ratios"]["fp32"]["per_cycle_p95_ratio"] == 20.0  # tail, reported alongside
 
 
-def test_speed_table_reports_all_three_distributions_at_p50_p95():
-    """SPEC §Interface Contracts: three latency distributions, ALL at p50/p95. The encode/predict
-    p95s were computed and persisted but rendered nowhere before."""
+def test_speed_table_reports_the_per_cycle_distribution_only():
+    """The reported speed surface is the per-cycle distribution at p50/p95 plus SR. The engine
+    steps are reported as MEANS on the latency-means table, never as percentiles here, and peak
+    memory is not a reported quantity at all."""
     text = report.render_speed_table(_synthetic())
-    for col in ("cyc_p50", "cyc_p95", "enc_p50", "enc_p95", "pred_p50", "pred_p95"):
+    for col in ("cyc_p50", "cyc_p95", "cyc_n", "SR"):
         assert col in text
+    for col in ("enc_p50", "enc_p95", "pred_p50", "pred_p95", "mem_MB"):
+        assert col not in text
 
 
 def test_tables_persisted_to_disk(tmp_path):
     """Durability (SPEC §Headline-artifact durability): each table serialized to a .txt. The two
-    data-dependent tables (calibration, isolation) are absent here — no sr.json overrides."""
+    data-dependent tables (isolation, latency means) are absent here — no sr.json overrides."""
     bench = _synthetic()
     out = report.report(bench, tmp_path)
-    assert set(out["tables"]) == {
-        "speed_table", "fp32_relative_table", "component_table", "dilution_table"
-    }
+    assert set(out["tables"]) == {"speed_table"}
     for path in out["tables"].values():
         assert Path(path).exists()
         assert Path(path).read_text().strip()
@@ -180,7 +88,7 @@ def test_tables_persisted_to_disk(tmp_path):
 
 
 def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
-    """SPEC §Parity / architecture.md §7: the method must survive into the PERSISTED artefact,
+    """SPEC §Parity / architecture.md §6: the method must survive into the PERSISTED artefact,
     and rendering the other method must not clobber the first. Both are load-bearing — the SR and
     the per-cycle sample it was measured on are method-sourced."""
     overrides = {"lewm": {"int8": {"max": {"success_rate": 76.0},
@@ -197,16 +105,15 @@ def test_headline_tables_are_method_scoped_and_labelled(tmp_path):
     assert Path(out_max["tables"]["speed_table"]).name == "speed_table.max.txt"
     assert Path(out_ent["tables"]["speed_table"]).name == "speed_table.entropy.txt"
     for out, method in ((out_max, "max"), (out_ent, "entropy")):
-        for key in ("speed_table", "fp32_relative_table", "component_table", "dilution_table"):
-            text = Path(out["tables"][key]).read_text()
-            assert f"calibration_method = {method}" in text
+        text = Path(out["tables"]["speed_table"]).read_text()
+        assert f"calibration_method = {method}" in text
     # both SRs still on disk, each under its own label
     assert "76.0" in Path(out_max["tables"]["speed_table"]).read_text()
     assert "72.0" in Path(out_ent["tables"]["speed_table"]).read_text()
 
 
 def test_speed_table_reports_equal_n(tmp_path):
-    """architecture.md §8: the n each percentile was computed from is ON the artefact, so the
+    """architecture.md §7: the n each percentile was computed from is ON the artefact, so the
     equal-n truncation is verifiable rather than asserted. n is what SURVIVES both reductions —
     the warm-up drop then the common MINIMUM across tracks."""
     bench = {
@@ -254,7 +161,7 @@ def test_sr_pending_flagged_and_join(tmp_path):
 def test_method_labelled_sr_join_selects_and_coexists(tmp_path):
     """The gated eval-shim sr.json holds int8 SR under BOTH methods
     (`{track:{precision:{method:SR}}}`); `report(method=…)` selects one for a like-for-like render,
-    and the other stays available (SPEC §Parity, architecture.md §7). fp32 stays method-invariant."""
+    and the other stays available (SPEC §Parity, architecture.md §6). fp32 stays method-invariant."""
     overrides = {
         "lewm": {
             "fp32": {"max": {"success_rate": 90.0}},
@@ -333,7 +240,7 @@ def test_equal_n_truncation_is_temporal_not_smallest(tmp_path):
 
 
 def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
-    """architecture.md §8: the cold first decision is dropped BEFORE truncation, so it cannot bias
+    """architecture.md §7: the cold first decision is dropped BEFORE truncation, so it cannot bias
     the mean the decomposition subtracts from — and the exclusion is disclosed (`drop×`), not
     hidden. `warmup_drop=0` reproduces the old, biased view."""
     def _b():
@@ -364,22 +271,24 @@ def test_per_cycle_warmup_drops_cold_decision_and_discloses_it(tmp_path):
 def test_warmup_drop_does_not_move_the_p50_headline(tmp_path):
     """The drop exists for the MEAN-based decomposition. p50 is robust to one cold sample in n,
     so the headline ratio is unmoved either way — which is why this is a defensible correction
-    rather than a result-changing one (architecture.md §8)."""
+    rather than a result-changing one (architecture.md §7)."""
     lat = {"lewm": [900.0] + [10.0 + (i % 5) for i in range(60)],
            "dino": [9000.0] + [100.0 + (i % 5) for i in range(60)]}
     overrides = {
         t: {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": v}} for t, v in lat.items()
     }
 
-    def _ratio(k):
+    def _p50s(k):
         bench = {
             "lewm": {"fp32": _bench(math.nan, math.nan, 1.0, 0.25, math.nan)},
             "dino": {"fp32": _bench(math.nan, math.nan, 10.0, 5.0, math.nan)},
         }
         report.report(bench, tmp_path / f"k{k}", sr_overrides=overrides, warmup_drop=k)
-        return report.per_cycle_ratio(bench, "fp32", "p50")
+        return {t: bench[t]["fp32"]["per_cycle_p50_ms"] for t in ("lewm", "dino")}
 
-    assert math.isclose(_ratio(0), _ratio(1))
+    dropped, undropped = _p50s(1), _p50s(0)
+    for track in ("lewm", "dino"):
+        assert math.isclose(dropped[track], undropped[track])
 
 
 def test_report_never_rewrites_canonical_results(tmp_path):
@@ -437,79 +346,49 @@ def _component_samples(seed: int, n: int = 40, method: str = "max") -> dict:
     }
 
 
-def test_speed_table_carries_component_intervals_and_stays_parseable(tmp_path):
-    """The component p50s get their interval + independence flag as COLUMNS on the speed table
-    (SPEC §Interface Contracts). Every cell must remain ONE whitespace-delimited token — the
-    artefacts are read with `split()`, so a stray space in an interval would shift every column
-    after it."""
+def test_speed_table_stays_parseable(tmp_path):
+    """Every cell must remain ONE whitespace-delimited token — the artefacts are read with
+    `split()`, so a stray space in an interval would shift every column after it."""
     bench = _synthetic()
-    out = report.report(
-        bench, tmp_path, component_latencies={"lewm": _component_samples(21)}
-    )
+    overrides = {
+        t: {"fp32": {"success_rate": 90.0, "per_cycle_latencies_ms": [10.0 + i for i in range(20)]}}
+        for t in ("lewm", "dino")
+    }
+    out = report.report(bench, tmp_path, sr_overrides=overrides)
     text = Path(out["tables"]["speed_table"]).read_text()
 
     header = [ln for ln in text.splitlines() if ln.split()[:1] == ["track"]][0].split()
-    assert header[8:12] == ["enc_p50", "enc_p50_CI95", "enc_ac", "enc_p95"]
-    assert header[12:16] == ["pred_p50", "pred_p50_CI95", "pred_ac", "pred_p95"]
+    assert header == [
+        "track", "prec", "cyc_p50", "cyc_p50_CI95", "ac", "cyc_p95", "cyc_n", "drop×",
+        "SR", "SR_CI95",
+    ]
 
     rows = [ln.split() for ln in text.splitlines() if ln.split()[:1] in (["lewm"], ["dino"])]
     assert {len(r) for r in rows} == {len(header)}  # fixed token count, every row
     lewm_fp32 = [r for r in rows if r[:2] == ["lewm", "fp32"]][0]
-    assert lewm_fp32[9].startswith("[") and "," in lewm_fp32[9]  # enc interval, unspaced
-    assert lewm_fp32[10] in {"*", "-"}  # independence flag, never empty
-    # dino has no stored samples here -> blank cells, not a crash and not a borrowed interval
-    assert [r for r in rows if r[:2] == ["dino", "fp32"]][0][9] == "—"
+    assert lewm_fp32[3].startswith("[") and "," in lewm_fp32[3]  # p50 interval, unspaced
+    assert lewm_fp32[4] in {"*", "-"}  # independence flag, never empty
+    # fp16 has no stored per-cycle sample here -> blank cells, not a crash
+    assert [r for r in rows if r[:2] == ["lewm", "fp16"]][0][3] == "—"
 
 
-def test_component_intervals_are_selected_by_calibration_method(tmp_path):
-    """A quantized engine is a per-method BUILD, so its step-loop interval is that method's: an
-    `entropy` render must show the entropy samples' interval, and a method whose engines were never
-    timed must render `—` rather than the other method's number (SPEC §Parity)."""
-    samples = {
-        "lewm": {
-            "fp32": {"max": _component_samples(51)["fp32"]["max"]},  # invariant -> read at either
-            "int8": {"entropy": _component_samples(52)["fp32"]["max"]},  # entropy-only build
-        }
-    }
-
-    def _cells(method):
-        bench = _synthetic()
-        bench["lewm"]["int8"] = _bench(50.0, 50.0, 0.5, 0.12, 76.0)
-        out = report.report(bench, tmp_path / method, method=method, component_latencies=samples)
-        text = Path(out["tables"]["speed_table"]).read_text()
-        return {
-            tuple(r.split()[:2]): r.split()[9]
-            for r in text.splitlines()
-            if r.split()[:1] == ["lewm"]
-        }
-
-    at_entropy, at_max = _cells("entropy"), _cells("max")
-    assert at_entropy[("lewm", "int8")].startswith("[")  # its own method's interval
-    assert at_max[("lewm", "int8")] == "—"  # never borrowed from entropy
-    assert at_max[("lewm", "fp32")] == at_entropy[("lewm", "fp32")]  # one build, one interval
-
-
-def test_component_intervals_do_not_touch_the_derived_tables(tmp_path):
-    """The component surface adds columns to the speed table and nothing else: the ratio,
-    FP32-relative, component and dilution tables are mean-/difference-based and carry no interval
-    by ruling (architecture.md §12). Rendering with and without the samples must leave them
-    byte-identical."""
+def test_component_samples_do_not_touch_the_speed_surface(tmp_path):
+    """The component samples feed the MEAN latency table and nothing else: the speed table and the
+    speed-vs-SR figure are per-cycle/SR surfaces, so rendering with and without the stored engine
+    steps must leave them byte-identical."""
     without = report.report(_synthetic(), tmp_path / "a")
     with_ = report.report(
         _synthetic(), tmp_path / "b", component_latencies={"lewm": _component_samples(22)}
     )
 
-    for key in ("fp32_relative_table", "component_table", "dilution_table"):
-        assert (
-            Path(without["tables"][key]).read_bytes() == Path(with_["tables"][key]).read_bytes()
-        ), f"{key} changed when component intervals were added"
-    assert without["ratios"] == with_["ratios"]
-    # …and the plots: error bars come from the SR/per-cycle surface only, so a component-only
-    # payload must not touch a pixel.
-    for key in ("speed_vs_sr", "per_cycle_ratio", "component_breakdown"):
-        assert (
-            Path(without["plots"][key]).read_bytes() == Path(with_["plots"][key]).read_bytes()
-        ), f"{key}.png changed when component intervals were added"
+    assert (
+        Path(without["tables"]["speed_table"]).read_bytes()
+        == Path(with_["tables"]["speed_table"]).read_bytes()
+    )
+    assert (
+        Path(without["plots"]["speed_vs_sr"]).read_bytes()
+        == Path(with_["plots"]["speed_vs_sr"]).read_bytes()
+    )
 
 
 # --- mean latencies + overhead, with bootstrap intervals ---------------------------------
@@ -558,11 +437,11 @@ def _mean_render(out_dir, method="max", seed=31):
     return out, bench
 
 
-def test_latency_means_table_matches_decompose(tmp_path):
-    """The anti-drift guard: the mean table quantifies the decomposition the study already reports,
-    it does not introduce a second set of numbers. Its three per-cycle points must equal
-    `decompose`'s `model_cyc_ms`/`cycle_ms`/`overhead_ms`, and the two per-call components must equal
-    the engine-step means that decomposition is weighted from (SPEC §Interface Contracts)."""
+def test_latency_means_decompose_the_measured_cycle(tmp_path):
+    """The anti-drift guard on the decomposition itself: the two per-call components are the
+    engine-step means as timed, the composite is those weighted by the CEM call counts, and the
+    residual is what is left of the MEASURED cycle after subtracting it (SPEC §Interface
+    Contracts). `cycle` must be the mean of the same truncated sample the p50 is read off."""
     import json
 
     out, bench = _mean_render(tmp_path)  # `report` finalizes `bench` in place
@@ -571,19 +450,19 @@ def test_latency_means_table_matches_decompose(tmp_path):
     for track in ("lewm", "dino"):
         for prec in ("fp32", "fp16"):
             e = payload["points_means"][track][prec]["max"]
-            d = report.decompose(bench[track][prec])
-            assert e["enc_mean_ms"] * ENCODER_CALLS_PER_CYCLE == d["enc_cyc_ms"]
-            assert e["pred_mean_ms"] * PREDICTOR_CALLS_PER_CYCLE == d["pred_cyc_ms"]
-            assert e["t_comp_mean_ms"] == d["model_cyc_ms"]
-            assert e["cycle_mean_ms"] == d["cycle_ms"]
-            assert e["overhead_mean_ms"] == d["overhead_ms"]
+            assert e["t_comp_mean_ms"] == (
+                ENCODER_CALLS_PER_CYCLE * e["enc_mean_ms"]
+                + PREDICTOR_CALLS_PER_CYCLE * e["pred_mean_ms"]
+            )
+            assert e["cycle_mean_ms"] == bench[track][prec]["per_cycle_mean_ms"]
+            assert e["overhead_mean_ms"] == e["cycle_mean_ms"] - e["t_comp_mean_ms"]
 
 
 def test_latency_means_table_is_parseable_and_carries_its_markers(tmp_path):
     """Each of the five VALUE cells is ONE whitespace-delimited token — point, interval and (for the
     three quantities that ARE a sample) its independence marker together — so the artefact stays
     `split()`-parseable off the last five fields. `t_comp`/`ovh` end in a bracket: a flag describes a
-    sample, and they are functions of two and three (architecture.md §12). The config column is the
+    sample, and they are functions of two and three (architecture.md §9). The config column is the
     one that may split (`INT8 (max)`), which is why the values are read from the END."""
     import json
 
@@ -608,7 +487,7 @@ def test_latency_means_table_is_parseable_and_carries_its_markers(tmp_path):
 
 def test_latency_means_table_is_unscoped_and_identical_across_methods(tmp_path):
     """The config column names the method, so ONE file spans both and either render writes the same
-    bytes — like `calibration_table.txt`, and unlike the four method-scoped tables (SPEC §Parity)."""
+    bytes — unlike the method-scoped speed and isolation tables (SPEC §Parity)."""
     at_max, _ = _mean_render(tmp_path / "max", method="max")
     at_entropy, _ = _mean_render(tmp_path / "entropy", method="entropy")
 
@@ -619,58 +498,25 @@ def test_latency_means_table_is_unscoped_and_identical_across_methods(tmp_path):
     )
 
 
-def test_component_analysis_figures_are_one_per_mean_quantity(tmp_path):
-    """Five figures — one per column of the mean table — in their OWN subdirectory, so the figure
-    set is additive and no existing plot name can collide with it (SPEC §Uncertainty
-    quantification)."""
+def test_render_writes_exactly_the_reported_artifacts(tmp_path):
+    """The reported surface is closed: ONE figure and three tables (the speed table, the isolation
+    table where isolation runs exist, and the method-unscoped mean latency table) plus the
+    stats.json they read their intervals from. Nothing else is written, and there is no
+    subdirectory of further figures."""
     out, _ = _mean_render(tmp_path)
 
-    sub = tmp_path / "component_analysis"
-    stems = {stem for stem, _, _ in report._MEAN_QUANTITIES}
-    assert stems == {"enc_call_ms", "pred_call_ms", "t_comp_ms", "cycle_ms", "ovh_ms"}
-    assert {p.name for p in sub.glob("*.png")} == {f"{s}.png" for s in stems}
-    for stem in stems:
-        assert Path(out["plots"][f"mean_{stem}"]) == sub / f"{stem}.png"
-        assert (sub / f"{stem}.png").stat().st_size > 0
-    # the top-level plot set is untouched — the new figures live only under the subdirectory
-    assert {p.name for p in tmp_path.glob("*.png")} == {
-        "speed_vs_sr.png", "speed_vs_sr.titled.png", "per_cycle_ratio.png",
-        "component_breakdown_fp32.png",
+    assert {p.name for p in tmp_path.glob("*.png")} == {"speed_vs_sr.png"}
+    assert not [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert set(out["tables"]) == {"speed_table", "latency_means_table"}
+    assert {p.name for p in tmp_path.glob("*.txt")} == {
+        "speed_table.max.txt", "latency_means_table.txt"
     }
-
-
-def test_component_analysis_x_order_is_fixed_and_shared(tmp_path):
-    """FP32 leftmost, FP8 before INT8, `INT8 (entropy)` rightmost — one category list for both
-    panels, so a configuration sits at the same x in each. The labels are the mean table's own,
-    which is what the panel lookup keys on."""
-    import json
-
-    out, _ = _mean_render(tmp_path)
-    payload = json.loads(Path(out["stats"]).read_text())
-    points = payload["points_means"]
-
-    labels = report._mean_configs()
-    assert labels == ["FP32", "FP16", "FP8 (max)", "FP8 (entropy)", "INT8 (max)", "INT8 (entropy)"]
-    for track in ("lewm", "dino"):
-        panel = report._mean_panel(points, track)
-        assert set(panel) <= set(labels)
-        assert {"FP32", "FP16", "INT8 (max)", "INT8 (entropy)"} == set(panel)
-
-
-def test_component_analysis_is_unscoped_across_methods(tmp_path):
-    """Like `latency_means_table.txt`: the x labels name the method, so either render writes the
-    same five figures rather than clobbering the other method's."""
-    at_max, _ = _mean_render(tmp_path / "max", method="max")
-    at_entropy, _ = _mean_render(tmp_path / "entropy", method="entropy")
-
-    names = {k for k in at_max["plots"] if k.startswith("mean_")}
-    assert names == {f"mean_{stem}" for stem, _, _ in report._MEAN_QUANTITIES}
-    assert names == {k for k in at_entropy["plots"] if k.startswith("mean_")}
+    assert Path(out["stats"]).name == "stats.json"
 
 
 def test_mean_table_does_not_touch_the_other_artifacts(tmp_path):
-    """The mean surface is additive: it adds a file and changes none. The four method-scoped tables
-    and every plot must be byte-identical with and without the component samples that unlock it."""
+    """The mean surface is additive: it adds a file and changes none. The speed table and the
+    figure must be byte-identical with and without the component samples that unlock it."""
     import numpy as np
 
     rng = np.random.default_rng(41)
@@ -687,10 +533,14 @@ def test_mean_table_does_not_touch_the_other_artifacts(tmp_path):
 
     assert "latency_means_table" not in without["tables"]
     assert "latency_means_table" in with_["tables"]
-    for key in ("fp32_relative_table", "component_table", "dilution_table"):
-        assert Path(without["tables"][key]).read_bytes() == Path(with_["tables"][key]).read_bytes()
-    for key in ("speed_vs_sr", "per_cycle_ratio", "component_breakdown"):
-        assert Path(without["plots"][key]).read_bytes() == Path(with_["plots"][key]).read_bytes()
+    assert (
+        Path(without["tables"]["speed_table"]).read_bytes()
+        == Path(with_["tables"]["speed_table"]).read_bytes()
+    )
+    assert (
+        Path(without["plots"]["speed_vs_sr"]).read_bytes()
+        == Path(with_["plots"]["speed_vs_sr"]).read_bytes()
+    )
 
 
 def test_nan_sr_is_skipped_not_crashed(tmp_path):
@@ -698,16 +548,6 @@ def test_nan_sr_is_skipped_not_crashed(tmp_path):
     bench["lewm"]["fp32"]["success_rate"] = math.nan
     out = report.report(bench, tmp_path)  # must not raise
     assert Path(out["plots"]["speed_vs_sr"]).exists()
-
-
-def test_single_track_render_skips_ratio_plot(tmp_path):
-    bench = _synthetic()
-    del bench["dino"]
-    out = report.report(bench, tmp_path)
-    assert out["ratios"] == {}
-    assert "per_cycle_ratio" not in out["plots"]
-    assert not (tmp_path / "per_cycle_ratio.png").exists()
-    assert Path(out["tables"]["speed_table"]).exists()
 
 
 def test_load_results_merges_per_track(tmp_path):
@@ -723,45 +563,13 @@ def test_load_results_merges_per_track(tmp_path):
 
     b = report.load_results(report._resolve_result_paths(tmp_path))
     assert set(b) == {"lewm", "dino"}
-    assert report.per_cycle_ratio(b, "fp32", "p95") == 20.0
-
-
-def test_calibration_table_shows_both_methods(tmp_path):
-    """architecture.md §7: the ONE table spanning methods. int8/fp8 only (fp32/fp16 are
-    method-invariant), PEND where a method was never built, and a `headline` column naming which
-    method the single-method tables were rendered at."""
-    overrides = {
-        "lewm": {
-            "fp32": {"max": {"success_rate": 98.0}},  # method-invariant -> excluded
-            "int8": {"max": {"success_rate": 76.0}},  # entropy not yet built -> PEND
-        },
-        "dino": {"int8": {"max": {"success_rate": 20.0}, "entropy": {"success_rate": 16.0}}},
-    }
-    text = report.render_calibration_table(overrides, headline_method="entropy")
-    assert "SR@max" in text and "SR@entropy" in text
-    # method-invariant precisions get no ROW here (a max-vs-entropy comparison of them is vacuous)
-    assert not [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "fp32"]]
-    lewm = [ln for ln in text.splitlines() if ln.split()[:2] == ["lewm", "int8"]][0]
-    assert "76.0" in lewm and "PEND" in lewm
-    dino = [ln for ln in text.splitlines() if ln.split()[:2] == ["dino", "int8"]][0]
-    assert "20.0" in dino and "16.0" in dino and "-4.0" in dino  # Δ(entropy − max)
-    assert dino.split()[-1] == "entropy"  # headline marker
-
-    bench = {"lewm": {"int8": _bench(40.0, 40.0, 0.4, 0.1, math.nan)}}
-    out = report.report(bench, tmp_path, sr_overrides=overrides, method="max")
-    assert Path(out["tables"]["calibration_table"]).name == "calibration_table.txt"
-
-
-def test_calibration_table_absent_without_quantized_sr(tmp_path):
-    """No quantized SR -> no artefact, rather than an empty one."""
-    assert report.render_calibration_table(None) == ""
-    out = report.report(_synthetic(), tmp_path)
-    assert "calibration_table" not in out["tables"]
+    assert b["dino"]["fp32"]["per_cycle_p95_ms"] == 2000.0
 
 
 def test_isolation_table_attributes_component(tmp_path):
-    """architecture.md §9: the mixed-precision diagnostic attributes a measured SR drop to encoder or
-    predictor. ΔSR is quoted vs the track's FP16 row (the held component's precision), NOT FP32."""
+    """architecture.md §8: the mixed-precision diagnostic attributes a measured SR drop to encoder
+    or predictor. Each row is read against that track's FP16 row on the speed table — the precision
+    the held component is running at, NOT FP32."""
     bench = {
         "dino": {
             "fp16": _bench(600.0, 1200.0, 6.0, 3.0, 70.0),
@@ -775,18 +583,17 @@ def test_isolation_table_attributes_component(tmp_path):
         }
     }
     text = report.render_isolation_table(bench, overrides, method="entropy")
-    enc = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "int8", "encoder"]][0]
-    pred = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "int8", "predictor"]][0]
-    assert "16.0" in enc and "-54.0" in enc  # 16 − 70, vs FP16 not FP32
-    assert "42.0" in pred and "-28.0" in pred
-    # cyc_share = that component's per-cycle time × calls ÷ the joined cycle, at that precision
-    assert enc.split()[-1] == format(4.0 * 2 / 400.0, ".3f")
-    assert pred.split()[-1] == format(2.0 * 150 / 400.0, ".3f")
+    # One row per diagnostic run, naming the precision EACH component ran at — the quantized side
+    # and the FP16-held side — so which component the SR belongs to is read off the row itself.
+    enc = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "int8", "fp16"]][0]
+    pred = [ln for ln in text.splitlines() if ln.split()[:3] == ["dino", "fp16", "int8"]][0]
+    assert enc.split()[3] == "16.0"
+    assert pred.split()[3] == "42.0"
 
 
 def test_isolation_keys_never_reach_the_headline(tmp_path):
     """The composite keys are diagnostics: they must leave every headline artefact byte-identical
-    (architecture.md §9 — a mixed pairing is never a fifth precision)."""
+    (architecture.md §8 — a mixed pairing is never a fifth precision)."""
     overrides = {"dino": {"fp16": {"entropy": {"success_rate": 70.0}}}}
     with_iso = {
         "dino": {**overrides["dino"], "enc-fp16+pred-int8": {"entropy": {"success_rate": 42.0}}}
@@ -803,12 +610,3 @@ def test_isolation_keys_never_reach_the_headline(tmp_path):
     assert "isolation_table" in isolated and "isolation_table" not in plain
     for key in plain:
         assert plain[key] == isolated[key], f"{key} changed when isolation keys were present"
-
-
-def test_negative_overhead_surfaced_not_clamped(capsys):
-    """A cycle smaller than the enc+pred model time means the weighting/timing is off; the
-    report must surface it loudly (SPEC §Interface Contracts), not clamp it to 0."""
-    bench = {"lewm": {"fp32": _bench(10.0, 10.0, 1.0, 0.25, 90.0)}}  # cycle 10 < model 47
-    d = report.decompose(bench["lewm"]["fp32"])
-    assert d["overhead_ms"] < 0
-    assert "negative overhead" in capsys.readouterr().out

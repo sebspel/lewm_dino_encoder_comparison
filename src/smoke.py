@@ -1,6 +1,6 @@
 """Tracer bullet — the sole pre-optimization integration check.
 
-Flows a dummy checkpoint through the owned layer end-to-end on random weights:
+Flows a dummy checkpoint through the owned code end-to-end on random weights:
     dummy model -> adapter.encode -> adapter.predict (on the cached latent)
                 -> export stub (encoder + predictor engines) -> benchmark stub
 asserting the typed latent shapes at every owned boundary for both tracks. Run on CPU
@@ -143,7 +143,6 @@ def _run_track(
         "predict_p50_ms",
         "predict_p95_ms",
         "predict_mean_ms",
-        "peak_mem_mb",
         "success_rate",
     }
     print(f"[{name}] encode {tuple(latent.shape)} -> predict {tuple(nxt.shape)}; "

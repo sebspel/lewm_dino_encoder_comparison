@@ -43,7 +43,7 @@ number with NO error): 512 clips; strided evenly across all episodes; the predic
 512, sample count allowed to grow — coverage is the point of the fix). This module owns only the
 calibration *streams* (format- AND method-independent); the calibration *method* is applied
 downstream in `export.quantize_onnx` and is a BUILD OPTION for both tracks (`max` | `entropy`,
-`src.export calibration_method=…`, architecture.md §7). The remaining Model-Optimizer quant knobs
+`src.export calibration_method=…`, architecture.md §6). The remaining Model-Optimizer quant knobs
 (Q/DQ format, per-channel-vs-per-tensor, op-type exclusions) stay at the tool's INT8 defaults
 pending owner confirmation at the pod precision-match gate.
 

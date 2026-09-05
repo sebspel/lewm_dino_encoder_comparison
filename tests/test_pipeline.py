@@ -67,7 +67,7 @@ def test_isolation_holds_one_component_at_fp16_per_run():
     per_method = 2 * len(QUANTIZED_PRECISIONS) * len(pipeline._TRACKS)
     assert len(labels) == per_method * len(CALIBRATION_METHODS) == 16
     # Both methods, in full: a composite key never falls back across methods, so an isolation row
-    # only explains a headline row rendered at the SAME method (docs/architecture.md §9).
+    # only explains a headline row rendered at the SAME method (docs/architecture.md §8).
     for method in CALIBRATION_METHODS:
         assert sum(f"calibration_method={method}" in x for x in labels) == per_method
     for label in labels:
@@ -91,10 +91,10 @@ def test_benchmark_times_each_methods_engines_in_its_own_process():
     assert all("track=" in x and "sr=" in x for x in labels)
 
 
-def test_report_and_clock_norm_render_once_per_method():
+def test_report_and_telemetry_render_once_per_method():
     assert len(_labels("report")) == len(CALIBRATION_METHODS)
-    assert len(_labels("clock_norm")) == len(CALIBRATION_METHODS)
-    # Both tracks in one render, so the cross-track ratio plots exist.
+    assert len(_labels("gpu_telemetry")) == len(CALIBRATION_METHODS)
+    # Both tracks in one render, so a render covers the whole study rather than half of it.
     assert all("track=" not in x for x in _labels("report"))
 
 
@@ -107,9 +107,10 @@ def test_every_child_carries_the_resolved_out_dir():
         assert str(OUT) in step.label, step.label
 
 
-def test_out_dir_defaults_to_the_shared_network_storage_default():
+def test_out_dir_defaults_to_the_shared_network_storage_default(monkeypatch, tmp_path):
     from src.study import default_out_dir
 
+    monkeypatch.setenv("STABLEWM_HOME", str(tmp_path))
     steps = pipeline.build_steps()
     stats = next(s for s in steps if s.stage == "stats")
     assert f"from={default_out_dir()}" in stats.label
@@ -194,15 +195,15 @@ def test_archive_is_a_noop_on_a_first_run(tmp_path):
     assert pipeline.archive(tmp_path / "nothing-here") is None
 
 
-def test_figs_refresh_skips_absent_plots_but_fails_when_none_exist(tmp_path):
+def test_figs_refresh_copies_the_display_figure_and_fails_when_it_is_absent(tmp_path):
     out, repo = tmp_path / "phase5", tmp_path / "repo"
     (out / "gpu_logs").mkdir(parents=True)
     with pytest.raises(SystemExit):
         pipeline.refresh_figs(out, repo)
 
     (out / "speed_vs_sr.png").write_bytes(b"png")
+    # The telemetry diagnostic stays on the volume beside its logs — never a committed figure.
     (out / "gpu_logs" / "sr_eval_clock_diag.png").write_bytes(b"diag")
     copied = pipeline.refresh_figs(out, repo)
-    # A single-track render has no cross-track ratio plot; that is a partial run, not a failure.
-    assert {p.name for p in copied} == {"speed_vs_sr.png", "sr_eval_clock_diag.png"}
+    assert {p.name for p in copied} == {"speed_vs_sr.png"}
     assert (repo / "reports" / "figs" / "speed_vs_sr.png").read_bytes() == b"png"
